@@ -12,11 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("//bazel:build_settings.bzl", "bool_flag")
 load("//bazel:defs.bzl", "cc_library")
 load("//bazel:cargo.bzl", "cargo_library", "cxxbridge_tool")
 load("//bazel:cxx.bzl", "config_generate", "cxx_bridge", "cxx_generate")
 
 package(default_visibility = ["//visibility:private"])
+
+bool_flag(
+    name = "enable_parser_mvp",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "parser_mvp_enabled",
+    flag_values = {":enable_parser_mvp": "true"},
+    visibility = ["//visibility:public"],
+)
+cxx_bridge(name = "parser_mvp", src = "parser-mvp/src/bridge.rs")
 
 exports_files(["rust-toolchain.toml"], visibility = ["//deps/external:__pkg__"])
 exports_files(["Cargo.lock"], visibility = ["//src/observer:__pkg__"])
@@ -83,10 +96,14 @@ filegroup(
 cargo_library(
     name = "archive",
     srcs = glob(
-        ["**/*.rs", "**/*.py", "**/*.toml", "*.lock"],
+        ["**/*.rs", "**/*.py", "**/*.toml", "**/*.pest", "*.lock"],
         exclude = ["target/**", "config/generate.py"],
         allow_empty = True,
     ),
+    cargo_features = select({
+        ":parser_mvp_enabled": ["seekdb-rust/parser-mvp"],
+        "//conditions:default": [],
+    }),
     config_rs = "config/generated_config.rs",
     platform_inputs = select({
         "@platforms//os:emscripten": ["//bazel:wasm_rust_build_tools"],
@@ -101,6 +118,9 @@ cc_library(
         "@platforms//os:windows": [],
         "@platforms//os:emscripten": [],
         "//conditions:default": [":in_process_bridge"],
+    }) + select({
+        ":parser_mvp_enabled": [":parser_mvp_bridge"],
+        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
 )

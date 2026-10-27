@@ -834,6 +834,12 @@ void ObParser::get_single_sql(const common::ObString &stmt, int64_t offset, int6
     in_string = sq_flag || bt_flag || dq_flag;
   }
 }
+#ifdef ENABLE_PARSER_MVP
+namespace oceanbase::sql {
+int parse_mvp_select(const ObString &sql, ParseResult &result);
+}
+#endif
+
 int ObParser::parse_sql(const ObString &stmt,
                         ParseResult &parse_result,
                         const bool no_throw_parser_error)
@@ -1002,6 +1008,11 @@ int ObParser::parse_(const ObString &query,
     LOG_DEBUG("check parse_result param",
               "connection charset", ObCharset::charset_name(charsets4parser_.string_collation_));
   }
+#ifdef ENABLE_PARSER_MVP
+  if (OB_SUCC(ret) && parse_mode == STD_MODE && stmt.prefix_match("/*parser_mvp*/")) {
+    return parse_mvp_select(stmt, parse_result);
+  }
+#endif
   if (OB_SUCC(ret)) {
     bool is_create_func = false;
     bool is_call_procedure = false;

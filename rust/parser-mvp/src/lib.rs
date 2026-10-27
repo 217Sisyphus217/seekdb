@@ -1,4 +1,6 @@
 pub mod ast;
+#[cfg(feature = "server")]
+mod bridge;
 
 use ast::*;
 use pest::iterators::Pair;
@@ -24,13 +26,17 @@ impl Parser {
     }
 
     pub fn parse(&self, sql: &str) -> Result<Select, String> {
+        Ok(select(self.query(sql)?))
+    }
+
+    fn query<'a>(&'a self, sql: &'a str) -> Result<Part<'a>, String> {
         let query = self
             .vm
             .parse("query", sql)
             .map_err(|e| e.to_string())?
             .next()
             .unwrap();
-        Ok(select(children(query).next().unwrap()))
+        Ok(children(query).next().unwrap())
     }
 
     pub fn parse_expression(&self, sql: &str) -> Result<Expr, String> {

@@ -4,10 +4,15 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# An isolated experiment; it is not linked into the database.
+# Standalone CLI; the optional server feature exposes the integration experiment.
 [workspace]
 
+[features]
+server = ["dep:cxx", "dep:stacker"]
+
 [dependencies]
+cxx = { version = "=1.0.202", optional = true }
+stacker = { version = "=0.1.25", optional = true }
 pest = "=2.9.5"
 pest_meta = "=2.9.5"
 pest_vm = "=2.9.5"

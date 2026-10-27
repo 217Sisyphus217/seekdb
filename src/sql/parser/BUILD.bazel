@@ -1,3 +1,4 @@
+load("//bazel:compile_config.bzl", "RELEASE_LOCAL_DEFINES")
 load("//bazel:parser.bzl", "parser", "parser_type_names")
 load(
     "//bazel:defs.bzl",
@@ -190,7 +191,14 @@ cc_library(
     name = "_server_parser_cxx",
     srcs = [
         sql_parser_driver_unity,
-    ] + _PARSER_CXX_STANDALONE_SOURCES,
+    ] + _PARSER_CXX_STANDALONE_SOURCES + select({
+        "//rust:parser_mvp_enabled": ["parser_mvp.cpp"],
+        "//conditions:default": [],
+    }),
+    local_defines = RELEASE_LOCAL_DEFINES + select({
+        "//rust:parser_mvp_enabled": ["ENABLE_PARSER_MVP"],
+        "//conditions:default": [],
+    }),
     implementation_deps = [
         ":_sql_parser_driver_unity_members",
         ":parser_internal_headers",
@@ -205,7 +213,10 @@ cc_library(
         "//src/oblib:oblib_concurrency_primitives",
         "//src/oblib:oblib_foundation",
         "//src/oblib:oblib_memory_primitives",
-    ],
+    ] + select({
+        "//rust:parser_mvp_enabled": ["//rust:parser_mvp_headers"],
+        "//conditions:default": [],
+    }),
     copts = CXX_COPTS,
     tags = ["manual"],
 )
