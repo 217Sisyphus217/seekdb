@@ -87,6 +87,16 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Intersect: return T_SET_INTERSECT;
     case Kind::Except: return T_SET_EXCEPT;
     case Kind::Explain: return T_EXPLAIN;
+    case Kind::ExplainBasic: return T_BASIC;
+    case Kind::ExplainOutline: return T_OUTLINE;
+    case Kind::ExplainExtended: return T_EXTENDED;
+    case Kind::ExplainExtendedNoAddr: return T_EXTENDED_NOADDR;
+    case Kind::ExplainPartitions: return T_PARTITIONS;
+    case Kind::ExplainPlanRegress: return T_PLANREGRESS;
+    case Kind::ExplainTraditional: return T_TRADITIONAL;
+    case Kind::ExplainJson: return T_FORMAT_JSON;
+    case Kind::ExplainPretty: return T_PRETTY;
+    case Kind::ExplainPrettyColor: return T_PRETTY_COLOR;
     case Kind::HashAggregate: return T_USE_HASH_AGGREGATE;
     case Kind::NoHashAggregate: return T_NO_USE_HASH_AGGREGATE;
     case Kind::Parallel: return T_PARALLEL;
@@ -201,6 +211,16 @@ ObItemType node_type(const peg::Node &node)
     case Kind::IfExists: return T_IF_EXISTS;
     case Kind::IfNotExists: return T_IF_NOT_EXISTS;
     case Kind::CreateTable: return T_CREATE_TABLE;
+    case Kind::CreateView: return T_CREATE_VIEW;
+    case Kind::GroupConcat: return T_FUN_GROUP_CONCAT;
+    case Kind::Separator: return T_SEPARATOR_CLAUSE;
+    case Kind::GatherStatistics: return T_GATHER_OPTIMIZER_STATISTICS;
+    case Kind::NoGatherStatistics: return T_NO_GATHER_OPTIMIZER_STATISTICS;
+    case Kind::DropView: return T_DROP_VIEW;
+    case Kind::ViewList: return T_VIEW_LIST;
+    case Kind::ShowCreateView: return T_SHOW_CREATE_VIEW;
+    case Kind::CreateTableLike: return T_CREATE_TABLE_LIKE;
+    case Kind::Charset: return T_CHARSET;
     case Kind::DropTable: return T_DROP_TABLE;
     case Kind::TruncateTable: return T_TRUNCATE_TABLE;
     case Kind::RenameTables: return T_RENAME_TABLE;
@@ -493,27 +513,29 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   node->value_ = 0;
   const auto &args = source.children;
-  const int32_t precision = args.empty() ? 0 : std::min<uint64_t>(args[0].value, INT32_MAX);
+  const bool has_charset = !args.empty() && args[args.size() - 1].kind == Kind::Charset;
+  const size_t size = args.size() - has_charset;
+  const int32_t precision = (size == 0) ? 0 : std::min<uint64_t>(args[0].value, INT32_MAX);
   const int16_t short_precision = std::min<int32_t>(precision, INT16_MAX);
-  const int16_t scale = args.size() < 2 ? 0 : std::min<uint64_t>(args[1].value, INT16_MAX);
+  const int16_t scale = size < 2 ? 0 : std::min<uint64_t>(args[1].value, INT16_MAX);
   if (cast) {
     node->int16_values_[OB_NODE_CAST_TYPE_IDX] = type;
-    node->param_num_ = args.size();
+    node->param_num_ = size;
     if (type == T_CHAR || type == T_VARCHAR) {
       node->int16_values_[OB_NODE_CAST_COLL_IDX] = binary ? 63 : 0;
-      node->int32_values_[OB_NODE_CAST_C_LEN_IDX] = args.empty() ? -1 : precision;
+      node->int32_values_[OB_NODE_CAST_C_LEN_IDX] = size == 0 ? -1 : precision;
     } else if (type == T_FLOAT || type == T_DOUBLE || type == T_NUMBER) {
-      node->int16_values_[OB_NODE_CAST_N_PREC_IDX] = args.empty()
+      node->int16_values_[OB_NODE_CAST_N_PREC_IDX] = size == 0
           ? (type == T_NUMBER ? 10 : type == T_FLOAT ? 0 : -1) : short_precision;
       node->int16_values_[OB_NODE_CAST_N_SCALE_IDX] = type == T_NUMBER ? scale : -1;
     } else if (type == T_DATETIME || type == T_DATE || type == T_TIME || type == T_YEAR) {
       node->int16_values_[OB_NODE_CAST_N_SCALE_IDX] = short_precision;
     }
   } else if (string) {
-    node->int32_values_[0] = args.empty() && type == T_CHAR ? 1 : precision;
+    node->int32_values_[0] = size == 0 && type == T_CHAR ? 1 : precision;
     node->int32_values_[1] = binary;
   } else if (integer) {
-    node->int16_values_[0] = args.empty() ? -1 : short_precision;
+    node->int16_values_[0] = size == 0 ? -1 : short_precision;
     if (name == "bool" || name == "boolean") {
       node->int16_values_[0] = 1;
       node->int16_values_[1] = name == "bool" ? 1 : 2;
@@ -521,12 +543,21 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   } else if (type == T_DATETIME || type == T_TIMESTAMP || type == T_TIME) {
     node->int16_values_[1] = short_precision;
   } else if (name == "decimal" || name == "float" || name == "double") {
-    node->int16_values_[0] = args.empty() ? (name == "decimal" ? 10 : -1) : short_precision;
-    node->int16_values_[1] = name != "decimal" && args.size() < 2 ? -1 : scale;
+    node->int16_values_[0] = size == 0 ? (name == "decimal" ? 10 : -1) : short_precision;
+    node->int16_values_[1] = name != "decimal" && size < 2 ? -1 : scale;
   }
   if (!cast && !string) {
     node->int16_values_[2] = (source.value & 2) != 0;
     node->int16_values_[3] = (source.value & 1) != 0;
+  }
+  if (has_charset) {
+    const auto &charset = args[size];
+    ParseNode *charset_node = new_node(pool, T_CHARSET, 0);
+    if (charset_node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    charset_node->str_value_ = parse_strndup(charset.text.data(), charset.text.size(), pool);
+    if (charset_node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    charset_node->str_len_ = charset.text.size();
+    node->children_[0] = charset_node;
   }
   node->sql_str_off_ = source.start;
   return common::OB_SUCCESS;
@@ -565,6 +596,13 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
     options->children_[0] = node->children_[PARSE_SELECT_DISTINCT];
     node->children_[PARSE_SELECT_DISTINCT] = options;
   }
+  if (type == T_COLUMN_DEFINITION && node->children_[1]->num_child_ >= 2 && node->children_[2] != nullptr) {
+    ParseNode *attributes = node->children_[2];
+    for (int i = 0; i < attributes->num_child_; ++i) {
+      if (attributes->children_[i]->type_ == T_COLLATION) node->children_[1]->children_[1] = attributes->children_[i];
+    }
+  }
+  if (type == T_CREATE_VIEW) node->reserved_ = source.value;
   if (type != T_FUN_SYS) node->value_ = type == T_SELECT ? parameters : source.value;
   node->sql_str_off_ = source.start;
   node->raw_sql_offset_ = source.start;
@@ -587,7 +625,7 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
   }
   const char *text = source.text.data();
   size_t length = source.text.size();
-  if (type == T_PROJECT_STRING || type == T_COLUMN_REF || type == T_OP_POS || type == T_OP_NEG
+  if (type == T_SELECT || type == T_PROJECT_STRING || type == T_COLUMN_REF || type == T_OP_POS || type == T_OP_NEG
       || source.kind == Kind::Binary || source.kind == Kind::Between || source.kind == Kind::In
       || source.kind == Kind::Is || source.kind == Kind::Window || source.kind == Kind::PlSql
       || source.kind == Kind::RoutineParameters || source.kind == Kind::PlDefault
