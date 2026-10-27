@@ -152,6 +152,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Number: return T_NUMBER;
     case Kind::Double: return T_DOUBLE;
     case Kind::String: return T_VARCHAR;
+    case Kind::StringColumnName: return T_CONCAT_STRING;
     case Kind::CharsetLiteral: return T_VARCHAR;
     case Kind::CharsetName: return T_CHAR_CHARSET;
     case Kind::ConvertTableCharset: return T_CONVERT_TO_CHARACTER;
@@ -177,7 +178,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Between: return node.value ? T_OP_NOT_BTW : T_OP_BTW;
     case Kind::In: return node.value ? T_OP_NOT_IN : T_OP_IN;
     case Kind::Is: return node.value ? T_OP_IS_NOT : T_OP_IS;
-    case Kind::Function: return T_FUN_SYS;
+    case Kind::Function:
+    case Kind::StringConcat: return T_FUN_SYS;
     case Kind::Cast: return T_FUN_SYS;
     case Kind::If: return T_FUN_SYS_IF;
     case Kind::IsNull: return T_FUN_SYS_ISNULL;
@@ -765,6 +767,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     }
   }
   if (type == T_CREATE_VIEW) node->reserved_ = source.value;
+  if (source.kind == Kind::StringConcat) node->children_[0]->reserved_ = 1;
   if ((type == T_COLUMN_DEFINITION && node->num_child_ == 7) || (type == T_CHECK_CONSTRAINT && node->num_child_ == 3)) {
     const size_t slot = type == T_COLUMN_DEFINITION ? 3 : 1;
     const auto &expression = source.children[slot];
@@ -881,8 +884,11 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     node->str_len_ = value.end - value.start;
   }
   if (type == T_PROJECT_STRING && node->children_[0]->type_ == T_VARCHAR) {
-    node->str_value_ = node->children_[0]->str_value_;
-    node->str_len_ = node->children_[0]->str_len_;
+    const ParseNode *literal = node->children_[0];
+    if (literal->num_child_ == 2 && literal->children_[1]->type_ == T_VARCHAR) literal = literal->children_[1];
+    if (literal->num_child_ == 1 && literal->children_[0]->type_ == T_CONCAT_STRING) literal = literal->children_[0];
+    node->str_value_ = literal->str_value_;
+    node->str_len_ = literal->str_len_;
   }
   if (type == T_OP_NEG && node->children_[0]->type_ == T_UINT64) {
     ParseNode *child = node->children_[0];

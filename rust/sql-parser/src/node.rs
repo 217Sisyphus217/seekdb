@@ -620,6 +620,7 @@ impl Node {
                 (start, end)
             };
             alias.kind = Kind::Ident;
+            alias.children.clear();
             value = Self::new(
                 if string {
                     Kind::StringAlias

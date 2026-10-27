@@ -109,6 +109,8 @@ pub(crate) mod ffi {
         Number,
         Double,
         String,
+        StringColumnName,
+        StringConcat,
         CharsetLiteral,
         CharsetName,
         ConvertTableCharset,

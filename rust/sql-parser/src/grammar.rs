@@ -220,13 +220,26 @@ peg::parser! {
             = start:position!() text:$((['0'..='9']+ ("." ['0'..='9']*)? / "." ['0'..='9']+)
                 (['e' | 'E'] ['+' | '-']? ['0'..='9']+)?) !cont() end:position!() _
                 {? Node::number(text, start, end) }
-        rule string() -> Node
-            = start:position!() text:$("'" ("''" / enabled(!mode.no_backslash_escapes) "\\" [_]
-                / !("'" / enabled(!mode.no_backslash_escapes) "\\") [_])* "'") end:position!() _
-                {? Node::new(Kind::String, vec![]).text(decode(text, mode.no_backslash_escapes)).expression(start, end) }
-            / enabled(!mode.ansi_quotes) start:position!() text:$("\"" ("\"\"" / enabled(!mode.no_backslash_escapes) "\\" [_]
-                / !("\"" / enabled(!mode.no_backslash_escapes) "\\") [_])* "\"") end:position!() _
-                {? Node::new(Kind::String, vec![]).text(decode(text, mode.no_backslash_escapes)).expression(start, end) }
+        rule string_segment(quote: rule<()>) -> &'input str
+            = text:$(quote() (quote() quote() / enabled(!mode.no_backslash_escapes) "\\" [_]
+                / !(quote() / enabled(!mode.no_backslash_escapes) "\\") [_])* quote()) { text }
+        rule string_gap() = [' '|'\t'|'\n'|'\r'|'\x0c']+ / "--" ['\n'|'\r']
+        rule string_token(quote: rule<()>) -> Node
+            = start:position!() parts:(string_segment(&quote) ++ string_gap()) end:position!() _ {?
+                let mut text=decode(parts[0],mode.no_backslash_escapes);
+                let children=if parts.len()>1 { vec![Node::new(Kind::StringColumnName,vec![]).text(text.clone())] } else { vec![] };
+                for part in &parts[1..] { text.push_str(&decode(part,mode.no_backslash_escapes)); }
+                Node::new(Kind::String,children).text(text).expression(start,end)
+            }
+        rule string() -> Node = string_token(<"'">) / enabled(!mode.ansi_quotes) value:string_token(<"\"">) { value }
+        rule string_expression() -> Node = first:string() rest:string()* {?
+            if rest.is_empty() { Ok(first) }
+            else {
+                let (start,end)=(first.start,rest.last().unwrap().end);
+                let mut args=vec![first];args.extend(rest);
+                Node::new(Kind::StringConcat,vec![Node::new(Kind::Ident,vec![]).text("concat".into()),Node::new(Kind::ExprList,args)]).expression(start,end)
+            }
+        }
         rule bool_null() -> Node
             = start:position!() kw("null") {? Node::new(Kind::Null, vec![]).expression(start, start+4) }
             / start:position!() kw("true") {? Node::new(Kind::Bool, vec![]).value(1).expression(start, start+4) }
@@ -314,7 +327,7 @@ peg::parser! {
                     let value=Node::new(Kind::GroupConcat,vec![Node::optional(modifier),Node::new(Kind::ExprList,arguments),Node::order_clause(order.unwrap_or_default()),Node::optional(separator)]);
                     match window { Some(window) => Node::new(Kind::WindowFunction,vec![value,window]),None => value }.expression(start,end)
                 }
-            / charset_literal() / temporal_literal() / binary_literal() / number() / string() / bool_null() / parameter()
+            / charset_literal() / temporal_literal() / binary_literal() / number() / string_expression() / bool_null() / parameter()
             / depth(level) start:position!() !(['x'|'X'] "'" hex_digit()* "'") parts:expression_name() tail:("." _ "*" end:position!() _ { (None, end) }
                 / enabled(parts.len()!=1 || parts[0].quoted || !["row","trim","position","weight_string"].iter().any(|name| parts[0].text.eq_ignore_ascii_case(name)))
                     "(" _ distinct:kw("distinct")? args:expr_list(level+1)? ")" close:position!() _
