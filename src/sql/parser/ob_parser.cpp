@@ -836,8 +836,8 @@ void ObParser::get_single_sql(const common::ObString &stmt, int64_t offset, int6
 }
 #ifdef ENABLE_RUST_PARSER
 namespace oceanbase::sql {
-bool is_rust_select(const ObString &sql);
-int parse_rust_select(const ObString &sql, ParseResult &result);
+bool is_rust_sql(const ObString &sql);
+int parse_rust_sql(const ObString &sql, ParseResult &result);
 }
 #endif
 
@@ -1011,8 +1011,8 @@ int ObParser::parse_(const ObString &query,
   }
 #ifdef ENABLE_RUST_PARSER
   if (OB_SUCC(ret) && (parse_mode == STD_MODE || parse_mode == DYNAMIC_SQL_MODE)
-      && is_rust_select(stmt)) {
-    return parse_rust_select(stmt, parse_result);
+      && is_rust_sql(stmt)) {
+    return parse_rust_sql(stmt, parse_result);
   }
 #endif
   if (OB_SUCC(ret)) {

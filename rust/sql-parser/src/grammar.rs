@@ -16,10 +16,62 @@ use crate::{node::*, SqlMode};
 
 fn reserved(word: &str) -> bool {
     [
-        "select", "distinct", "as", "from", "where", "group", "by", "having", "order", "limit",
-        "offset", "asc", "desc", "join", "inner", "left", "right", "outer", "cross", "on", "using",
-        "or", "xor", "and", "not", "between", "in", "like", "is", "null", "true", "false",
-        "exists", "div", "mod", "union",
+        "select",
+        "distinct",
+        "as",
+        "from",
+        "where",
+        "group",
+        "by",
+        "having",
+        "order",
+        "limit",
+        "offset",
+        "asc",
+        "desc",
+        "join",
+        "inner",
+        "left",
+        "right",
+        "outer",
+        "cross",
+        "on",
+        "using",
+        "or",
+        "xor",
+        "and",
+        "not",
+        "between",
+        "in",
+        "like",
+        "is",
+        "null",
+        "true",
+        "false",
+        "exists",
+        "div",
+        "mod",
+        "union",
+        "insert",
+        "replace",
+        "update",
+        "delete",
+        "set",
+        "into",
+        "values",
+        "default",
+        "create",
+        "drop",
+        "table",
+        "database",
+        "schema",
+        "primary",
+        "key",
+        "unique",
+        "constraint",
+        "references",
+        "commit",
+        "rollback",
     ]
     .iter()
     .any(|keyword| word.eq_ignore_ascii_case(keyword))
@@ -71,6 +123,7 @@ peg::parser! {
         rule space() = [' ' | '\t' | '\r' | '\n' | '\x0b' | '\x0c']
         rule _() = quiet!{(space() / "/*" !['!' | '+'] (!"*/" [_])* "*/"
             / ("--" &(space() / ![_]) / "#") (!"\n" [_])*)*}
+        rule marker() = ("/*+parser_mvp*/" _)?
         rule cont() = ['a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '$' | '\u{80}'..='\u{10ffff}']
         rule kw(word: &'static str) -> ()
             = text:$([_] *<{word.len()}>) !cont() _ {? if text.eq_ignore_ascii_case(word) { Ok(()) } else { Err(word) } }
@@ -85,6 +138,12 @@ peg::parser! {
             / start:position!() text:$(['a'..='z' | 'A'..='Z' | '_' | '$' | '\u{80}'..='\u{10ffff}'] cont()*) end:position!() _
                 {? if reserved(text) { Err("identifier") } else { Ok(Name { text: text.to_owned(), quoted: false, start, end }) } }
         rule name() -> Vec<Name> = parts:(ident() ++ ("." _)) { parts }
+        rule expression_name() -> Vec<Name>
+            = name()
+            / start:position!() name:(kw("database") { "database" } / kw("schema") { "schema" }
+                / kw("replace") { "replace" } / kw("insert") { "insert" } / kw("values") { "values" }
+                / kw("left") { "left" } / kw("right") { "right" } / kw("mod") { "mod" }) &"("
+                { vec![Name { text: name.into(), quoted: false, start, end: start + name.len() }] }
         rule alias() -> Name = kw("as")? value:ident() { value }
         rule number() -> Node
             = start:position!() text:$((['0'..='9']+ ("." ['0'..='9']*)? / "." ['0'..='9']+)
@@ -112,7 +171,7 @@ peg::parser! {
                 {? Node::new(Kind::Exists, vec![query]).expression(start, end) }
             / start:position!() "*" end:position!() _ {? Node::new(Kind::Star, vec![]).expression(start, end) }
             / number() / string() / bool_null() / parameter()
-            / depth(level) start:position!() parts:name() tail:("." _ "*" end:position!() _ { (None, end) }
+            / depth(level) start:position!() parts:expression_name() tail:("." _ "*" end:position!() _ { (None, end) }
                 / "(" _ distinct:kw("distinct")? args:expr_list(level+1)? ")" end:position!() _
                     { (Some((distinct.is_some(), args.unwrap_or_default())), end) })?
                 {? match tail {
@@ -191,13 +250,109 @@ peg::parser! {
                 None => Node::new(Kind::Limit, vec![first, Node::missing()]),
             }
         }
-        rule select(level: usize) -> Node = depth(level) kw("select") ("/*+parser_mvp*/" _)? distinct:kw("distinct")? projection:(item(level) ++ ("," _))
+        rule select(level: usize) -> Node = depth(level) kw("select") marker() distinct:kw("distinct")? projection:(item(level) ++ ("," _))
             from:(kw("from") tables:(table(level) ++ ("," _)) { tables })?
             filter:(kw("where") value:expr(level) { value })?
             group_by:(kw("group") kw("by") values:expr_list(level) { values })?
             having:(kw("having") value:expr(level) { value })?
             order_by:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })?
             limit:limit()? {? Node::select(Select { distinct: distinct.is_some(), projection, from: from.unwrap_or_default(), filter, group_by: group_by.unwrap_or_default(), having, order_by: order_by.unwrap_or_default(), limit }) }
-        pub rule query() -> Node = _ value:select(0) (";" _)? { value }
+        rule column() -> Node = start:position!() names:name() {? let end = names.last().unwrap().end; Node::column(names, false, start, end) }
+        rule expr_or_default() -> Node = kw("default") { Node::new(Kind::Default, vec![]) } / expr(0)
+        rule assignment() -> Node = column:column() "=" _ value:expr_or_default() { Node::new(Kind::Assignment, vec![column, value]) }
+        rule assignments() -> Vec<Node> = values:(assignment() ++ ("," _)) { values }
+        rule row() -> Node = "(" _ values:(expr_or_default() ** ("," _)) ")" _ {
+            Node::new(Kind::ValueVector, if values.is_empty() { vec![Node::new(Kind::Empty, vec![])] } else { values })
+        }
+        rule insert() -> Node = replace:(kw("insert") { false } / kw("replace") { true }) marker()
+            (kw("low_priority") / kw("high_priority"))? ignore:kw("ignore")? kw("into")? table:name()
+            columns:("(" _ columns:(column() ** ("," _)) ")" _ { columns })?
+            values:((kw("values") / kw("value")) rows:(row() ++ ("," _)) { Node::new(Kind::ValueList, rows) }
+                / kw("set") values:assignments() { Node::new(Kind::AssignList, values) }
+                / select(0))
+            duplicate:(kw("on") kw("duplicate") kw("key") kw("update") values:assignments() { values })? {?
+                if replace && (ignore.is_some() || duplicate.is_some()) { Err("REPLACE does not accept IGNORE or ON DUPLICATE KEY UPDATE") }
+                else if values.kind == Kind::AssignList && columns.is_some() { Err("INSERT SET does not accept a column list") }
+                else {
+                    let table=Node::new(Kind::Table, vec![Node::relation(table)?, Node::missing(), Node::missing()]);
+                    Ok(Node::insert(replace, ignore.is_some(), table, columns.unwrap_or_default(), values, duplicate.unwrap_or_default()))
+                }
+            }
+        rule update() -> Node = kw("update") marker() kw("low_priority")? ignore:kw("ignore")?
+            tables:(table(0) ++ ("," _)) kw("set") values:assignments()
+            filter:(kw("where") value:expr(0) { value })?
+            order:(kw("order") kw("by") values:(order_item(0) ++ ("," _)) { values })?
+            limit:limit()? {
+                Node::new(Kind::Update, vec![Node::missing(), Node::new(Kind::TableReferences, tables),
+                    Node::new(Kind::AssignList, values), Node::where_clause(filter), Node::order_clause(order.unwrap_or_default()),
+                    Node::optional(limit), Node::missing(), Node::missing(),
+                    if ignore.is_some() { Node::new(Kind::Ignore, vec![]) } else { Node::missing() }, Node::missing(), Node::missing()])
+            }
+        rule delete() -> Node = kw("delete") marker() kw("ignore")? (kw("low_priority") / kw("quick"))?
+            kw("from") table:relation(0) filter:(kw("where") value:expr(0) { value })?
+            order:(kw("order") kw("by") values:(order_item(0) ++ ("," _)) { values })? limit:limit()? {
+                Node::new(Kind::Delete, vec![Node::missing(), Node::new(Kind::DeleteTables, vec![Node::missing(),
+                    Node::new(Kind::TableReferences, vec![table])]), Node::where_clause(filter),
+                    Node::order_clause(order.unwrap_or_default()), Node::optional(limit),
+                    Node::missing(), Node::missing(), Node::missing(), Node::missing(), Node::missing()])
+            }
+        rule transaction() -> Node
+            = (kw("begin") marker() kw("work")? / kw("start") marker() kw("transaction")) {
+                Node::new(Kind::Begin, vec![Node::new(Kind::Int, vec![]), Node::missing()])
+            }
+            / kw("commit") marker() kw("work")? { Node::new(Kind::Commit, vec![Node::missing()]) }
+            / kw("rollback") marker() kw("work")? { Node::new(Kind::Rollback, vec![Node::missing()]) }
+        rule if_not_exists() -> Node = kw("if") kw("not") kw("exists") { Node::new(Kind::IfNotExists, vec![]) }
+        rule if_exists() -> Node = kw("if") kw("exists") { Node::new(Kind::IfExists, vec![]) }
+        rule type_name() -> &'static str
+            = kw("tinyint") { "tinyint" } / kw("smallint") { "smallint" } / kw("mediumint") { "mediumint" }
+            / (kw("int") / kw("integer")) { "int" } / kw("bigint") { "bigint" }
+            / kw("float") { "float" } / (kw("double") kw("precision")?) { "double" }
+            / (kw("decimal") / kw("numeric") / kw("number")) { "decimal" }
+            / kw("boolean") { "boolean" } / kw("bool") { "bool" }
+            / kw("varchar") { "varchar" } / (kw("char") / kw("character")) { "char" }
+            / kw("text") { "text" } / kw("blob") { "blob" }
+            / kw("varbinary") { "varbinary" } / kw("binary") { "binary" }
+            / kw("datetime") { "datetime" } / kw("timestamp") { "timestamp" }
+            / kw("time") { "time" } / kw("date") { "date" } / kw("json") { "json" }
+        rule type_size() -> Node = start:position!() text:$(['0'..='9']+) !cont() end:position!() _ {? Node::number(text, start, end) }
+        rule data_type() -> Node = start:position!() name:type_name()
+            parameters:("(" _ values:(type_size() ++ ("," _)) ")" _ { values })?
+            unsigned:kw("unsigned")? zerofill:kw("zerofill")? end:position!() {?
+                Node::data_type(name, parameters.unwrap_or_default(), unsigned.is_some(), zerofill.is_some(), start, end)
+            }
+        rule column_attribute() -> Node
+            = kw("not") kw("null") { Node::new(Kind::NotNull, vec![]) }
+            / kw("null") { Node::new(Kind::Nullable, vec![]) }
+            / kw("primary") kw("key") { Node::new(Kind::ColumnPrimaryKey, vec![]) }
+            / kw("unique") kw("key")? { Node::new(Kind::UniqueKey, vec![]) }
+            / kw("auto_increment") { Node::new(Kind::AutoIncrement, vec![]) }
+            / kw("default") value:expr(0) { Node::new(Kind::ColumnDefault, vec![value]) }
+            / kw("comment") value:string() { Node::new(Kind::ColumnComment, vec![value]) }
+        rule table_element() -> Node
+            = kw("primary") kw("key") "(" _ names:(ident() ++ ("," _)) ")" _ {
+                Node::new(Kind::PrimaryKey, vec![Node::new(Kind::ColumnList, names.into_iter().map(Node::name).collect()), Node::missing(), Node::missing()])
+            }
+            / name:column() data_type:data_type() attributes:column_attribute()* {
+                Node::new(Kind::ColumnDefinition, vec![name, data_type, Node::list(Kind::ColumnAttributes, attributes), Node::missing()])
+            }
+        rule ddl() -> Node
+            = kw("create") marker() (kw("database") / kw("schema")) absent:if_not_exists()? name:ident() {
+                Node::new(Kind::CreateDatabase, vec![Node::optional(absent), Node::name(name), Node::missing()])
+            }
+            / kw("create") marker() kw("table") absent:if_not_exists()? name:name()
+                "(" _ elements:(table_element() ++ ("," _)) ")" _ {?
+                Ok(Node::new(Kind::CreateTable, vec![Node::missing(), Node::optional(absent), Node::relation(name)?,
+                    Node::new(Kind::TableElements, elements), Node::missing(), Node::missing(), Node::missing(), Node::missing()]))
+            }
+            / kw("drop") marker() (kw("database") / kw("schema")) exists:if_exists()? name:ident() {
+                Node::new(Kind::DropDatabase, vec![Node::optional(exists), Node::name(name)])
+            }
+            / kw("drop") marker() (kw("table") / kw("tables")) exists:if_exists()? names:(name() ++ ("," _)) {?
+                let tables=names.into_iter().map(Node::relation).collect::<Result<Vec<_>, _>>()?;
+                Ok(Node::new(Kind::DropTable, vec![Node::missing(), Node::optional(exists), Node::new(Kind::TableList, tables)]))
+            }
+            / kw("use") marker() name:ident() { Node::new(Kind::UseDatabase, vec![Node::name(name)]) }
+        pub rule query() -> Node = _ value:(select(0) / insert() / update() / delete() / transaction() / ddl()) (";" _)? { value }
     }
 }

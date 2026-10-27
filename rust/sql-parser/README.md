@@ -9,7 +9,7 @@
 ./build.py build -j16 --//rust:enable_rust_parser=true seekdb
 ```
 
-在 SELECT 后加 `/*+parser_mvp*/`，完整解析阶段即使用 Rust 解析器。
+在语句首个关键字后加 `/*+parser_mvp*/`，完整解析阶段即使用 Rust 解析器。
 mysql CLI 需要 `--comments` 保留标记。普通查询和内部 SQL 仍使用旧解析器；
 Rust 解析失败直接报错。标记保留在规范化 SQL 中，prepared statement 的 prepare
 和首次生成计划阶段均使用 Rust。实验开关和标记在全量切换时删除。
@@ -26,8 +26,12 @@ COUNT／SUM／MIN／MAX／AVG、IF／ISNULL、时间函数调用、GROUP BY／HA
 IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用现有 C++ 引擎。
 支持 ANSI_QUOTES、NO_BACKSLASH_ESCAPES、PIPES_AS_CONCAT、HIGH_NOT_PRECEDENCE。
 
+已接入多行 INSERT、INSERT SELECT、INSERT SET、REPLACE、冲突更新、UPDATE、DELETE
+和事务提交／回滚；基础建删库表、USE、常用列类型、默认值、自增、列唯一约束和主键。
+这些语句与 SELECT 共用 `ParseTree` 接口。
+
 限定名称的函数调用、其他聚合函数和特殊函数语法、UNION、CTE、窗口函数、
-DDL、写入、hint、版本注释和存储程序尚未迁移。当前不是默认解析器的全量替换。
+其他 DDL、会话设置、hint、版本注释和存储程序尚未迁移。当前不是默认解析器的全量替换。
 
 ## 跨语言接口
 

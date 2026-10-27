@@ -81,6 +81,44 @@ pub(crate) mod ffi {
         ColumnList,
         GroupBy,
         WithRollup,
+        Insert,
+        Replace,
+        SingleTableInsert,
+        InsertInto,
+        ValueList,
+        ValueVector,
+        Empty,
+        Default,
+        Ignore,
+        Assignment,
+        AssignList,
+        TableReferences,
+        Update,
+        Delete,
+        DeleteTables,
+        Begin,
+        Commit,
+        Rollback,
+        UseDatabase,
+        CreateDatabase,
+        DropDatabase,
+        IfExists,
+        IfNotExists,
+        CreateTable,
+        DropTable,
+        TableList,
+        TableElements,
+        ColumnDefinition,
+        ColumnAttributes,
+        NotNull,
+        Nullable,
+        PrimaryKey,
+        ColumnPrimaryKey,
+        UniqueKey,
+        AutoIncrement,
+        ColumnDefault,
+        ColumnComment,
+        DataType,
     }
 
     struct Node {
@@ -93,7 +131,7 @@ pub(crate) mod ffi {
         depth: usize,
     }
 
-    struct SelectTree {
+    struct ParseTree {
         root: Node,
         parameters: usize,
         error: String,
@@ -101,13 +139,13 @@ pub(crate) mod ffi {
     }
 
     extern "Rust" {
-        fn parse_select(
+        fn parse_sql(
             sql: &[u8],
             ansi_quotes: bool,
             no_backslash_escapes: bool,
             pipes_as_concat: bool,
             high_not_precedence: bool,
-        ) -> SelectTree;
+        ) -> ParseTree;
     }
 }
 
@@ -121,14 +159,14 @@ fn number_parameters(node: &mut Node, count: &mut usize) {
     }
 }
 
-fn parse_select(
+fn parse_sql(
     sql: &[u8],
     ansi_quotes: bool,
     no_backslash_escapes: bool,
     pipes_as_concat: bool,
     high_not_precedence: bool,
-) -> ffi::SelectTree {
-    let mut result = ffi::SelectTree {
+) -> ffi::ParseTree {
+    let mut result = ffi::ParseTree {
         root: Node::missing(),
         parameters: 0,
         error: String::new(),

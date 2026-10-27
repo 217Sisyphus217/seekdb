@@ -36,6 +36,107 @@ pub(crate) struct Select {
 }
 
 impl Node {
+    pub fn optional(node: Option<Self>) -> Self {
+        node.unwrap_or_else(Self::missing)
+    }
+
+    pub fn list(kind: Kind, children: Vec<Self>) -> Self {
+        if children.is_empty() {
+            Self::missing()
+        } else {
+            Self::new(kind, children)
+        }
+    }
+
+    pub fn where_clause(value: Option<Self>) -> Self {
+        Self::optional(value.map(|value| Self::new(Kind::Where, vec![value, Self::missing()])))
+    }
+
+    pub fn order_clause(values: Vec<Self>) -> Self {
+        if values.is_empty() {
+            Self::missing()
+        } else {
+            Self::new(Kind::Order, vec![Self::new(Kind::SortList, values)])
+        }
+    }
+
+    pub fn insert(
+        replace: bool,
+        ignore: bool,
+        table: Self,
+        columns: Vec<Self>,
+        values: Self,
+        assignments: Vec<Self>,
+    ) -> Self {
+        let into = Self::new(
+            Kind::InsertInto,
+            vec![table, Self::list(Kind::ColumnList, columns)],
+        );
+        let insert = Self::new(
+            Kind::SingleTableInsert,
+            vec![
+                into,
+                values,
+                Self::list(Kind::AssignList, assignments),
+                Self::missing(),
+            ],
+        );
+        Self::new(
+            Kind::Insert,
+            vec![
+                insert,
+                Self::new(if replace { Kind::Replace } else { Kind::Insert }, vec![]),
+                Self::missing(),
+                if ignore {
+                    Self::new(Kind::Ignore, vec![])
+                } else {
+                    Self::missing()
+                },
+            ],
+        )
+    }
+
+    pub fn data_type(
+        name: &str,
+        parameters: Vec<Self>,
+        unsigned: bool,
+        zerofill: bool,
+        start: usize,
+        end: usize,
+    ) -> Result<Self, &'static str> {
+        let numeric = matches!(
+            name,
+            "tinyint"
+                | "smallint"
+                | "mediumint"
+                | "int"
+                | "bigint"
+                | "float"
+                | "double"
+                | "decimal"
+        );
+        let max_parameters = if matches!(name, "float" | "double" | "decimal") {
+            2
+        } else {
+            1
+        };
+        if parameters.len() > max_parameters
+            || parameters
+                .iter()
+                .any(|parameter| !matches!(parameter.kind, Kind::Int | Kind::Uint))
+            || (name == "double" && parameters.len() == 1)
+            || (matches!(name, "varchar" | "varbinary") && parameters.is_empty())
+            || (matches!(name, "bool" | "boolean" | "date" | "json") && !parameters.is_empty())
+            || (!numeric && (unsigned || zerofill))
+        {
+            return Err("invalid data type parameters");
+        }
+        Ok(Self::new(Kind::DataType, parameters)
+            .text(name.into())
+            .value(u64::from(unsigned) | (u64::from(zerofill) << 1))
+            .at(start, end))
+    }
+
     pub fn new(kind: Kind, children: Vec<Self>) -> Self {
         let depth = children.iter().map(|child| child.depth).max().unwrap_or(0);
         Self {
@@ -158,6 +259,14 @@ impl Node {
         } else {
             String::new()
         };
+        if function == "mod" {
+            if distinct || arguments.len() != 2 {
+                return Err("MOD requires two arguments");
+            }
+            return Self::new(Kind::Binary, arguments)
+                .text("mod".into())
+                .expression(start, end);
+        }
         let kind = match function.as_str() {
             "count" => Kind::Count,
             "sum" => Kind::Sum,
@@ -178,6 +287,8 @@ impl Node {
         };
         if function == "substring" {
             name.text = "substr".into();
+        } else if function == "schema" {
+            name.text = "database".into();
         }
         let timestamp = matches!(
             kind,
