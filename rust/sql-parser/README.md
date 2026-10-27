@@ -32,6 +32,7 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持 UNION／UNION ALL、INTERSECT、EXCEPT／MINUS，以及括号内外各自的排序和 LIMIT。
 支持普通／唯一索引、前缀索引、STORING、LOCAL／GLOBAL、KEY／HASH 分区和基础表选项，
 以及 EXPLAIN、索引回填使用的快照查询、并行 DML 和动态采样 hint。
+支持列和索引的基础 ALTER TABLE 操作、重命名表、TRUNCATE、SHOW INDEX 和 COLLATE 表达式。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
 其他聚合函数和特殊函数语法、CTE、其他窗口函数、其他 DDL、完整 hint 语法、

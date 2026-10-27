@@ -256,10 +256,16 @@ peg::parser! {
                     Some((None, end)) => Node::column(parts, true, start, end),
                     Some((Some((distinct, arguments, window)), end)) => Node::call(parts, distinct, arguments, window, start, end),
                 } }
+        rule collated(level: usize) -> Node = value:atom(level) collations:(kw("collate") value:collation_name() { Node { kind:Kind::Collation,..value } })* {?
+            collations.into_iter().try_fold(value,|value,collation| {
+                let (start,end)=(value.start,collation.end);
+                Node::new(Kind::SetCollation,vec![Node::new(Kind::Ident,vec![]).text("set_collation".into()),Node::new(Kind::ExprList,vec![value,collation])]).expression(start,end)
+            })
+        }
         rule unary(level: usize) -> Node
             = ops:(start:position!() op:$(['+' | '-' | '!' | '~']) _ { (start, op) }
                 / enabled(mode.high_not_precedence) start:position!() kw("not") { (start, "not") }
-                / start:position!() kw("binary") { (start, "binary") })* value:atom(level)
+                / start:position!() kw("binary") { (start, "binary") })* value:collated(level)
                 {? ops.into_iter().rev().try_fold(value, |value, (start, op)| {
                     Node::unary(op, value, start)
                 }) }
@@ -598,12 +604,16 @@ peg::parser! {
                 Node::new(Kind::PrimaryKey, vec![Node::new(Kind::ColumnList, names.into_iter().map(Node::name).collect()), Node::optional(method_end.or(method)), Node::optional(comment)])
             }
             / index_definition()
-            / name:column() data_type:data_type() attributes:column_attribute()* {
-                Node::new(Kind::ColumnDefinition, vec![name, data_type, Node::list(Kind::ColumnAttributes, attributes), Node::missing()])
+            / column_definition()
+        rule column_definition() -> Node = name:column() data_type:data_type() attributes:column_attribute()* position:column_position()? {
+                Node::new(Kind::ColumnDefinition, vec![name, data_type, Node::list(Kind::ColumnAttributes, attributes), Node::optional(position)])
             }
+        rule column_position() -> Node
+            = kw("first") { Node::new(Kind::ColumnFirst,vec![]) }
+            / kind:(kw("before") { Kind::ColumnBefore } / kw("after") { Kind::ColumnAfter }) name:ident() { Node::new(kind,vec![Node::name(name)]) }
         rule table_option() -> Node
             = kw("default")? (kw("charset") / kw("character") kw("set")) ("=" _)? value:charset_name() { Node::new(Kind::TableCharset,vec![value]) }
-            / kw("default")? kw("collate") ("=" _)? value:charset_name() { Node { kind:Kind::TableCollation,..value } }
+            / kw("default")? kw("collate") ("=" _)? value:collation_name() { Node { kind:Kind::Collation,..value } }
             / kind:(kw("compression") { Kind::Compression } / kw("comment") { Kind::ColumnComment }) ("=" _)? value:string() { Node::new(kind,vec![value]) }
             / kind:(kw("auto_increment") { Kind::TableAutoIncrement } / kw("block_size") { Kind::BlockSize }) ("=" _)? value:type_size() { Node::new(kind,vec![value]) }
         rule index_method() -> Node = kw("using") value:(kw("btree") { Node::missing() } / kw("hash") { Node::new(Kind::UsingHash,vec![]) }) { value }
@@ -633,6 +643,33 @@ peg::parser! {
                 let partition=Node::new(if key { Kind::KeyPartition } else { Kind::HashPartition },vec![function,Node::optional(count),Node::missing(),Node::missing(),Node::missing(),Node::missing()]).at(start,end);
                 Node::new(Kind::PartitionOption,vec![partition])
             }
+        rule rename_table() -> Node = from:name() kw("to") to:name() {?
+            Ok(Node::new(Kind::RenameTableAction,vec![Node::relation(from)?,Node::relation(to)?]))
+        }
+        rule alter_column() -> Node
+            = kw("add") kw("column")? values:("(" _ values:(column_definition() ++ ("," _)) ")" _ { values }
+                / value:column_definition() { vec![value] }) { Node::new(Kind::ColumnAdd,values) }
+            / kw("drop") kw("column")? name:column() behavior:(kw("cascade") { 2 } / kw("restrict") { 1 })? { Node::new(Kind::ColumnDrop,vec![name]).value(behavior.unwrap_or(0)) }
+            / kw("modify") kw("column")? value:column_definition() { Node::new(Kind::ColumnModify,vec![value]) }
+            / kw("change") kw("column")? name:column() value:column_definition() { Node::new(Kind::ColumnChange,vec![name,value]) }
+            / kw("rename") kw("column") from:column() kw("to") to:ident() { Node::new(Kind::ColumnRename,vec![from,Node::name(to)]) }
+            / kw("alter") kw("column")? name:column() value:(kw("set") kw("default") value:expr(0) { Node::new(Kind::ColumnDefault,vec![value]) }
+                / kw("drop") kw("default") { Node::new(Kind::Nullable,vec![]) }) { Node::new(Kind::ColumnAlter,vec![name,value]) }
+        rule alter_index() -> Node
+            = kw("add") value:index_definition() { Node { kind:Kind::IndexAdd,..value } }
+            / kw("add") kw("primary") kw("key") ident()? "(" _ names:(ident() ++ ("," _)) ")" _ options:index_options() {
+                Node::new(Kind::PrimaryKey,vec![Node::new(Kind::ColumnList,names.into_iter().map(Node::name).collect()),options])
+            }
+            / kw("drop") (kw("index") / kw("key")) name:ident() { Node::new(Kind::IndexDrop,vec![Node::name(name)]) }
+            / kw("drop") kw("primary") kw("key") { Node::new(Kind::PrimaryKeyDrop,vec![]) }
+            / kw("rename") (kw("index") / kw("key")) from:ident() kw("to") to:ident() { Node::new(Kind::IndexRename,vec![Node::name(from),Node::name(to)]) }
+        rule alter_action() -> Node
+            = value:alter_index() { Node::new(Kind::AlterIndexOption,vec![value]) }
+            / value:alter_column() { Node::new(Kind::AlterColumnOption,vec![value]) }
+            / kw("rename") kw("to")? name:name() {? Ok(Node::new(Kind::AlterTableOption,vec![Node::new(Kind::TableRename,vec![Node::relation(name)?])])) }
+            / kw("set")? options:table_option()+ { Node::new(Kind::TableOptions,options) }
+            / kw("algorithm") ("=" _)? (kw("default") / kw("inplace") / kw("copy") / kw("instant")) { Node::missing() }
+            / kw("lock") ("=" _)? (kw("default") / kw("none") / kw("shared") / kw("exclusive")) { Node::missing() }
         rule ddl() -> Node
             = kw("create") (kw("database") / kw("schema")) absent:if_not_exists()? name:ident() {
                 Node::new(Kind::CreateDatabase, vec![Node::optional(absent), Node::name(name), Node::missing()])
@@ -656,13 +693,19 @@ peg::parser! {
                 let tables=names.into_iter().map(Node::relation).collect::<Result<Vec<_>, _>>()?;
                 Ok(Node::new(Kind::DropTable, vec![Node::missing(), Node::optional(exists), Node::new(Kind::TableList, tables)]))
             }
+            / kw("truncate") kw("table")? name:name() {? Ok(Node::new(Kind::TruncateTable,vec![Node::relation(name)?])) }
+            / kw("rename") kw("table") values:(rename_table() ++ ("," _)) { Node::new(Kind::RenameTables,values) }
+            / kw("alter") hints:hints()? kw("table") name:name() actions:(alter_action() ++ ("," _)) {?
+                Ok(Node::new(Kind::AlterTable,vec![Node::relation(name)?,Node::list(Kind::AlterTableActions,actions.into_iter().filter(|value| value.kind!=Kind::Missing).collect()),Node::missing(),Node::list(Kind::Hints,hints.unwrap_or_default())]))
+            }
             / kw("use") name:ident() { Node::new(Kind::UseDatabase, vec![Node::name(name)]) }
         rule setting_value() -> Node
             = start:position!() value:(kw("on") { "ON" } / kw("binary") { "BINARY" }) { Node::new(Kind::String,vec![]).text(value.into()).at(start,start+value.len()) }
             / expr_or_default()
         rule charset_name() -> Node = kw("default") { Node::new(Kind::Default,vec![]) } / string() / name:ident() { Node::name(name) }
+        rule collation_name() -> Node = string() / name:ident() { Node::name(name) }
         rule variable_assignment() -> Node
-            = kw("names") charset:charset_name() collation:(kw("collate") value:charset_name() { value })? {
+            = kw("names") charset:charset_name() collation:(kw("collate") value:collation_name() { value })? {
                 Node::new(Kind::SetNames,vec![charset,Node::optional(collation)])
             }
             / (kw("charset") / kw("character") kw("set")) charset:charset_name() { Node::new(Kind::SetCharset,vec![charset]) }
@@ -690,6 +733,9 @@ peg::parser! {
         }
         rule show_body() -> Node
             = kw("grants") user:(kw("for") value:(kw("current_user") ("(" _ ")" _)? { Node::missing() } / account()) { value })? { Node::new(Kind::ShowGrants,vec![Node::optional(user),Node::missing()]) }
+            / extended:kw("extended")? (kw("index") / kw("indexes") / kw("keys")) (kw("from") / kw("in")) table:name() database:show_database()? filter:(kw("where") value:expr(0) { value })? {?
+                Ok(Node::new(Kind::ShowIndexes,vec![Node::relation(table)?,Node::optional(database),Node::where_clause(filter),Node::new(Kind::HiddenInt,vec![]).value(u64::from(extended.is_some()))]))
+            }
             / (kw("databases") / kw("schemas")) condition:show_condition()? { Node::new(Kind::ShowDatabases,vec![Node::optional(condition),Node::missing()]) }
             / full:kw("full")? kw("tables") database:show_database()? condition:show_condition()? {
                 Node::new(Kind::ShowTables,vec![Node::optional(database),Node::optional(condition),Node::new(Kind::Int,vec![]).value(u64::from(full.is_some()))])
