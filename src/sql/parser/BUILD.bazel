@@ -192,11 +192,11 @@ cc_library(
     srcs = [
         sql_parser_driver_unity,
     ] + _PARSER_CXX_STANDALONE_SOURCES + select({
-        "//rust:parser_mvp_enabled": ["parser_mvp.cpp"],
+        "//rust:rust_parser_enabled": ["rust_sql_parser.cpp"],
         "//conditions:default": [],
     }),
     local_defines = RELEASE_LOCAL_DEFINES + select({
-        "//rust:parser_mvp_enabled": ["ENABLE_PARSER_MVP"],
+        "//rust:rust_parser_enabled": ["ENABLE_RUST_PARSER"],
         "//conditions:default": [],
     }),
     implementation_deps = [
@@ -214,7 +214,7 @@ cc_library(
         "//src/oblib:oblib_foundation",
         "//src/oblib:oblib_memory_primitives",
     ] + select({
-        "//rust:parser_mvp_enabled": ["//rust:parser_mvp_headers"],
+        "//rust:rust_parser_enabled": ["//rust:sql_parser_headers"],
         "//conditions:default": [],
     }),
     copts = CXX_COPTS,

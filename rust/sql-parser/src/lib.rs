@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod ast;
-#[cfg(feature = "server")]
 mod bridge;
 mod grammar;
 

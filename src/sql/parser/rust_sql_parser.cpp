@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #define USING_LOG_PREFIX SQL_PARSER
-#include "rust/parser_mvp.h"
+#include "rust/sql_parser.h"
 #include "sql/parser/parse_node.h"
 #include "sql/parser/parse_malloc.h"
 #include "lib/string/ob_string.h"
@@ -98,6 +98,31 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Between: return node.value ? T_OP_NOT_BTW : T_OP_BTW;
     case Kind::In: return node.value ? T_OP_NOT_IN : T_OP_IN;
     case Kind::Is: return node.value ? T_OP_IS_NOT : T_OP_IS;
+    case Kind::Function: return T_FUN_SYS;
+    case Kind::If: return T_FUN_SYS_IF;
+    case Kind::IsNull: return T_FUN_SYS_ISNULL;
+    case Kind::CurrentTimestamp: return T_FUN_SYS_CUR_TIMESTAMP;
+    case Kind::CurrentTime: return T_FUN_SYS_CUR_TIME;
+    case Kind::CurrentDate: return T_FUN_SYS_CUR_DATE;
+    case Kind::UtcTimestamp: return T_FUN_SYS_UTC_TIMESTAMP;
+    case Kind::UtcTime: return T_FUN_SYS_UTC_TIME;
+    case Kind::UtcDate: return T_FUN_SYS_UTC_DATE;
+    case Kind::Sysdate: return T_FUN_SYS_SYSDATE;
+    case Kind::CurrentUser: return T_FUN_SYS_CURRENT_USER;
+    case Kind::Count: return T_FUN_COUNT;
+    case Kind::Sum: return T_FUN_SUM;
+    case Kind::Min: return T_FUN_MIN;
+    case Kind::Max: return T_FUN_MAX;
+    case Kind::Avg: return T_FUN_AVG;
+    case Kind::All: return T_ALL;
+    case Kind::Exists: return T_OP_EXISTS;
+    case Kind::JoinedTable: return T_JOINED_TABLE;
+    case Kind::InnerJoin: return T_JOIN_INNER;
+    case Kind::LeftJoin: return T_JOIN_LEFT;
+    case Kind::RightJoin: return T_JOIN_RIGHT;
+    case Kind::ColumnList: return T_COLUMN_LIST;
+    case Kind::GroupBy: return T_GROUPBY_CLAUSE;
+    case Kind::WithRollup: return T_WITH_ROLLUP_CLAUSE;
     default: return T_INVALID;
   }
 }
@@ -123,7 +148,8 @@ int build_tree(const common::ObString &sql, const peg::SelectTree &tree, ParseRe
     nodes[i] = node;
     if (type == T_SELECT) {
       const int slots[] = {PARSE_SELECT_DISTINCT, PARSE_SELECT_SELECT, PARSE_SELECT_FROM,
-                           PARSE_SELECT_WHERE, PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT};
+                           PARSE_SELECT_WHERE, PARSE_SELECT_DYNAMIC_GROUP, PARSE_SELECT_DYNAMIC_HAVING,
+                           PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT};
       for (size_t child = 0; child < source.children.size(); ++child) {
         node->children_[slots[child]] = nodes[source.children[child]];
       }
@@ -214,7 +240,7 @@ int build_tree(const common::ObString &sql, const peg::SelectTree &tree, ParseRe
 }
 }
 
-bool is_mvp_select(const common::ObString &sql)
+bool is_rust_select(const common::ObString &sql)
 {
   int64_t offset = 0;
   while (offset < sql.length() && std::isspace(static_cast<unsigned char>(sql.ptr()[offset]))) ++offset;
@@ -224,7 +250,7 @@ bool is_mvp_select(const common::ObString &sql)
   return common::ObString(sql.length() - offset, sql.ptr() + offset).prefix_match("/*+parser_mvp*/");
 }
 
-int parse_mvp_select(const common::ObString &sql, ParseResult &result)
+int parse_rust_select(const common::ObString &sql, ParseResult &result)
 {
   static thread_local char error[MAX_ERROR_MSG];
   error[0] = '\0';

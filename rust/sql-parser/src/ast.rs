@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::Serialize;
-
 pub(crate) const MAX_DEPTH: usize = 128;
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct Select {
     pub distinct: bool,
     pub projection: Vec<SelectItem>,
@@ -28,54 +26,60 @@ pub struct Select {
     pub limit: Option<Limit>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct SelectItem {
     pub expression: Expr,
     pub alias: Option<Name>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct Table {
     pub relation: Relation,
     pub joins: Vec<Join>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct Relation {
     pub source: TableSource,
     pub alias: Option<Name>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, PartialEq)]
 pub enum TableSource {
     Named { name: Vec<Name> },
     Derived { query: Box<Select> },
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq)]
+pub enum JoinKind {
+    Inner,
+    Left,
+    Right,
+    Cross,
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Join {
-    pub kind: String,
+    pub kind: JoinKind,
     pub relation: Relation,
     pub condition: Option<Expr>,
     pub using: Vec<Name>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct OrderItem {
     pub expression: Expr,
     pub descending: bool,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct Limit {
     pub count: Expr,
     pub offset: Option<Expr>,
     pub comma: bool,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, PartialEq)]
 pub enum ExprKind {
     Parenthesized {
         value: Box<Expr>,
@@ -136,18 +140,17 @@ pub enum ExprKind {
     },
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct Name {
     pub text: String,
+    pub quoted: bool,
     pub start: usize,
     pub end: usize,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct Expr {
-    #[serde(skip)]
     depth: usize,
-    #[serde(flatten)]
     pub kind: ExprKind,
     pub start: usize,
     pub end: usize,
@@ -190,7 +193,7 @@ impl Expr {
 }
 
 impl Select {
-    fn depth(&self) -> usize {
+    pub(crate) fn depth(&self) -> usize {
         self.projection
             .iter()
             .map(|item| item.expression.depth)
@@ -198,25 +201,20 @@ impl Select {
             .chain(self.group_by.iter().map(|value| value.depth))
             .chain(self.having.iter().map(|value| value.depth))
             .chain(self.order_by.iter().map(|item| item.expression.depth))
-            .chain(
-                self.from
+            .chain(self.from.iter().map(|table| {
+                let relation_depth = |relation: &Relation| match &relation.source {
+                    TableSource::Named { .. } => 0,
+                    TableSource::Derived { query } => query.depth(),
+                };
+                table
+                    .joins
                     .iter()
-                    .flat_map(|table| &table.joins)
-                    .filter_map(|join| join.condition.as_ref())
-                    .map(|value| value.depth),
-            )
-            .chain(
-                self.from
-                    .iter()
-                    .flat_map(|table| {
-                        std::iter::once(&table.relation)
-                            .chain(table.joins.iter().map(|join| &join.relation))
+                    .fold(relation_depth(&table.relation), |left, join| {
+                        left.max(relation_depth(&join.relation))
+                            .max(join.condition.as_ref().map(|expr| expr.depth).unwrap_or(0))
+                            + 1
                     })
-                    .map(|relation| match &relation.source {
-                        TableSource::Named { .. } => 0,
-                        TableSource::Derived { query } => query.depth(),
-                    }),
-            )
+            }))
             .max()
             .unwrap_or(0)
             + 1

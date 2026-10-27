@@ -10,7 +10,7 @@ crate-type = ["staticlib"]
 [features]
 default = ["native-network"]
 native-network = ["sql-nio/native-network"]
-parser-mvp = ["dep:parser-mvp"]
+sql-parser = ["dep:sql-parser"]
 
 [dependencies]
 sql-nio = { path = "../sql-nio", default-features = false }
@@ -18,4 +18,4 @@ logger = { path = "../logger" }
 config = { path = "../config" }
 local = { path = "../local" }
 in-process = { path = "../in-process" }
-parser-mvp = { path = "../parser-mvp", optional = true, features = ["server"] }
+sql-parser = { path = "../sql-parser", optional = true }

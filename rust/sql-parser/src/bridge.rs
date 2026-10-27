@@ -52,6 +52,31 @@ mod ffi {
         Between,
         In,
         Is,
+        Function,
+        If,
+        IsNull,
+        CurrentTimestamp,
+        CurrentTime,
+        CurrentDate,
+        UtcTimestamp,
+        UtcTime,
+        UtcDate,
+        Sysdate,
+        CurrentUser,
+        Count,
+        Sum,
+        Min,
+        Max,
+        Avg,
+        All,
+        Exists,
+        JoinedTable,
+        InnerJoin,
+        LeftJoin,
+        RightJoin,
+        ColumnList,
+        GroupBy,
+        WithRollup,
     }
 
     struct Node {
@@ -205,16 +230,21 @@ impl Encoder {
             ExprKind::In {
                 value: subject,
                 values,
-                query: None,
+                query,
                 negated,
             } => {
                 value = u64::from(negated);
                 children.push(self.expression(*subject)?);
-                let list = values
-                    .into_iter()
-                    .map(|item| self.expression(item))
-                    .collect::<Result<Vec<_>, _>>()?;
-                children.push(self.branch(Kind::ExprList, list));
+                let right = if let Some(query) = query {
+                    self.select(*query)?
+                } else {
+                    let list = values
+                        .into_iter()
+                        .map(|item| self.expression(item))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.branch(Kind::ExprList, list)
+                };
+                children.push(right);
                 Kind::In
             }
             ExprKind::Is {
@@ -227,15 +257,168 @@ impl Encoder {
                 children.push(self.expression(*test)?);
                 Kind::Is
             }
-            _ => return Err("this SELECT expression is not integrated yet".into()),
+            ExprKind::Call {
+                name,
+                distinct,
+                arguments,
+            } => {
+                return self.call(name, distinct, arguments, start, end);
+            }
+            ExprKind::Subquery { query } => {
+                let id = self.select(*query)?;
+                self.nodes[id].start = start;
+                self.nodes[id].end = end;
+                return Ok(id);
+            }
+            ExprKind::Exists { query } => {
+                children.push(self.select(*query)?);
+                Kind::Exists
+            }
         };
         Ok(self.push(kind, children, text, start, end, value))
     }
 
-    fn select(&mut self, query: Select) -> Result<(), String> {
-        if !query.group_by.is_empty() || query.having.is_some() {
-            return Err("GROUP BY and HAVING are not integrated yet".into());
+    fn call(
+        &mut self,
+        mut name: Vec<Name>,
+        distinct: bool,
+        arguments: Vec<Expr>,
+        start: usize,
+        end: usize,
+    ) -> Result<usize, String> {
+        if name.len() != 1 {
+            return Err("qualified function calls are not integrated yet".into());
         }
+        let mut name = name.pop().unwrap();
+        let function = if !name.quoted {
+            name.text.to_ascii_lowercase()
+        } else {
+            String::new()
+        };
+        let kind = match function.as_str() {
+            "count" => Kind::Count,
+            "sum" => Kind::Sum,
+            "min" => Kind::Min,
+            "max" => Kind::Max,
+            "avg" => Kind::Avg,
+            "if" => Kind::If,
+            "isnull" => Kind::IsNull,
+            "now" | "current_timestamp" | "localtime" | "localtimestamp" => Kind::CurrentTimestamp,
+            "curtime" | "current_time" => Kind::CurrentTime,
+            "curdate" | "current_date" => Kind::CurrentDate,
+            "utc_timestamp" => Kind::UtcTimestamp,
+            "utc_time" => Kind::UtcTime,
+            "utc_date" => Kind::UtcDate,
+            "sysdate" => Kind::Sysdate,
+            "current_user" => Kind::CurrentUser,
+            _ => Kind::Function,
+        };
+        if function == "substring" {
+            name.text = "substr".into();
+        }
+        let timestamp = matches!(
+            kind,
+            Kind::CurrentTimestamp
+                | Kind::CurrentTime
+                | Kind::UtcTimestamp
+                | Kind::UtcTime
+                | Kind::Sysdate
+        );
+        let no_arguments = matches!(kind, Kind::CurrentDate | Kind::UtcDate | Kind::CurrentUser);
+        if (kind == Kind::If && arguments.len() != 3)
+            || (kind == Kind::IsNull && arguments.len() != 1)
+            || (no_arguments && !arguments.is_empty())
+        {
+            return Err("invalid function argument count".into());
+        }
+        if timestamp && (arguments.len() > 1 || arguments.first().is_some_and(|arg| {
+            !matches!(&arg.kind, ExprKind::Number { text }
+                if text.bytes().all(|b| b.is_ascii_digit()) && text.parse::<u8>().is_ok_and(|n| n <= 6))
+        })) {
+            return Err("time precision must be an integer from 0 to 6".into());
+        }
+        let aggregate = matches!(
+            kind,
+            Kind::Count | Kind::Sum | Kind::Min | Kind::Max | Kind::Avg
+        );
+        let star = arguments
+            .iter()
+            .any(|arg| matches!(arg.kind, ExprKind::Wildcard { .. }));
+        let count_star = kind == Kind::Count
+            && !distinct
+            && arguments.len() == 1
+            && matches!(&arguments[0].kind, ExprKind::Wildcard { qualifier } if qualifier.is_empty());
+        if star && !count_star {
+            return Err("only COUNT(*) accepts a wildcard argument".into());
+        }
+        if !aggregate && distinct {
+            return Err("DISTINCT requires an aggregate function".into());
+        }
+        if aggregate
+            && !count_star
+            && (arguments.is_empty()
+                || (!(kind == Kind::Count && distinct) && arguments.len() != 1))
+        {
+            return Err("invalid aggregate argument count".into());
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|arg| self.expression(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        let children = if timestamp || no_arguments {
+            vec![arguments.first().copied().unwrap_or(0)]
+        } else if !aggregate {
+            let name = self.name(name);
+            if arguments.is_empty() {
+                vec![name]
+            } else {
+                let args = self.branch(Kind::ExprList, arguments);
+                vec![name, args]
+            }
+        } else if count_star {
+            arguments
+        } else {
+            let modifier = self.branch(if distinct { Kind::Distinct } else { Kind::All }, vec![]);
+            let args = if kind == Kind::Count && distinct {
+                self.branch(Kind::ExprList, arguments)
+            } else {
+                arguments[0]
+            };
+            vec![modifier, args]
+        };
+        Ok(self.push(kind, children, String::new(), start, end, 0))
+    }
+
+    fn relation(&mut self, relation: Relation) -> Result<usize, String> {
+        let (source, derived) = match relation.source {
+            TableSource::Named { name } => {
+                if name.len() > 2 {
+                    return Err("table names have at most two parts".into());
+                }
+                let text = name.last().unwrap().text.clone();
+                let mut names = vec![0; 2 - name.len()];
+                names.extend(name.into_iter().map(|name| self.name(name)));
+                (self.push(Kind::Relation, names, text, 0, 0, 0), false)
+            }
+            TableSource::Derived { query } => (self.select(*query)?, true),
+        };
+        if let Some(alias) = relation.alias {
+            let text = alias.text.clone();
+            let name = self.name(alias);
+            let children = if derived {
+                vec![source, name]
+            } else {
+                vec![source, name, 0, 0, 0]
+            };
+            Ok(self.push(Kind::Alias, children, text, 0, 0, 0))
+        } else if derived {
+            Err("a derived table requires an alias".into())
+        } else {
+            Ok(self.branch(Kind::Table, vec![source, 0, 0, 0]))
+        }
+    }
+
+    fn select(&mut self, query: Select) -> Result<usize, String> {
         let distinct = if query.distinct {
             self.branch(Kind::Distinct, vec![])
         } else {
@@ -272,26 +455,28 @@ impl Encoder {
         let projection = self.branch(Kind::ProjectList, projection);
         let mut tables = Vec::new();
         for table in query.from {
-            if !table.joins.is_empty() {
-                return Err("JOIN is not integrated yet".into());
+            let mut left = self.relation(table.relation)?;
+            for join in table.joins {
+                let right = self.relation(join.relation)?;
+                let condition = if let Some(condition) = join.condition {
+                    self.expression(condition)?
+                } else if !join.using.is_empty() {
+                    let names = join.using.into_iter().map(|name| self.name(name)).collect();
+                    self.branch(Kind::ColumnList, names)
+                } else {
+                    0
+                };
+                let kind = self.branch(
+                    match join.kind {
+                        JoinKind::Left => Kind::LeftJoin,
+                        JoinKind::Right => Kind::RightJoin,
+                        JoinKind::Inner | JoinKind::Cross => Kind::InnerJoin,
+                    },
+                    vec![],
+                );
+                left = self.branch(Kind::JoinedTable, vec![kind, left, right, condition, 0]);
             }
-            let TableSource::Named { name } = table.relation.source else {
-                return Err("derived tables are not integrated yet".into());
-            };
-            if name.len() > 2 {
-                return Err("table names have at most two parts".into());
-            }
-            let text = name.last().unwrap().text.clone();
-            let mut names = vec![0; 2 - name.len()];
-            names.extend(name.into_iter().map(|name| self.name(name)));
-            let relation = self.push(Kind::Relation, names, text, 0, 0, 0);
-            if let Some(alias) = table.relation.alias {
-                let text = alias.text.clone();
-                let name = self.name(alias);
-                tables.push(self.push(Kind::Alias, vec![relation, name, 0, 0, 0], text, 0, 0, 0));
-            } else {
-                tables.push(self.branch(Kind::Table, vec![relation, 0, 0, 0]));
-            }
+            tables.push(left);
         }
         let from = if tables.is_empty() {
             0
@@ -304,6 +489,23 @@ impl Encoder {
         } else {
             0
         };
+        let mut groups = Vec::new();
+        for expression in query.group_by {
+            let expression = self.expression(expression)?;
+            groups.push(self.branch(Kind::SortKey, vec![expression, 0]));
+        }
+        let group = if groups.is_empty() {
+            0
+        } else {
+            let list = self.branch(Kind::SortList, groups);
+            let rollup = self.branch(Kind::WithRollup, vec![0, list]);
+            self.branch(Kind::GroupBy, vec![rollup])
+        };
+        let having = query
+            .having
+            .map(|expr| self.expression(expr))
+            .transpose()?
+            .unwrap_or(0);
         let mut order = Vec::new();
         for item in query.order_by {
             let expression = self.expression(item.expression)?;
@@ -341,11 +543,12 @@ impl Encoder {
         } else {
             0
         };
-        self.branch(
+        Ok(self.branch(
             Kind::Select,
-            vec![distinct, projection, from, filter, order, limit],
-        );
-        Ok(())
+            vec![
+                distinct, projection, from, filter, group, having, order, limit,
+            ],
+        ))
     }
 }
 
@@ -385,7 +588,7 @@ fn parse_select(
                 };
                 encoder.branch(Kind::Missing, vec![]);
                 match encoder.select(query) {
-                    Ok(()) => {
+                    Ok(_) => {
                         result.nodes = encoder.nodes;
                         result.parameters = encoder.parameters;
                     }

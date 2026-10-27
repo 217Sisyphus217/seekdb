@@ -834,10 +834,10 @@ void ObParser::get_single_sql(const common::ObString &stmt, int64_t offset, int6
     in_string = sq_flag || bt_flag || dq_flag;
   }
 }
-#ifdef ENABLE_PARSER_MVP
+#ifdef ENABLE_RUST_PARSER
 namespace oceanbase::sql {
-bool is_mvp_select(const ObString &sql);
-int parse_mvp_select(const ObString &sql, ParseResult &result);
+bool is_rust_select(const ObString &sql);
+int parse_rust_select(const ObString &sql, ParseResult &result);
 }
 #endif
 
@@ -1009,10 +1009,10 @@ int ObParser::parse_(const ObString &query,
     LOG_DEBUG("check parse_result param",
               "connection charset", ObCharset::charset_name(charsets4parser_.string_collation_));
   }
-#ifdef ENABLE_PARSER_MVP
+#ifdef ENABLE_RUST_PARSER
   if (OB_SUCC(ret) && (parse_mode == STD_MODE || parse_mode == DYNAMIC_SQL_MODE)
-      && is_mvp_select(stmt)) {
-    return parse_mvp_select(stmt, parse_result);
+      && is_rust_select(stmt)) {
+    return parse_rust_select(stmt, parse_result);
   }
 #endif
   if (OB_SUCC(ret)) {

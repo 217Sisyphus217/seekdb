@@ -2,8 +2,7 @@
 # (OceanBase-lite) C++ server. Add new crates under `members`.
 [workspace]
 resolver = "2"
-exclude = ["parser-mvp"]
-members = ["config", "kv", "local", "sql-nio", "logger", "in-process", "seekdb-rust"]
+members = ["config", "kv", "local", "sql-nio", "logger", "in-process", "seekdb-rust", "sql-parser"]
 
 [profile.release]
 opt-level = 3

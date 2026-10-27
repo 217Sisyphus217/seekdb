@@ -92,11 +92,11 @@ peg::parser! {
         rule enabled(value: bool) = {? if value { Ok(()) } else { Err("SQL mode") } }
         rule ident() -> Name
             = start:position!() text:$("`" ("``" / !"`" [_])+ "`") end:position!() _
-                { Name { text: text[1..text.len()-1].replace("``", "`"), start, end } }
+                { Name { text: text[1..text.len()-1].replace("``", "`"), quoted: true, start, end } }
             / enabled(mode.ansi_quotes) start:position!() text:$("\"" ("\"\"" / !"\"" [_])+ "\"") end:position!() _
-                { Name { text: text[1..text.len()-1].replace("\"\"", "\""), start, end } }
+                { Name { text: text[1..text.len()-1].replace("\"\"", "\""), quoted: true, start, end } }
             / start:position!() text:$(['a'..='z' | 'A'..='Z' | '_' | '$' | '\u{80}'..='\u{10ffff}'] cont()*) end:position!() _
-                {? if reserved(text) { Err("identifier") } else { Ok(Name { text: text.to_owned(), start, end }) } }
+                {? if reserved(text) { Err("identifier") } else { Ok(Name { text: text.to_owned(), quoted: false, start, end }) } }
         rule name() -> Vec<Name> = parts:(ident() ++ ("." _)) { parts }
         rule alias() -> Name = kw("as")? value:ident() { value }
         rule number() -> Expr
@@ -178,11 +178,11 @@ peg::parser! {
         rule expr_list(level: usize) -> Vec<Expr> = values:(expr(level) ++ ("," _)) { values }
         rule item(level: usize) -> SelectItem = expression:expr(level) alias:alias()? { SelectItem { expression, alias } }
         rule relation(level: usize) -> Relation = source:("(" _ query:select(level+1) ")" _ { TableSource::Derived { query: Box::new(query) } } / name:name() { TableSource::Named { name } }) alias:alias()? { Relation { source, alias } }
-        rule join(level: usize) -> Join = kind:((kw("left") kw("outer")?) { "left" } / (kw("right") kw("outer")?) { "right" } / kw("inner") { "inner" } / kw("cross") { "cross" })? kw("join") relation:relation(level)
+        rule join(level: usize) -> Join = kind:((kw("left") kw("outer")?) { JoinKind::Left } / (kw("right") kw("outer")?) { JoinKind::Right } / kw("inner") { JoinKind::Inner } / kw("cross") { JoinKind::Cross })? kw("join") relation:relation(level)
             condition:(kw("on") value:expr(level) { (Some(value), vec![]) } / kw("using") "(" _ names:(ident() ++ ("," _)) ")" _ { (None, names) })? {?
-                let kind=kind.unwrap_or("inner");
-                if (kind=="left" || kind=="right") && condition.is_none() { Err("join condition") }
-                else { let (condition, using)=condition.unwrap_or_default(); Ok(Join { kind: kind.into(), relation, condition, using }) }
+                let kind=kind.unwrap_or(JoinKind::Inner);
+                if matches!(kind, JoinKind::Left | JoinKind::Right) && condition.is_none() { Err("join condition") }
+                else { let (condition, using)=condition.unwrap_or_default(); Ok(Join { kind, relation, condition, using }) }
             }
         rule table(level: usize) -> Table = relation:relation(level) joins:join(level)* { Table { relation, joins } }
         rule order_item(level: usize) -> OrderItem = expression:expr(level) direction:(kw("asc") { false } / kw("desc") { true })? { OrderItem { expression, descending: direction.unwrap_or(false) } }
@@ -201,7 +201,9 @@ peg::parser! {
             having:(kw("having") value:expr(level) { value })?
             order_by:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })?
             limit:limit()? { Select { distinct: distinct.is_some(), projection, from: from.unwrap_or_default(), filter, group_by: group_by.unwrap_or_default(), having, order_by: order_by.unwrap_or_default(), limit } }
-        pub rule query() -> Select = _ value:select(0) (";" _)? { value }
+        pub rule query() -> Select = _ value:select(0) (";" _)? {?
+            if value.depth() > MAX_DEPTH { Err("query depth below 128 levels") } else { Ok(value) }
+        }
         pub rule expression_input() -> Expr = _ value:expr(0) { value }
     }
 }

@@ -699,17 +699,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "parser-mvp"
-version = "0.1.0"
-dependencies = [
- "cxx",
- "peg",
- "serde",
- "serde_json",
- "stacker",
-]
-
-[[package]]
 name = "peg"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -882,8 +871,8 @@ dependencies = [
  "in-process",
  "local",
  "logger",
- "parser-mvp",
  "sql-nio",
+ "sql-parser",
 ]
 
 [[package]]
@@ -939,19 +928,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e497af288b3b95d067a23a4f749f2861121ffcb2f6d8379310dcda040c345ed"
 dependencies = [
  "serde_core",
-]
-
-[[package]]
-name = "serde_json"
-version = "1.0.154"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
-dependencies = [
- "itoa",
- "memchr",
- "serde",
- "serde_core",
- "zmij",
 ]
 
 [[package]]
@@ -1044,6 +1020,15 @@ dependencies = [
  "socket2",
  "windows-sys 0.61.2",
  "x509-parser",
+]
+
+[[package]]
+name = "sql-parser"
+version = "0.1.0"
+dependencies = [
+ "cxx",
+ "peg",
+ "stacker",
 ]
 
 [[package]]
@@ -1574,9 +1559,3 @@ name = "zlib-rs"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
-
-[[package]]
-name = "zmij"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
