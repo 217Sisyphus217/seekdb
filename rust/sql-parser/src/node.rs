@@ -36,6 +36,20 @@ pub(crate) struct Select {
 }
 
 impl Node {
+    pub fn setting_value(variable: &Self, mut value: Self) -> Self {
+        if variable.kind != Kind::UserVariable
+            && value.kind == Kind::Column
+            && value.children[0].kind == Kind::Missing
+            && value.children[1].kind == Kind::Missing
+        {
+            let name = value.children.pop().unwrap();
+            value = Self::new(Kind::String, vec![])
+                .text(name.text)
+                .at(value.start, value.end);
+        }
+        value
+    }
+
     pub fn optional(node: Option<Self>) -> Self {
         node.unwrap_or_else(Self::missing)
     }

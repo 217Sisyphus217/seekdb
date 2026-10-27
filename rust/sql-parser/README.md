@@ -27,11 +27,12 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持 ANSI_QUOTES、NO_BACKSLASH_ESCAPES、PIPES_AS_CONCAT、HIGH_NOT_PRECEDENCE。
 
 已接入多行 INSERT、INSERT SELECT、INSERT SET、REPLACE、冲突更新、UPDATE、DELETE
-和事务提交／回滚；基础建删库表、USE、常用列类型、默认值、自增、列唯一约束和主键。
+和事务提交／回滚、保存点；基础建删库表、USE、常用列类型、默认值、自增、列唯一约束和主键。
+支持 CASE、系统／用户变量、SET、字符集设置，以及基础 SHOW／DESCRIBE。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
 限定名称的函数调用、其他聚合函数和特殊函数语法、UNION、CTE、窗口函数、
-其他 DDL、会话设置、hint、版本注释和存储程序尚未迁移。当前不是默认解析器的全量替换。
+其他 DDL、hint、版本注释和存储程序尚未迁移。当前不是默认解析器的全量替换。
 
 ## 跨语言接口
 

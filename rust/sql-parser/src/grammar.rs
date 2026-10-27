@@ -72,6 +72,11 @@ fn reserved(word: &str) -> bool {
         "references",
         "commit",
         "rollback",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
     ]
     .iter()
     .any(|keyword| word.eq_ignore_ascii_case(keyword))
@@ -162,8 +167,26 @@ peg::parser! {
             / start:position!() kw("false") {? Node::new(Kind::Bool, vec![]).value(0).expression(start, start+5) }
         rule parameter() -> Node
             = start:position!() "?" end:position!() _ {? Node::new(Kind::Parameter, vec![]).expression(start, end) }
+        rule scope() -> u64 = kw("global") { 1 } / (kw("session") / kw("local")) { 2 }
+        rule system_variable() -> Node = start:position!() "@@" scope:(value:scope() "." _ { value })? name:ident() {
+            let end=name.end;
+            Node::new(Kind::SystemVariable, vec![]).text(name.text).value(scope.unwrap_or(0)).at(start,end)
+        }
+        rule user_variable() -> Node = start:position!() "@" !"@" name:ident() {
+            let end=name.end;
+            Node::new(Kind::UserVariable, vec![]).text(name.text).at(start,end)
+        }
         rule atom(level: usize) -> Node
-            = depth(level) start:position!() "(" _ query:select(level+1) ")" end:position!() _
+            = depth(level) start:position!() kw("case") operand:expr(level+1)?
+                branches:(kw("when") condition:expr(level+1) kw("then") value:expr(level+1)
+                    { Node::new(Kind::When, vec![condition,value]) })+
+                default:(kw("else") value:expr(level+1) { value })? end:position!() kw("end") {?
+                    Node::new(Kind::Case, vec![Node::optional(operand),Node::new(Kind::WhenList,branches),
+                        default.unwrap_or_else(|| Node::new(Kind::DefaultNull,vec![]))]).expression(start,end+3)
+                }
+            / system_variable()
+            / value:user_variable() {? let (start,end)=(value.start,value.end); Node::new(Kind::GetUserVariable,vec![value]).expression(start,end) }
+            / depth(level) start:position!() "(" _ query:select(level+1) ")" end:position!() _
                 {? query.expression(start, end) }
             / depth(level) start:position!() "(" _ value:expr(level+1) ")" end:position!() _
                 {? Node::new(Kind::Parenthesized, vec![value]).expression(start, end) }
@@ -297,7 +320,12 @@ peg::parser! {
                     Node::missing(), Node::missing(), Node::missing(), Node::missing(), Node::missing()])
             }
         rule transaction() -> Node
-            = (kw("begin") marker() kw("work")? / kw("start") marker() kw("transaction")) {
+            = kw("savepoint") marker() name:ident() { Node::new(Kind::Savepoint,vec![]).text(name.text).at(name.start,name.end) }
+            / kw("release") marker() kw("savepoint") name:ident() { Node::new(Kind::ReleaseSavepoint,vec![]).text(name.text).at(name.start,name.end) }
+            / kw("rollback") marker() kw("work")? kw("to") kw("savepoint")? name:ident() {
+                Node::new(Kind::RollbackSavepoint,vec![]).text(name.text).at(name.start,name.end)
+            }
+            / (kw("begin") marker() kw("work")? / kw("start") marker() kw("transaction")) {
                 Node::new(Kind::Begin, vec![Node::new(Kind::Int, vec![]), Node::missing()])
             }
             / kw("commit") marker() kw("work")? { Node::new(Kind::Commit, vec![Node::missing()]) }
@@ -353,6 +381,54 @@ peg::parser! {
                 Ok(Node::new(Kind::DropTable, vec![Node::missing(), Node::optional(exists), Node::new(Kind::TableList, tables)]))
             }
             / kw("use") marker() name:ident() { Node::new(Kind::UseDatabase, vec![Node::name(name)]) }
-        pub rule query() -> Node = _ value:(select(0) / insert() / update() / delete() / transaction() / ddl()) (";" _)? { value }
+        rule setting_value() -> Node
+            = start:position!() value:(kw("on") { "ON" } / kw("binary") { "BINARY" }) { Node::new(Kind::String,vec![]).text(value.into()).at(start,start+value.len()) }
+            / expr_or_default()
+        rule charset_name() -> Node = kw("default") { Node::new(Kind::Default,vec![]) } / string() / name:ident() { Node::name(name) }
+        rule variable_assignment() -> Node
+            = kw("names") charset:charset_name() collation:(kw("collate") value:charset_name() { value })? {
+                Node::new(Kind::SetNames,vec![charset,Node::optional(collation)])
+            }
+            / (kw("charset") / kw("character") kw("set")) charset:charset_name() { Node::new(Kind::SetCharset,vec![charset]) }
+            / variable:user_variable() (":=" / "=" / kw("to")) _ value:expr(0) {
+                Node::new(Kind::VariableValue,vec![variable,value]).value(2)
+            }
+            / scope:scope()? variable:(system_variable() / name:ident() { Node::name(name) })
+                (":=" / "=" / kw("to")) _ value:setting_value() {
+                let assignment_scope=scope.unwrap_or(if variable.kind==Kind::SystemVariable && variable.value!=0 { variable.value } else { 2 });
+                let value=Node::setting_value(&variable,value);
+                Node::new(Kind::VariableValue,vec![variable,value]).value(assignment_scope)
+            }
+        rule setting() -> Node = kw("set") marker() assignments:(variable_assignment() ++ ("," _)) { Node::new(Kind::VariableSet,assignments) }
+        rule show_condition() -> Node
+            = kw("like") value:string() escape:(kw("escape") value:string() { value })? {?
+                let escape=escape.unwrap_or_else(|| Node::new(Kind::String,vec![]).text("\\".into()));
+                if escape.text.len()!=1 { Err("one-byte ESCAPE character") }
+                else { Ok(Node::new(Kind::LikeClause,vec![value,escape])) }
+            }
+            / kw("where") value:expr(0) { Node::new(Kind::Where,vec![value]) }
+        rule show_database() -> Node = (kw("from") / kw("in")) name:ident() { Node::new(Kind::FromList,vec![Node::name(name)]) }
+        rule show_limit() -> Node = kw("limit") first:type_size() second:("," _ value:type_size() { value })? {
+            match second { Some(second) => Node::new(Kind::ShowLimit,vec![first,second]),
+                None => Node::new(Kind::ShowLimit,vec![Node::missing(),first]) }
+        }
+        rule show_body() -> Node
+            = (kw("databases") / kw("schemas")) condition:show_condition()? { Node::new(Kind::ShowDatabases,vec![Node::optional(condition),Node::missing()]) }
+            / full:kw("full")? kw("tables") database:show_database()? condition:show_condition()? {
+                Node::new(Kind::ShowTables,vec![Node::optional(database),Node::optional(condition),Node::new(Kind::Int,vec![]).value(u64::from(full.is_some()))])
+            }
+            / full:kw("full")? (kw("columns") / kw("fields")) (kw("from") / kw("in")) table:name() database:show_database()? condition:show_condition()? {?
+                Ok(Node::new(Kind::ShowColumns,vec![Node::new(Kind::Int,vec![]).value(u64::from(full.is_some())),Node::relation(table)?,Node::optional(database),Node::optional(condition)]))
+            }
+            / scope:scope()? kw("variables") condition:show_condition()? {
+                Node::new(Kind::ShowVariables,vec![Node::new(Kind::Int,vec![]).value(scope.unwrap_or(0)),Node::optional(condition)])
+            }
+            / kw("create") kw("table") table:name() {? Ok(Node::new(Kind::ShowCreateTable,vec![Node::relation(table)?])) }
+            / kw("create") (kw("database") / kw("schema")) absent:if_not_exists()? name:ident() { Node::new(Kind::ShowCreateDatabase,vec![Node::optional(absent),Node::name(name)]) }
+            / kind:(kw("warnings") { Kind::ShowWarnings } / kw("errors") { Kind::ShowErrors }) limit:show_limit()? { Node::new(kind,vec![Node::optional(limit)]) }
+        rule show() -> Node
+            = kw("show") marker() value:show_body() { value }
+            / (kw("describe") / kw("desc")) marker() table:name() {? Ok(Node::new(Kind::ShowColumns,vec![Node::new(Kind::Int,vec![]),Node::relation(table)?,Node::missing(),Node::missing()])) }
+        pub rule query() -> Node = _ value:(select(0) / insert() / update() / delete() / transaction() / ddl() / setting() / show()) (";" _)? { value }
     }
 }

@@ -161,6 +161,30 @@ ObItemType node_type(const peg::Node &node)
     case Kind::AutoIncrement: return T_CONSTR_AUTO_INCREMENT;
     case Kind::ColumnDefault: return T_CONSTR_DEFAULT;
     case Kind::ColumnComment: return T_COMMENT;
+    case Kind::SystemVariable: return T_SYSTEM_VARIABLE;
+    case Kind::UserVariable: return T_USER_VARIABLE_IDENTIFIER;
+    case Kind::GetUserVariable: return T_OP_GET_USER_VAR;
+    case Kind::VariableSet: return T_VARIABLE_SET;
+    case Kind::VariableValue: return T_VAR_VAL;
+    case Kind::SetNames: return T_SET_NAMES;
+    case Kind::SetCharset: return T_SET_CHARSET;
+    case Kind::ShowDatabases: return T_SHOW_DATABASES;
+    case Kind::ShowTables: return T_SHOW_TABLES;
+    case Kind::ShowColumns: return T_SHOW_COLUMNS;
+    case Kind::ShowVariables: return T_SHOW_VARIABLES;
+    case Kind::ShowCreateTable: return T_SHOW_CREATE_TABLE;
+    case Kind::ShowCreateDatabase: return T_SHOW_CREATE_DATABASE;
+    case Kind::ShowWarnings: return T_SHOW_WARNINGS;
+    case Kind::ShowErrors: return T_SHOW_ERRORS;
+    case Kind::ShowLimit: return T_SHOW_LIMIT;
+    case Kind::LikeClause: return T_LIKE_CLAUSE;
+    case Kind::Case: return T_CASE;
+    case Kind::WhenList: return T_WHEN_LIST;
+    case Kind::When: return T_WHEN;
+    case Kind::DefaultNull: return T_DEFAULT_NULL;
+    case Kind::Savepoint: return T_CREATE_SAVEPOINT;
+    case Kind::RollbackSavepoint: return T_ROLLBACK_SAVEPOINT;
+    case Kind::ReleaseSavepoint: return T_RELEASE_SAVEPOINT;
     default: return T_INVALID;
   }
 }
