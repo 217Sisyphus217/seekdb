@@ -6,5 +6,4 @@ publish = false
 
 [dependencies]
 cxx = "=1.0.202"
-stacker = "=0.1.25"
 peg = "=0.8.6"

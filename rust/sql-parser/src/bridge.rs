@@ -288,17 +288,15 @@ fn parse_sql(
         pipes_as_concat,
         high_not_precedence,
     };
-    stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
-        match grammar::sql::query(sql, mode) {
-            Ok(mut query) => {
-                number_parameters(&mut query, &mut result.parameters);
-                result.root = query;
-            }
-            Err(error) => {
-                result.error_offset = error.location.offset;
-                result.error = error.to_string();
-            }
+    match grammar::sql::query(sql, mode) {
+        Ok(mut query) => {
+            number_parameters(&mut query, &mut result.parameters);
+            result.root = query;
         }
-    });
+        Err(error) => {
+            result.error_offset = error.location.offset;
+            result.error = error.to_string();
+        }
+    }
     result
 }
