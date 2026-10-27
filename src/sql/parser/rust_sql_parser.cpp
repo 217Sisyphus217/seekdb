@@ -86,6 +86,38 @@ ObItemType node_type(const peg::Node &node)
     case Kind::UnionAll: return T_SET_UNION_ALL;
     case Kind::Intersect: return T_SET_INTERSECT;
     case Kind::Except: return T_SET_EXCEPT;
+    case Kind::Explain: return T_EXPLAIN;
+    case Kind::HashAggregate: return T_USE_HASH_AGGREGATE;
+    case Kind::NoHashAggregate: return T_NO_USE_HASH_AGGREGATE;
+    case Kind::Parallel: return T_PARALLEL;
+    case Kind::TableParallel: return T_TABLE_PARALLEL;
+    case Kind::DmlParallel: return T_DML_PARALLEL;
+    case Kind::NoParallel: return T_NO_PARALLEL;
+    case Kind::EnableParallelDml: return T_ENABLE_PARALLEL_DML;
+    case Kind::DisableParallelDml: return T_DISABLE_PARALLEL_DML;
+    case Kind::QueryTimeout: return T_QUERY_TIMEOUT;
+    case Kind::DynamicSampling: return T_DYNAMIC_SAMPLING;
+    case Kind::TableDynamicSampling: return T_TABLE_DYNAMIC_SAMPLING;
+    case Kind::Snapshot: return T_TABLE_SNAPSHOT_QUERY_SCN;
+    case Kind::TableOptions: return T_TABLE_OPTION_LIST;
+    case Kind::TableCharset: return T_CHARSET;
+    case Kind::TableCollation: return T_COLLATION;
+    case Kind::Compression: return T_COMPRESSION;
+    case Kind::TableAutoIncrement: return T_AUTO_INCREMENT;
+    case Kind::BlockSize: return T_BLOCK_SIZE;
+    case Kind::Index: return T_INDEX;
+    case Kind::IndexColumns: return T_INDEX_COLUMN_LIST;
+    case Kind::IndexColumn: return T_SORT_COLUMN_KEY;
+    case Kind::IndexScope: return T_INDEX_SCOPE;
+    case Kind::StoringColumns: return T_STORING_COLUMN_LIST;
+    case Kind::UsingHash: return T_USING_HASH;
+    case Kind::CreateIndex: return T_CREATE_INDEX;
+    case Kind::DropIndex: return T_DROP_INDEX;
+    case Kind::PartitionOption: return T_PARTITION_OPTION;
+    case Kind::KeyPartition: return T_KEY_PARTITION;
+    case Kind::HashPartition: return T_HASH_PARTITION;
+    case Kind::PartitionKeyFunction: return T_FUN_SYS_PART_KEY;
+    case Kind::PartitionHashFunction: return T_FUN_SYS_PART_HASH;
     case Kind::ProjectList: return T_PROJECT_LIST;
     case Kind::Projection: return T_PROJECT_STRING;
     case Kind::Alias:
@@ -535,7 +567,8 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
       || source.kind == Kind::Binary || source.kind == Kind::Between || source.kind == Kind::In
       || source.kind == Kind::Is || source.kind == Kind::Window || source.kind == Kind::PlSql
       || source.kind == Kind::RoutineParameters || source.kind == Kind::PlDefault
-      || source.kind == Kind::SubProcedureDeclaration || source.kind == Kind::SubFunctionDeclaration || source.kind == Kind::ObjectAccess) {
+      || source.kind == Kind::SubProcedureDeclaration || source.kind == Kind::SubFunctionDeclaration
+      || source.kind == Kind::ObjectAccess || source.kind == Kind::KeyPartition || source.kind == Kind::HashPartition) {
     text = raw;
     length = raw_length;
   }

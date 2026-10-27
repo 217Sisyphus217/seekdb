@@ -30,6 +30,8 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 内部 SQL 的命名参数保留首次出现顺序，重复引用共用参数编号。
 支持 ANALYZE TABLE、统计采集的近似去重和直方图聚合，以及全表扫描和索引 hint。
 支持 UNION／UNION ALL、INTERSECT、EXCEPT／MINUS，以及括号内外各自的排序和 LIMIT。
+支持普通／唯一索引、前缀索引、STORING、LOCAL／GLOBAL、KEY／HASH 分区和基础表选项，
+以及 EXPLAIN、索引回填使用的快照查询、并行 DML 和动态采样 hint。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
 其他聚合函数和特殊函数语法、CTE、其他窗口函数、其他 DDL、完整 hint 语法、

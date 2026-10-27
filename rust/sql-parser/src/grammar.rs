@@ -324,10 +324,14 @@ peg::parser! {
             Node::new(Kind::JsonTable,vec![document,path,Node::new(Kind::Link,vec![Node::new(Kind::HiddenInt,vec![]).value(3),Node::new(Kind::HiddenInt,vec![]).value(3)]),Node::new(Kind::ExprList,columns),alias.map(Node::name).unwrap_or_else(Node::missing)])
         }
         rule relation(level: usize) -> Node = json_table(level) / lateral:kw("lateral")? source:("(" _ query:select(level+1) ")" _ { query }
-            / name:name() {? Node::relation(name) }) alias:alias()?
+            / name:name() {? Node::relation(name) }) snapshot:snapshot(level)? alias:alias()?
             columns:("(" _ names:(ident() ++ ("," _)) ")" _ { names })? {?
                 if (lateral.is_some() || columns.is_some()) && source.kind!=Kind::Select { return Err("derived table"); }
                 let mut table=Node::table(source,alias)?;
+                if let Some(snapshot)=snapshot {
+                    table.children.resize_with(if table.kind==Kind::Alias { 5 } else { 4 },Node::missing);
+                    table.children.push(snapshot);
+                }
                 if let Some(columns)=columns {
                     let alias=std::mem::replace(&mut table.children[1],Node::missing());
                     table.children[1]=Node::new(Kind::Link,vec![alias,Node::new(Kind::ColumnList,columns.into_iter().map(Node::name).collect())]);
@@ -335,6 +339,9 @@ peg::parser! {
                 table.value=u64::from(lateral.is_some());
                 Ok(table)
             }
+        rule snapshot(level: usize) -> Node = kw("as") kw("of") kw("snapshot") value:expr(level) {
+            Node::new(Kind::Snapshot,vec![value,Node::new(Kind::Ident,vec![])])
+        }
         rule join(level: usize) -> (Kind, Node, Node) = kind:((kw("left") kw("outer")?) { Kind::LeftJoin }
             / (kw("right") kw("outer")?) { Kind::RightJoin } / kw("inner") { Kind::InnerJoin } / kw("cross") { Kind::InnerJoin })?
             kw("join") relation:relation(level)
@@ -425,6 +432,21 @@ peg::parser! {
         rule hint_option() -> Node
             = kw("leading") "(" _ qb:hint_qb()? tables:hint_leading(0) ")" _ { Node::new(Kind::Leading,vec![Node::optional(qb),tables]) }
             / kw("dbms_stats") { Node::new(Kind::DbmsStats,vec![]) }
+            // These legacy DDL hints have no resolver behavior.
+            / kw("ob_ddl_schema_version") "(" _ hint_relation() ("," _)? type_size() ")" _ { Node::missing() }
+            / kw("use_px") { Node::missing() }
+            / kind:(kw("enable_parallel_dml") { Kind::EnableParallelDml } / kw("disable_parallel_dml") { Kind::DisableParallelDml }
+                / kw("no_parallel") { Kind::NoParallel }) { Node::new(kind,vec![]) }
+            / kw("dml_parallel") "(" _ value:type_size() ")" _ { Node::new(Kind::DmlParallel,vec![value]) }
+            / kw("query_timeout") "(" _ value:type_size() ")" _ { Node::new(Kind::QueryTimeout,vec![value]) }
+            / kw("dynamic_sampling") "(" _ value:(value:type_size() { Node::new(Kind::DynamicSampling,vec![value]) }
+                / qb:hint_qb()? table:hint_relation() ("," _)? level:type_size() blocks:(("," _)? value:type_size() { value })? {
+                    Node::new(Kind::TableDynamicSampling,vec![Node::optional(qb),table,level,Node::optional(blocks)])
+                }) ")" _ { value }
+            / kw("parallel") "(" _ value:(value:type_size() { Node::new(Kind::Parallel,vec![value]) }
+                / kw("manual") { Node::new(Kind::Parallel,vec![]).value(1) }
+                / kw("auto") { Node::new(Kind::Parallel,vec![]).value(2) }
+                / qb:hint_qb()? table:hint_relation() ("," _)? value:type_size() { Node::new(Kind::TableParallel,vec![Node::optional(qb),table,value]) }) ")" _ { value }
             / kw("full") "(" _ qb:hint_qb()? table:hint_relation() ")" _ { Node::new(Kind::FullScan,vec![Node::optional(qb),table]) }
             / kind:(kw("index") { Kind::IndexScan } / kw("index_asc") { Kind::IndexAsc } / kw("index_desc") { Kind::IndexDesc })
                 "(" _ qb:hint_qb()? table:hint_relation() ("," _)? index:hint_name()
@@ -439,6 +461,8 @@ peg::parser! {
                 }
             / kw("use_plan_cache") "(" _ policy:(kw("none") { 1 } / kw("default") { 2 }) ")" _ { Node::new(Kind::UsePlanCache,vec![]).value(policy) }
             / kw("no_rewrite") qb:("(" _ qb:hint_qb()? ")" _ { qb })? { Node::new(Kind::NoRewrite,vec![Node::optional(qb.flatten())]) }
+            / kind:(kw("use_hash_aggregation") { Kind::HashAggregate } / kw("no_use_hash_aggregation") { Kind::NoHashAggregate })
+                qb:("(" _ qb:hint_qb()? ")" _ { qb })? { Node::new(kind,vec![Node::optional(qb.flatten())]).value(u64::MAX) }
             / kw("qb_name") "(" _ name:hint_name() ")" _ { Node::new(Kind::QbName,vec![Node::name(name)]) }
             / kw("opt_param") "(" _ name:string() ("," _)? value:(string() / number()) ")" _ { Node::new(Kind::OptParam,vec![name,value]) }
         rule hints() -> Vec<Node> = "/*+" _ options:(hint_option() ** (("," _)?)) "*/" _ { options }
@@ -569,20 +593,61 @@ peg::parser! {
             / kw("default") value:expr(0) { Node::new(Kind::ColumnDefault, vec![value]) }
             / kw("comment") value:string() { Node::new(Kind::ColumnComment, vec![value]) }
         rule table_element() -> Node
-            = kw("primary") kw("key") "(" _ names:(ident() ++ ("," _)) ")" _ {
-                Node::new(Kind::PrimaryKey, vec![Node::new(Kind::ColumnList, names.into_iter().map(Node::name).collect()), Node::missing(), Node::missing()])
+            = kw("primary") kw("key") ident()? method:index_method()? "(" _ names:(ident() ++ ("," _)) ")" _
+                method_end:index_method()? comment:(kw("comment") value:string() { value })? {
+                Node::new(Kind::PrimaryKey, vec![Node::new(Kind::ColumnList, names.into_iter().map(Node::name).collect()), Node::optional(method_end.or(method)), Node::optional(comment)])
             }
+            / index_definition()
             / name:column() data_type:data_type() attributes:column_attribute()* {
                 Node::new(Kind::ColumnDefinition, vec![name, data_type, Node::list(Kind::ColumnAttributes, attributes), Node::missing()])
+            }
+        rule table_option() -> Node
+            = kw("default")? (kw("charset") / kw("character") kw("set")) ("=" _)? value:charset_name() { Node::new(Kind::TableCharset,vec![value]) }
+            / kw("default")? kw("collate") ("=" _)? value:charset_name() { Node { kind:Kind::TableCollation,..value } }
+            / kind:(kw("compression") { Kind::Compression } / kw("comment") { Kind::ColumnComment }) ("=" _)? value:string() { Node::new(kind,vec![value]) }
+            / kind:(kw("auto_increment") { Kind::TableAutoIncrement } / kw("block_size") { Kind::BlockSize }) ("=" _)? value:type_size() { Node::new(kind,vec![value]) }
+        rule index_method() -> Node = kw("using") value:(kw("btree") { Node::missing() } / kw("hash") { Node::new(Kind::UsingHash,vec![]) }) { value }
+        rule index_column() -> Node = name:ident() prefix:("(" _ value:type_size() ")" _ { value })?
+            direction:(kw("asc") { Kind::Asc } / kw("desc") { Kind::Desc })? {
+                Node::new(Kind::IndexColumn,vec![Node::name(name),Node::optional(prefix),direction.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing)])
+            }
+        rule index_option() -> Node
+            = global:(kw("global") { true } / kw("local") { false }) {
+                Node::new(Kind::IndexScope,vec![Node::new(Kind::HiddenInt,vec![]).value(u64::from(global)),Node::new(Kind::String,vec![]).text(if global { "GLOBAL" } else { "LOCAL" }.into())])
+            }
+            / kw("storing") "(" _ names:(ident() ++ ("," _)) ")" _ { Node::new(Kind::StoringColumns,names.into_iter().map(Node::name).collect()) }
+            / index_method()
+            / kw("comment") value:string() { Node::new(Kind::ColumnComment,vec![value]) }
+            / kw("block_size") ("=" _)? value:type_size() { Node::new(Kind::BlockSize,vec![value]) }
+        rule index_definition() -> Node = unique:(kw("unique") (kw("key") / kw("index"))? { true } / (kw("key") / kw("index")) { false })
+            name:ident()? method:index_method()? "(" _ columns:(index_column() ++ ("," _)) ")" _ options:index_options() partition:partition_option()? {
+                Node::new(Kind::Index,vec![name.map(Node::name).unwrap_or_else(Node::missing),Node::new(Kind::IndexColumns,columns),options,Node::optional(method),Node::optional(partition),Node::missing()]).value(u64::from(unique))
+            }
+        rule index_options() -> Node = values:index_option()* {
+            Node::list(Kind::TableOptions,values.into_iter().filter(|value| value.kind!=Kind::Missing).collect())
+        }
+        rule partition_option() -> Node = kw("partition") kw("by") key:(kw("key") { true } / kw("hash") { false })
+            "(" _ start:position!() expressions:(enabled(key) names:(ident() ** ("," _)) { names.into_iter().map(Node::name).collect() }
+                / enabled(!key) value:expr(0) { vec![value] }) end:position!() ")" _ count:(kw("partitions") value:type_size() { value })? {
+                let function=Node::new(if key { Kind::PartitionKeyFunction } else { Kind::PartitionHashFunction },vec![Node::new(Kind::Ident,vec![]).text(if key { "partition_key" } else { "partition_hash" }.into()),Node::list(Kind::ExprList,expressions)]);
+                let partition=Node::new(if key { Kind::KeyPartition } else { Kind::HashPartition },vec![function,Node::optional(count),Node::missing(),Node::missing(),Node::missing(),Node::missing()]).at(start,end);
+                Node::new(Kind::PartitionOption,vec![partition])
             }
         rule ddl() -> Node
             = kw("create") (kw("database") / kw("schema")) absent:if_not_exists()? name:ident() {
                 Node::new(Kind::CreateDatabase, vec![Node::optional(absent), Node::name(name), Node::missing()])
             }
             / kw("create") kw("table") absent:if_not_exists()? name:name()
-                "(" _ elements:(table_element() ++ ("," _)) ")" _ {?
+                "(" _ elements:(table_element() ++ ("," _)) ")" _ options:((value:table_option() ("," _)? { value })*) partition:partition_option()? {?
                 Ok(Node::new(Kind::CreateTable, vec![Node::missing(), Node::optional(absent), Node::relation(name)?,
-                    Node::new(Kind::TableElements, elements), Node::missing(), Node::missing(), Node::missing(), Node::missing()]))
+                    Node::new(Kind::TableElements, elements), Node::list(Kind::TableOptions,options), Node::optional(partition), Node::missing(), Node::missing()]))
+            }
+            / kw("create") unique:kw("unique")? kw("index") absent:if_not_exists()? name:name() method:index_method()? kw("on") table:name()
+                "(" _ columns:(index_column() ++ ("," _)) ")" _ options:index_options() partition:partition_option()? {?
+                Ok(Node::new(Kind::CreateIndex,vec![Node::relation(name)?.value(u64::from(unique.is_some())),Node::relation(table)?,Node::new(Kind::IndexColumns,columns),options,Node::optional(method),Node::optional(partition),Node::missing(),Node::optional(absent),Node::missing()]))
+            }
+            / kw("drop") kw("index") name:ident() kw("on") table:name() {?
+                Ok(Node::new(Kind::DropIndex,vec![Node::name(name),Node::relation(table)?]))
             }
             / kw("drop") (kw("database") / kw("schema")) exists:if_exists()? name:ident() {
                 Node::new(Kind::DropDatabase, vec![Node::optional(exists), Node::name(name)])
@@ -949,7 +1014,10 @@ peg::parser! {
             let tables=tables.into_iter().reduce(|left,right| Node::new(Kind::Link,vec![left,right])).unwrap();
             Node::new(Kind::Analyze,vec![tables,Node::missing(),Node::missing()])
         }
-        rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / setting() / show() / alter_system() / prepared_statement() / diagnostics() / analyze()
+        rule explain() -> Node = kw("explain") value:(select(0) / insert() / update() / delete()) {
+            Node::new(Kind::Explain,vec![Node::missing(),Node::missing(),Node::missing(),Node::missing(),value])
+        }
+        rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / setting() / show() / alter_system() / prepared_statement() / diagnostics() / analyze() / explain()
         pub rule query() -> Node = _ value:(package_statement() / routine_statement() / pl_call() / sql_statement()) (";" _)* { value }
             / text:$(_ (";" _)*) { Node::new(Kind::EmptyQuery,vec![]).value(u64::from(text.chars().any(|ch| !ch.is_ascii_whitespace() && ch!=';'))) }
     }
