@@ -9,16 +9,9 @@
 ./build.py build -j16 --//rust:enable_rust_parser=true seekdb
 ```
 
-在语句首个关键字后加 `/*+parser_mvp*/`，完整解析阶段即使用 Rust 解析器。
-mysql CLI 需要 `--comments` 保留标记。普通查询和内部 SQL 仍使用旧解析器；
-Rust 解析失败直接报错。标记保留在规范化 SQL 中，prepared statement 的 prepare
-和首次生成计划阶段均使用 Rust。实验开关和标记在全量切换时删除。
-
-```sql
-SELECT /*+parser_mvp*/ a.id, count(b.id) AS n
-FROM t a LEFT JOIN u b ON a.id = b.id
-GROUP BY a.id HAVING count(b.id) > 0 ORDER BY a.id;
-```
+启用后，普通 SQL 和内部 SQL 的完整解析阶段使用 Rust，解析失败直接报错。
+快速参数化、多语句切分和 PL 专用解析模式仍沿用旧实现。
+实验开关和旧解析链路在全量验证通过后删除。
 
 已接入基本 SELECT、表和列别名、DISTINCT、表达式、WHERE、ORDER BY、LIMIT，
 以及 INNER／LEFT／RIGHT／CROSS JOIN、ON／USING、普通函数调用、
@@ -29,10 +22,13 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 已接入多行 INSERT、INSERT SELECT、INSERT SET、REPLACE、冲突更新、UPDATE、DELETE
 和事务提交／回滚、保存点；基础建删库表、USE、常用列类型、默认值、自增、列唯一约束和主键。
 支持 CASE、系统／用户变量、SET、字符集设置，以及基础 SHOW／DESCRIBE。
+已接入 CAST／CONVERT、二进制字面量、行锁、VALUES、LATERAL、排名和聚合窗口函数、
+命名窗口和数值窗口边界，以及启动和 schema 刷新使用的 ALTER SYSTEM 和基础 hint。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
-限定名称的函数调用、其他聚合函数和特殊函数语法、UNION、CTE、窗口函数、
-其他 DDL、hint、版本注释和存储程序尚未迁移。当前不是默认解析器的全量替换。
+限定名称的函数调用、其他聚合函数和特殊函数语法、UNION、CTE、其他窗口函数、
+其他 DDL、完整 hint 语法、版本注释和存储程序尚未迁移。当前不是默认解析器的全量替换。系统包加载尚未完成，依赖包解析的错误路径
+（例如未找到列时尝试查找外部符号）仍可能等待至超时；mysqltest 初始化尚未通过。
 
 ## 跨语言接口
 

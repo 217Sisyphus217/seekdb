@@ -24,6 +24,7 @@ pub(crate) struct Name {
     pub end: usize,
 }
 
+#[derive(Default)]
 pub(crate) struct Select {
     pub distinct: bool,
     pub projection: Vec<Node>,
@@ -33,6 +34,9 @@ pub(crate) struct Select {
     pub having: Option<Node>,
     pub order_by: Vec<Node>,
     pub limit: Option<Node>,
+    pub lock: Option<Node>,
+    pub hints: Vec<Node>,
+    pub windows: Vec<Node>,
 }
 
 impl Node {
@@ -81,6 +85,7 @@ impl Node {
         columns: Vec<Self>,
         values: Self,
         assignments: Vec<Self>,
+        hints: Vec<Self>,
     ) -> Self {
         let into = Self::new(
             Kind::InsertInto,
@@ -100,7 +105,7 @@ impl Node {
             vec![
                 insert,
                 Self::new(if replace { Kind::Replace } else { Kind::Insert }, vec![]),
-                Self::missing(),
+                Self::list(Kind::Hints, hints),
                 if ignore {
                     Self::new(Kind::Ignore, vec![])
                 } else {
@@ -236,6 +241,24 @@ impl Node {
 
     pub fn unary(op: &str, value: Self, start: usize) -> Result<Self, &'static str> {
         let end = value.end;
+        if op == "binary" {
+            let target = Self::new(Kind::CastType, vec![])
+                .text("varbinary".into())
+                .at(start, start + 6);
+            return Self::call(
+                vec![Name {
+                    text: "cast".into(),
+                    quoted: false,
+                    start,
+                    end: start + 6,
+                }],
+                false,
+                vec![value, target],
+                None,
+                start,
+                end,
+            );
+        }
         Self::new(Kind::Unary, vec![value])
             .text(op.into())
             .expression(start, end)
@@ -261,6 +284,7 @@ impl Node {
         mut name: Vec<Name>,
         distinct: bool,
         arguments: Vec<Self>,
+        window: Option<Self>,
         start: usize,
         end: usize,
     ) -> Result<Self, &'static str> {
@@ -274,7 +298,7 @@ impl Node {
             String::new()
         };
         if function == "mod" {
-            if distinct || arguments.len() != 2 {
+            if window.is_some() || distinct || arguments.len() != 2 {
                 return Err("MOD requires two arguments");
             }
             return Self::new(Kind::Binary, arguments)
@@ -287,6 +311,12 @@ impl Node {
             "min" => Kind::Min,
             "max" => Kind::Max,
             "avg" => Kind::Avg,
+            "row_number" => Kind::RowNumber,
+            "rank" => Kind::Rank,
+            "dense_rank" => Kind::DenseRank,
+            "percent_rank" => Kind::PercentRank,
+            "cume_dist" => Kind::CumeDist,
+            "ntile" => Kind::Ntile,
             "if" => Kind::If,
             "isnull" => Kind::IsNull,
             "now" | "current_timestamp" | "localtime" | "localtimestamp" => Kind::CurrentTimestamp,
@@ -331,6 +361,20 @@ impl Node {
             kind,
             Kind::Count | Kind::Sum | Kind::Min | Kind::Max | Kind::Avg
         );
+        let ranking = matches!(
+            kind,
+            Kind::RowNumber
+                | Kind::Rank
+                | Kind::DenseRank
+                | Kind::PercentRank
+                | Kind::CumeDist
+                | Kind::Ntile
+        );
+        if (ranking && (window.is_none() || arguments.len() != usize::from(kind == Kind::Ntile)))
+            || (window.is_some() && !ranking && !aggregate)
+        {
+            return Err("invalid window function");
+        }
         let star = arguments.iter().any(|arg| arg.is_wildcard());
         let count_star = kind == Kind::Count
             && !distinct
@@ -349,7 +393,9 @@ impl Node {
         {
             return Err("invalid aggregate argument count");
         }
-        let children = if timestamp || no_arguments {
+        let children = if ranking {
+            arguments
+        } else if timestamp || no_arguments {
             vec![arguments.into_iter().next().unwrap_or_else(Self::missing)]
         } else if !aggregate {
             let name = Self::name(name);
@@ -369,7 +415,12 @@ impl Node {
             };
             vec![modifier, args]
         };
-        Self::new(kind, children).expression(start, end)
+        let function = Self::new(kind, children);
+        match window {
+            Some(window) => Self::new(Kind::WindowFunction, vec![function, window]),
+            None => function,
+        }
+        .expression(start, end)
     }
 
     pub fn relation(names: Vec<Name>) -> Result<Self, &'static str> {
@@ -392,7 +443,10 @@ impl Node {
             }
             Ok(Self::new(Kind::Alias, children).text(text))
         } else if derived {
-            Err("a derived table requires an alias")
+            Ok(Self::new(
+                Kind::Alias,
+                vec![source, Self::new(Kind::Ident, vec![])],
+            ))
         } else {
             Ok(Self::new(
                 Kind::Table,
@@ -401,16 +455,30 @@ impl Node {
         }
     }
 
-    pub fn projection(mut value: Self, alias: Option<Name>) -> Result<Self, &'static str> {
+    pub fn projection(mut value: Self, alias: Option<Self>) -> Result<Self, &'static str> {
         let (start, end) = (value.start, value.end);
-        if let Some(alias) = alias {
+        if let Some(mut alias) = alias {
             if value.is_wildcard() {
                 return Err("a wildcard cannot have a column alias");
             }
             let text = alias.text.clone();
-            value = Self::new(Kind::Alias, vec![value, Self::name(alias)])
-                .text(text)
-                .at(start, end);
+            let string = alias.kind == Kind::String;
+            let span = if string {
+                (alias.start, alias.end)
+            } else {
+                (start, end)
+            };
+            alias.kind = Kind::Ident;
+            value = Self::new(
+                if string {
+                    Kind::StringAlias
+                } else {
+                    Kind::Alias
+                },
+                vec![value, alias],
+            )
+            .text(text)
+            .at(span.0, span.1);
         }
         Ok(Self::new(Kind::Projection, vec![value]).at(start, end))
     }
@@ -460,8 +528,11 @@ impl Node {
                 filter,
                 group,
                 having,
+                Self::list(Kind::NamedWindows, query.windows),
                 order,
                 query.limit.unwrap_or_else(Self::missing),
+                query.lock.unwrap_or_else(Self::missing),
+                Self::list(Kind::Hints, query.hints),
             ],
         )
         .expression(0, 0)

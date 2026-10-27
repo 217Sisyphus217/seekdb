@@ -18,8 +18,8 @@
 #include "sql/parser/parse_malloc.h"
 #include "lib/string/ob_string.h"
 #include "share/ob_errno.h"
+#include "share/cache/ob_cache_type.h"
 #include "lib/oblog/ob_log.h"
-#include <cctype>
 #include <algorithm>
 
 namespace oceanbase::sql {
@@ -69,7 +69,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Select: return T_SELECT;
     case Kind::ProjectList: return T_PROJECT_LIST;
     case Kind::Projection: return T_PROJECT_STRING;
-    case Kind::Alias: return T_ALIAS;
+    case Kind::Alias:
+    case Kind::StringAlias: return T_ALIAS;
     case Kind::FromList: return T_FROM_LIST;
     case Kind::Relation: return T_RELATION_FACTOR;
     case Kind::Table: return T_ORG;
@@ -185,11 +186,67 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Savepoint: return T_CREATE_SAVEPOINT;
     case Kind::RollbackSavepoint: return T_ROLLBACK_SAVEPOINT;
     case Kind::ReleaseSavepoint: return T_RELEASE_SAVEPOINT;
+    case Kind::LockWait: return T_SFU_INT;
+    case Kind::LockWaitDecimal: return T_SFU_DECIMAL;
+    case Kind::SkipLocked: return T_SKIP_LOCKED;
+    case Kind::HexString:
+    case Kind::BitString: return T_HEX_STRING;
+    case Kind::SetConfig: return T_ALTER_SYSTEM_SET_PARAMETER;
+    case Kind::ResetConfig: return T_ALTER_SYSTEM_RESET_PARAMETER;
+    case Kind::FlushCache: return T_FLUSH_CACHE;
+    case Kind::CacheType: return T_INT;
+    case Kind::CacheNamespace: return T_NAMESPACE;
+    case Kind::SqlId: return T_SQL_ID;
+    case Kind::SchemaId: return T_SCHEMA_ID;
+    case Kind::DatabaseList: return T_DATABASE_LIST;
+    case Kind::ConfigList: return T_SYTEM_ACTION_LIST;
+    case Kind::ConfigAction: return T_SYSTEM_ACTION;
+    case Kind::SetTracepoint: return T_ALTER_SYSTEM_SETTP;
+    case Kind::TracepointOptions: return T_SYTEM_SETTP_LIST;
+    case Kind::TracepointNumber: return T_TP_NO;
+    case Kind::TracepointName: return T_TP_NAME;
+    case Kind::TracepointOccurrence: return T_OCCUR;
+    case Kind::TracepointFrequency: return T_TRIGGER_MODE;
+    case Kind::TracepointError: return T_ERROR_CODE;
+    case Kind::TracepointMatch: return T_TP_COND;
+    case Kind::Link: return T_LINK_NODE;
+    case Kind::Values: return T_VALUES_TABLE_EXPRESSION;
+    case Kind::ValuesRows: return T_VALUES_ROW_LIST;
+    case Kind::Hints: return T_HINT_OPTION_LIST;
+    case Kind::HintRelation: return T_RELATION_FACTOR_IN_HINT;
+    case Kind::HintTables: return T_RELATION_FACTOR_IN_HINT_LIST;
+    case Kind::JoinHintTables: return T_RELATION_FACTOR_IN_USE_JOIN_HINT_LIST;
+    case Kind::Leading: return T_LEADING;
+    case Kind::UseNl: return T_USE_NL;
+    case Kind::NoUseNl: return T_NO_USE_NL;
+    case Kind::UseHash: return T_USE_HASH;
+    case Kind::NoUseHash: return T_NO_USE_HASH;
+    case Kind::UseMerge: return T_USE_MERGE;
+    case Kind::NoUseMerge: return T_NO_USE_MERGE;
+    case Kind::QbName: return T_QB_NAME;
+    case Kind::OptParam: return T_OPT_PARAM_HINT;
+    case Kind::NoRewrite: return T_NO_REWRITE;
+    case Kind::UsePlanCache: return T_USE_PLAN_CACHE;
+    case Kind::WindowFunction: return T_WINDOW_FUNCTION;
+    case Kind::Window: return T_WIN_NEW_GENERALIZED_WINDOW;
+    case Kind::WindowSpec: return T_WIN_GENERALIZED_WINDOW;
+    case Kind::WindowFrame: return T_WIN_WINDOW;
+    case Kind::WindowBound: return T_WIN_BOUND;
+    case Kind::WindowInterval: return T_WIN_INTERVAL;
+    case Kind::HiddenInt: return T_INT;
+    case Kind::RowNumber: return T_WIN_FUN_ROW_NUMBER;
+    case Kind::Rank: return T_WIN_FUN_RANK;
+    case Kind::DenseRank: return T_WIN_FUN_DENSE_RANK;
+    case Kind::PercentRank: return T_WIN_FUN_PERCENT_RANK;
+    case Kind::CumeDist: return T_WIN_FUN_CUME_DIST;
+    case Kind::Ntile: return T_WIN_FUN_NTILE;
+    case Kind::NamedWindows: return T_WIN_NAMED_WINDOWS;
+    case Kind::NamedWindow: return T_WIN_NAMED_WINDOW;
     default: return T_INVALID;
   }
 }
 
-int build_data_type(const peg::Node &source, void *pool, ParseNode *&node)
+int build_type(const peg::Node &source, void *pool, ParseNode *&node)
 {
   const common::ObString name(source.text.size(), source.text.data());
   ObItemType type = T_INVALID;
@@ -197,7 +254,8 @@ int build_data_type(const peg::Node &source, void *pool, ParseNode *&node)
   else if (name == "smallint") type = T_SMALLINT;
   else if (name == "mediumint") type = T_MEDIUMINT;
   else if (name == "int") type = T_INT32;
-  else if (name == "bigint") type = T_INT;
+  else if (name == "bigint" || name == "signed") type = T_INT;
+  else if (name == "unsigned") type = T_UINT64;
   else if (name == "float") type = T_FLOAT;
   else if (name == "double") type = T_DOUBLE;
   else if (name == "decimal") type = T_NUMBER;
@@ -209,6 +267,7 @@ int build_data_type(const peg::Node &source, void *pool, ParseNode *&node)
   else if (name == "time") type = T_TIME;
   else if (name == "date") type = T_DATE;
   else if (name == "json") type = T_JSON;
+  else if (name == "year") type = T_YEAR;
   if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
   const bool integer = type == T_TINYINT || type == T_SMALLINT || type == T_MEDIUMINT
       || type == T_INT32 || type == T_INT;
@@ -219,14 +278,28 @@ int build_data_type(const peg::Node &source, void *pool, ParseNode *&node)
     else if (type == T_FLOAT || type == T_DOUBLE) type = static_cast<ObItemType>(type + T_UFLOAT - T_FLOAT);
     else if (type == T_NUMBER) type = T_UNUMBER;
   }
-  node = new_node(pool, type, string && !binary ? 3 : 0);
+  const bool cast = source.kind == Kind::CastType;
+  node = new_node(pool, cast ? T_CAST_ARGUMENT : type, !cast && string && !binary ? 3 : 0);
   if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   node->value_ = 0;
   const auto &args = source.children;
   const int32_t precision = args.empty() ? 0 : std::min<uint64_t>(args[0].value, INT32_MAX);
   const int16_t short_precision = std::min<int32_t>(precision, INT16_MAX);
   const int16_t scale = args.size() < 2 ? 0 : std::min<uint64_t>(args[1].value, INT16_MAX);
-  if (string) {
+  if (cast) {
+    node->int16_values_[OB_NODE_CAST_TYPE_IDX] = type;
+    node->param_num_ = args.size();
+    if (type == T_CHAR || type == T_VARCHAR) {
+      node->int16_values_[OB_NODE_CAST_COLL_IDX] = binary ? 63 : 0;
+      node->int32_values_[OB_NODE_CAST_C_LEN_IDX] = args.empty() ? -1 : precision;
+    } else if (type == T_FLOAT || type == T_DOUBLE || type == T_NUMBER) {
+      node->int16_values_[OB_NODE_CAST_N_PREC_IDX] = args.empty()
+          ? (type == T_NUMBER ? 10 : type == T_FLOAT ? 0 : -1) : short_precision;
+      node->int16_values_[OB_NODE_CAST_N_SCALE_IDX] = type == T_NUMBER ? scale : -1;
+    } else if (type == T_DATETIME || type == T_DATE || type == T_TIME || type == T_YEAR) {
+      node->int16_values_[OB_NODE_CAST_N_SCALE_IDX] = short_precision;
+    }
+  } else if (string) {
     node->int32_values_[0] = args.empty() && type == T_CHAR ? 1 : precision;
     node->int32_values_[1] = binary;
   } else if (integer) {
@@ -241,7 +314,7 @@ int build_data_type(const peg::Node &source, void *pool, ParseNode *&node)
     node->int16_values_[0] = args.empty() ? (name == "decimal" ? 10 : -1) : short_precision;
     node->int16_values_[1] = name != "decimal" && args.size() < 2 ? -1 : scale;
   }
-  if (!string) {
+  if (!cast && !string) {
     node->int16_values_[2] = (source.value & 2) != 0;
     node->int16_values_[3] = (source.value & 1) != 0;
   }
@@ -254,7 +327,7 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
 {
   node = nullptr;
   if (source.kind == Kind::Missing) return common::OB_SUCCESS;
-  if (source.kind == Kind::DataType) return build_data_type(source, pool, node);
+  if (source.kind == Kind::DataType || source.kind == Kind::CastType) return build_type(source, pool, node);
   if (source.kind == Kind::Parenthesized) {
     const int ret = build_node(sql, source.children[0], parameters, pool, node);
     if (ret != common::OB_SUCCESS) return ret;
@@ -267,7 +340,8 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
   if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   const int select_slots[] = {PARSE_SELECT_DISTINCT, PARSE_SELECT_SELECT, PARSE_SELECT_FROM,
                              PARSE_SELECT_WHERE, PARSE_SELECT_DYNAMIC_GROUP, PARSE_SELECT_DYNAMIC_HAVING,
-                             PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT};
+                             PARSE_SELECT_NAMED_WINDOWS, PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT,
+                             PARSE_SELECT_FOR_UPD, PARSE_SELECT_HINTS};
   for (size_t child = 0; child < source.children.size(); ++child) {
     const size_t slot = type == T_SELECT ? select_slots[child] : child;
     const int ret = build_node(sql, source.children[child], parameters, pool, node->children_[slot]);
@@ -287,8 +361,8 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
   const char *raw = sql.ptr() + source.start;
   const size_t raw_length = source.end - source.start;
   const bool literal = type == T_INT || type == T_UINT64 || type == T_NUMBER || type == T_DOUBLE
-      || type == T_VARCHAR || type == T_BOOL || type == T_NULL || type == T_QUESTIONMARK;
-  if (literal) {
+      || type == T_VARCHAR || type == T_HEX_STRING || type == T_BOOL || type == T_NULL || type == T_QUESTIONMARK;
+  if (literal && source.kind != Kind::HiddenInt && source.kind != Kind::CacheType) {
     node->raw_text_ = parse_strndup(raw, raw_length, pool);
     if (node->raw_text_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     node->text_len_ = raw_length;
@@ -298,16 +372,36 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
   size_t length = source.text.size();
   if (type == T_PROJECT_STRING || type == T_COLUMN_REF || type == T_OP_POS || type == T_OP_NEG
       || source.kind == Kind::Binary || source.kind == Kind::Between || source.kind == Kind::In
-      || source.kind == Kind::Is) {
+      || source.kind == Kind::Is || source.kind == Kind::Window) {
     text = raw;
     length = raw_length;
   }
-  if (length != 0 || type == T_VARCHAR) {
+  if (type == T_HEX_STRING) {
+    const bool bits = source.kind == Kind::BitString;
+    const size_t size = bits ? ob_parse_bit_string_len(length) : ob_parse_binary_len(length);
+    char *bytes = static_cast<char *>(parse_malloc(size + 1, pool));
+    if (bytes == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    if (bits) ob_parse_bit_string(text, length, bytes);
+    else ob_parse_binary(text, length, bytes);
+    bytes[size] = '\0';
+    node->str_value_ = bytes;
+    node->str_len_ = size;
+  } else if (length != 0 || type == T_VARCHAR || type == T_IDENT) {
     node->str_value_ = parse_strndup(text, length, pool);
     if (node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     node->str_len_ = length;
   }
+  if (source.kind == Kind::StringAlias) {
+    node->param_num_ = 1;
+    node->children_[1]->is_input_quoted_ = false;
+  }
+  if (source.kind == Kind::HiddenInt) node->is_hidden_const_ = true;
+  if (source.kind == Kind::CacheType) {
+    node->value_ = source.text == "plan" ? CACHE_TYPE_PLAN : source.text == "pl" ? CACHE_TYPE_PL_OBJ
+        : source.text == "ps" ? CACHE_TYPE_PS_OBJ : CACHE_TYPE_LIB_CACHE;
+  }
   if (type == T_BOOL) node->is_literal_bool_ = true;
+  if (type == T_SFU_INT && source.start == source.end) node->is_hidden_const_ = true;
   if (type == T_SORT_ASC || type == T_SORT_DESC) node->value_ = 2;
   if (type == T_IDENT) {
     node->is_input_quoted_ = raw_length > 0 && (*raw == '`' || *raw == '"');
@@ -357,6 +451,7 @@ int build_tree(const common::ObString &sql, const peg::ParseTree &tree, ParseRes
   if (root == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   root->children_[0] = query;
   result.result_tree_ = root;
+  result.contain_sensitive_data_ = tree.root.kind == Kind::SetConfig;
   result.question_mark_ctx_.count_ = tree.parameters;
   result.question_mark_ctx_.by_ordinal_ = tree.parameters != 0;
   if (result.is_dynamic_sql_) {
@@ -366,15 +461,6 @@ int build_tree(const common::ObString &sql, const peg::ParseTree &tree, ParseRes
   }
   return common::OB_SUCCESS;
 }
-}
-
-bool is_rust_sql(const common::ObString &sql)
-{
-  int64_t offset = 0;
-  while (offset < sql.length() && std::isspace(static_cast<unsigned char>(sql.ptr()[offset]))) ++offset;
-  while (offset < sql.length() && std::isalpha(static_cast<unsigned char>(sql.ptr()[offset]))) ++offset;
-  while (offset < sql.length() && std::isspace(static_cast<unsigned char>(sql.ptr()[offset]))) ++offset;
-  return common::ObString(sql.length() - offset, sql.ptr() + offset).prefix_match("/*+parser_mvp*/");
 }
 
 int parse_rust_sql(const common::ObString &sql, ParseResult &result)
