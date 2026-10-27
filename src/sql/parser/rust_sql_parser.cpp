@@ -152,6 +152,10 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Number: return T_NUMBER;
     case Kind::Double: return T_DOUBLE;
     case Kind::String: return T_VARCHAR;
+    case Kind::CharsetLiteral: return T_VARCHAR;
+    case Kind::CharsetName: return T_CHAR_CHARSET;
+    case Kind::ConvertTableCharset: return T_CONVERT_TO_CHARACTER;
+    case Kind::TableCollection: return T_TABLE_COLLECTION_EXPRESSION;
     case Kind::DateLiteral: return T_DATE;
     case Kind::TimeLiteral: return T_TIME;
     case Kind::TimestampLiteral: return T_TIMESTAMP;
@@ -224,6 +228,12 @@ ObItemType node_type(const peg::Node &node)
     case Kind::ColumnList: return T_COLUMN_LIST;
     case Kind::GroupBy: return T_GROUPBY_CLAUSE;
     case Kind::WithRollup: return T_WITH_ROLLUP_CLAUSE;
+    case Kind::Rollup: return T_ROLLUP;
+    case Kind::DefaultInt: return T_DEFAULT_INT;
+    case Kind::EnumType: return T_ENUM;
+    case Kind::SetType: return T_SET;
+    case Kind::StringList: return T_STRING_LIST;
+    case Kind::BinaryAttribute: return T_BINARY;
     case Kind::Insert: return T_INSERT;
     case Kind::Replace: return T_REPLACE;
     case Kind::SingleTableInsert: return T_SINGLE_TABLE_INSERT;
@@ -296,6 +306,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::UniqueKey: return T_CONSTR_UNIQUE_KEY;
     case Kind::AutoIncrement: return T_CONSTR_AUTO_INCREMENT;
     case Kind::ColumnDefault: return T_CONSTR_DEFAULT;
+    case Kind::OnUpdate: return T_ON_UPDATE;
     case Kind::ColumnComment: return T_COMMENT;
     case Kind::GeneratedColumn: return T_GENERATED_COLUMN;
     case Kind::Always: return T_CONSTR_ALWAYS;
@@ -798,7 +809,12 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     text = raw;
     length = raw_length;
   }
-  if (type == T_HEX_STRING) {
+  if (source.kind == Kind::CharsetLiteral) {
+    ParseNode *literal = node->children_[1];
+    node->str_value_ = literal->str_value_;
+    node->str_len_ = literal->str_len_;
+    if (literal->type_ == T_HEX_STRING) node->num_child_ = 1;
+  } else if (type == T_HEX_STRING) {
     const bool bits = source.kind == Kind::BitString;
     const size_t size = bits ? ob_parse_bit_string_len(length) : ob_parse_binary_len(length);
     char *bytes = static_cast<char *>(parse_malloc(size + 1, pool));
@@ -836,7 +852,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     node->param_num_ = 1;
     node->children_[1]->is_input_quoted_ = false;
   }
-  if (source.kind == Kind::HiddenInt || source.kind == Kind::HiddenNull) node->is_hidden_const_ = true;
+  if (source.kind == Kind::HiddenInt || source.kind == Kind::HiddenNull || source.kind == Kind::CharsetName) node->is_hidden_const_ = true;
   if (source.kind == Kind::DateUnit) {
     node->is_hidden_const_ = true;
     node->is_date_unit_ = source.start != source.end;

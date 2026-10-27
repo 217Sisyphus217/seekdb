@@ -42,6 +42,8 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 SHOW CHARSET／COLLATION、SET TRANSACTION 和 MAJOR／MINOR FREEZE。
 支持模板和逐分区定义的二级分区、ANY／SOME／ALL 子查询、SQL_CALC_FOUND_ROWS，
 以及分布式扫描、聚合、集合运算和常用查询改写的 outline 提示。
+支持 POSITION／TRIM／WEIGHT_STRING、IS UNKNOWN、GROUP BY 排序和 ROLLUP、ENUM／SET，
+以及 UTF-8／二进制字符串前缀、列 ON UPDATE、表字符集转换和 TABLE(GENERATOR(...))。
 系统视图及统计采样支持 CAST 的 IGNORE 和 CHARSET 选项；未知优化器 hint 按原有规则忽略。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 

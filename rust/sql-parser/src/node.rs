@@ -34,7 +34,7 @@ pub(crate) struct Select {
     pub into_end: Option<Node>,
     pub from: Vec<Node>,
     pub filter: Option<Node>,
-    pub group_by: Vec<Node>,
+    pub group_by: Option<Node>,
     pub having: Option<Node>,
     pub order_by: Vec<Node>,
     pub limit: Option<Node>,
@@ -648,20 +648,7 @@ impl Node {
             .filter
             .map(|node| Self::new(Kind::Where, vec![node, Self::missing()]))
             .unwrap_or_else(Self::missing);
-        let group = if query.group_by.is_empty() {
-            Self::missing()
-        } else {
-            let keys = query
-                .group_by
-                .into_iter()
-                .map(|node| Self::new(Kind::SortKey, vec![node, Self::missing()]))
-                .collect();
-            let list = Self::new(Kind::SortList, keys);
-            Self::new(
-                Kind::GroupBy,
-                vec![Self::new(Kind::WithRollup, vec![Self::missing(), list])],
-            )
-        };
+        let group = Self::optional(query.group_by);
         let having = query.having.unwrap_or_else(Self::missing);
         let order = if query.order_by.is_empty() {
             Self::missing()
