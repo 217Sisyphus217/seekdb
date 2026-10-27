@@ -38,6 +38,9 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持生成列、CHECK 约束、LIST 分区、指定分区读写和表级索引 hint；
 支持 FIRST_VALUE／LAST_VALUE／NTH_VALUE／LEAD／LAG、NULL 处理选项、LIKE ESCAPE 和用户变量赋值。
 支持 DATE_ADD／DATE_SUB／ADDDATE／SUBDATE、TIMESTAMPADD／TIMESTAMPDIFF、EXTRACT 和 MySQL 可执行版本注释。
+支持日期时间字面量、REGEXP／RLIKE、SELECT ALL、RANGE 分区、ROW_FORMAT、数据库字符集选项、
+SHOW CHARSET／COLLATION、SET TRANSACTION 和 MAJOR／MINOR FREEZE。
+系统视图及统计采样支持 CAST 的 IGNORE 和 CHARSET 选项；未知优化器 hint 按原有规则忽略。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
 其他聚合函数和特殊函数语法、CTE、其他窗口函数、其他 DDL、完整 hint 语法、

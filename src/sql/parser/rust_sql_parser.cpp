@@ -62,6 +62,8 @@ ObItemType operator_type(const peg::Node &node)
     if (op == ">>") return T_OP_BIT_RIGHT_SHIFT;
     if (op == "concat") return T_OP_CNN;
     if (op == "like" || op == "not like") return T_OP_LIKE;
+    if (op == "regexp") return T_OP_REGEXP;
+    if (op == "not regexp") return T_OP_NOT_REGEXP;
   }
   return T_INVALID;
 }
@@ -115,6 +117,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Collation: return T_COLLATION;
     case Kind::SetCollation: return T_FUN_SYS_SET_COLLATION;
     case Kind::Compression: return T_COMPRESSION;
+    case Kind::StoreFormat: return T_STORE_FORMAT;
     case Kind::TableAutoIncrement: return T_AUTO_INCREMENT;
     case Kind::BlockSize: return T_BLOCK_SIZE;
     case Kind::Index: return T_INDEX;
@@ -145,6 +148,9 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Number: return T_NUMBER;
     case Kind::Double: return T_DOUBLE;
     case Kind::String: return T_VARCHAR;
+    case Kind::DateLiteral: return T_DATE;
+    case Kind::TimeLiteral: return T_TIME;
+    case Kind::TimestampLiteral: return T_TIMESTAMP;
     case Kind::Bool: return T_BOOL;
     case Kind::Null: return T_NULL;
     case Kind::Parameter: return T_QUESTIONMARK;
@@ -164,6 +170,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::In: return node.value ? T_OP_NOT_IN : T_OP_IN;
     case Kind::Is: return node.value ? T_OP_IS_NOT : T_OP_IS;
     case Kind::Function: return T_FUN_SYS;
+    case Kind::Cast: return T_FUN_SYS;
     case Kind::If: return T_FUN_SYS_IF;
     case Kind::IsNull: return T_FUN_SYS_ISNULL;
     case Kind::CurrentTimestamp: return T_FUN_SYS_CUR_TIMESTAMP;
@@ -193,9 +200,13 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Use: return T_USE;
     case Kind::Force: return T_FORCE;
     case Kind::ListPartition: return T_LIST_PARTITION;
+    case Kind::RangePartition: return T_RANGE_PARTITION;
     case Kind::ListColumnsPartition: return T_LIST_COLUMNS_PARTITION;
+    case Kind::RangeColumnsPartition: return T_RANGE_COLUMNS_PARTITION;
     case Kind::Partitions: return T_PARTITION_LIST;
     case Kind::ListPartitionElement: return T_PARTITION_LIST_ELEMENT;
+    case Kind::RangePartitionElement: return T_PARTITION_RANGE_ELEMENT;
+    case Kind::MaxValue: return T_MAXVALUE;
     case Kind::CheckConstraint: return T_CHECK_CONSTRAINT;
     case Kind::Enforced: return T_ENFORCED_CONSTRAINT;
     case Kind::NotEnforced: return T_NOENFORCED_CONSTRAINT;
@@ -220,10 +231,13 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Delete: return T_DELETE;
     case Kind::DeleteTables: return T_DELETE_TABLE_NODE;
     case Kind::Begin: return T_BEGIN;
+    case Kind::SetTransaction: return T_TRANSACTION;
+    case Kind::TransactionCharacteristics: return T_TRANSACTION_CHARACTERISTICS;
     case Kind::Commit: return T_COMMIT;
     case Kind::Rollback: return T_ROLLBACK;
     case Kind::UseDatabase: return T_USE_DATABASE;
     case Kind::CreateDatabase: return T_CREATE_DATABASE;
+    case Kind::DatabaseOptions: return T_DATABASE_OPTION_LIST;
     case Kind::DropDatabase: return T_DROP_DATABASE;
     case Kind::IfExists: return T_IF_EXISTS;
     case Kind::IfNotExists: return T_IF_NOT_EXISTS;
@@ -286,6 +300,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::SetNames: return T_SET_NAMES;
     case Kind::SetCharset: return T_SET_CHARSET;
     case Kind::ShowDatabases: return T_SHOW_DATABASES;
+    case Kind::ShowCharset: return T_SHOW_CHARSET;
+    case Kind::ShowCollation: return T_SHOW_COLLATION;
     case Kind::ShowTables: return T_SHOW_TABLES;
     case Kind::ShowColumns: return T_SHOW_COLUMNS;
     case Kind::ShowVariables: return T_SHOW_VARIABLES;
@@ -308,6 +324,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::HexString:
     case Kind::BitString: return T_HEX_STRING;
     case Kind::SetConfig: return T_ALTER_SYSTEM_SET_PARAMETER;
+    case Kind::Freeze: return T_FREEZE;
     case Kind::ResetConfig: return T_ALTER_SYSTEM_RESET_PARAMETER;
     case Kind::FlushCache: return T_FLUSH_CACHE;
     case Kind::CacheType: return T_INT;
@@ -334,7 +351,9 @@ ObItemType node_type(const peg::Node &node)
     case Kind::JoinHintTables: return T_RELATION_FACTOR_IN_USE_JOIN_HINT_LIST;
     case Kind::Leading: return T_LEADING;
     case Kind::UseNl: return T_USE_NL;
+    case Kind::UseNlMaterialization: return T_USE_NL_MATERIALIZATION;
     case Kind::NoUseNl: return T_NO_USE_NL;
+    case Kind::NoUseNlMaterialization: return T_NO_USE_NL_MATERIALIZATION;
     case Kind::UseHash: return T_USE_HASH;
     case Kind::NoUseHash: return T_NO_USE_HASH;
     case Kind::UseMerge: return T_USE_MERGE;
@@ -555,6 +574,13 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
     if (type == T_CHAR || type == T_VARCHAR) {
       node->int16_values_[OB_NODE_CAST_COLL_IDX] = binary ? 63 : 0;
       node->int32_values_[OB_NODE_CAST_C_LEN_IDX] = size == 0 ? -1 : precision;
+      if (size < args.size()) {
+        const auto &charset = args[size];
+        node->str_value_ = parse_strndup(charset.text.data(), charset.text.size(), pool);
+        if (node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+        node->str_len_ = charset.text.size();
+        node->param_num_ += charset.value;
+      }
     } else if (type == T_FLOAT || type == T_DOUBLE || type == T_NUMBER) {
       node->int16_values_[OB_NODE_CAST_N_PREC_IDX] = size == 0
           ? (type == T_NUMBER ? 10 : type == T_FLOAT ? 0 : -1) : short_precision;
@@ -642,7 +668,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     child->str_value_ = parse_strndup(expression_sql.ptr() + expression.start, child->str_len_, pool);
     if (child->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   }
-  if (type != T_FUN_SYS) node->value_ = type == T_SELECT ? parameters : source.value;
+  if (type != T_FUN_SYS || source.kind == Kind::Cast) node->value_ = type == T_SELECT ? parameters : source.value;
   node->sql_str_off_ = source.start;
   node->raw_sql_offset_ = source.start;
   node->stmt_loc_.first_column_ = source.start + 1;
@@ -654,7 +680,9 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
   }
   const char *raw = sql.ptr() + source.start;
   const size_t raw_length = source.end - source.start;
-  const bool literal = type == T_INT || type == T_UINT64 || type == T_NUMBER || type == T_DOUBLE
+  const bool temporal = type == T_DATE || type == T_TIME || type == T_TIMESTAMP;
+  if (temporal) node->is_copy_raw_text_ = true;
+  const bool literal = temporal || type == T_INT || type == T_UINT64 || type == T_NUMBER || type == T_DOUBLE
       || type == T_VARCHAR || type == T_HEX_STRING || type == T_BOOL || type == T_NULL || type == T_QUESTIONMARK;
   if (literal && source.kind != Kind::HiddenInt && source.kind != Kind::HiddenNull && source.kind != Kind::CacheType && source.kind != Kind::DateUnit) {
     node->raw_text_ = parse_strndup(raw, raw_length, pool);
@@ -671,6 +699,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
       || source.kind == Kind::SubProcedureDeclaration || source.kind == Kind::SubFunctionDeclaration
       || source.kind == Kind::ObjectAccess || source.kind == Kind::KeyPartition || source.kind == Kind::HashPartition
       || source.kind == Kind::ListPartition || source.kind == Kind::ListColumnsPartition
+      || source.kind == Kind::RangePartition || source.kind == Kind::RangeColumnsPartition
       || (source.kind == Kind::DateUnit && raw_length != 0)) {
     text = raw;
     length = raw_length;
@@ -685,7 +714,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     bytes[size] = '\0';
     node->str_value_ = bytes;
     node->str_len_ = size;
-  } else if (length != 0 || type == T_VARCHAR || type == T_IDENT) {
+  } else if (length != 0 || temporal || type == T_VARCHAR || type == T_IDENT) {
     node->str_value_ = parse_strndup(text, length, pool);
     if (node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     node->str_len_ = length;

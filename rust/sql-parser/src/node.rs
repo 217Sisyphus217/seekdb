@@ -416,6 +416,7 @@ impl Node {
                 .expression(start, end);
         }
         let kind = match function.as_str() {
+            "cast" => Kind::Cast,
             "count" => Kind::Count,
             "sum" => Kind::Sum,
             "min" => Kind::Min,

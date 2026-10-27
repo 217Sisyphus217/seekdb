@@ -56,6 +56,7 @@ pub(crate) mod ffi {
         Collation,
         SetCollation,
         Compression,
+        StoreFormat,
         TableAutoIncrement,
         BlockSize,
         Index,
@@ -77,8 +78,12 @@ pub(crate) mod ffi {
         HashPartition,
         ListPartition,
         ListColumnsPartition,
+        RangePartition,
+        RangeColumnsPartition,
         Partitions,
         ListPartitionElement,
+        RangePartitionElement,
+        MaxValue,
         PartitionKeyFunction,
         PartitionHashFunction,
         ProjectList,
@@ -96,6 +101,9 @@ pub(crate) mod ffi {
         Number,
         Double,
         String,
+        DateLiteral,
+        TimeLiteral,
+        TimestampLiteral,
         Bool,
         Null,
         Parameter,
@@ -116,6 +124,7 @@ pub(crate) mod ffi {
         In,
         Is,
         Function,
+        Cast,
         If,
         IsNull,
         CurrentTimestamp,
@@ -157,10 +166,13 @@ pub(crate) mod ffi {
         Delete,
         DeleteTables,
         Begin,
+        SetTransaction,
+        TransactionCharacteristics,
         Commit,
         Rollback,
         UseDatabase,
         CreateDatabase,
+        DatabaseOptions,
         DropDatabase,
         IfExists,
         IfNotExists,
@@ -229,6 +241,8 @@ pub(crate) mod ffi {
         SetNames,
         SetCharset,
         ShowDatabases,
+        ShowCharset,
+        ShowCollation,
         ShowTables,
         ShowColumns,
         ShowVariables,
@@ -252,6 +266,7 @@ pub(crate) mod ffi {
         BitString,
         CastType,
         SetConfig,
+        Freeze,
         ResetConfig,
         FlushCache,
         CacheType,
@@ -279,6 +294,8 @@ pub(crate) mod ffi {
         Leading,
         UseNl,
         NoUseNl,
+        UseNlMaterialization,
+        NoUseNlMaterialization,
         UseHash,
         NoUseHash,
         UseMerge,
@@ -537,7 +554,11 @@ fn parse_sql(
             }
         }
         Err(error) => {
-            result.error_offset = error.location.offset;
+            result.error_offset = if error.location.offset == sql.len() {
+                grammar::sql::last_token_start(sql, mode).unwrap()
+            } else {
+                error.location.offset
+            };
             result.error = error.to_string();
         }
     }
