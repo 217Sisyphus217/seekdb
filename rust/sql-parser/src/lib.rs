@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod ast;
 mod bridge;
 mod grammar;
-
-use ast::{Expr, Select};
+mod node;
 
 #[derive(Clone, Copy, Default)]
 pub struct SqlMode {
@@ -24,26 +22,4 @@ pub struct SqlMode {
     pub no_backslash_escapes: bool,
     pub pipes_as_concat: bool,
     pub high_not_precedence: bool,
-}
-
-#[derive(Default)]
-pub struct Parser {
-    mode: SqlMode,
-}
-
-impl Parser {
-    pub fn new(mode: SqlMode) -> Self {
-        Self { mode }
-    }
-
-    pub fn parse(&self, sql: &str) -> Result<Select, peg::error::ParseError<peg::str::LineCol>> {
-        grammar::sql::query(sql, self.mode)
-    }
-
-    pub fn parse_expression(
-        &self,
-        sql: &str,
-    ) -> Result<Expr, peg::error::ParseError<peg::str::LineCol>> {
-        grammar::sql::expression_input(sql, self.mode)
-    }
 }

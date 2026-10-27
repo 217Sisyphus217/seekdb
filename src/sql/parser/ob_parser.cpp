@@ -1012,7 +1012,8 @@ int ObParser::parse_(const ObString &query,
 #ifdef ENABLE_RUST_PARSER
   if (OB_SUCC(ret) && (parse_mode == STD_MODE || parse_mode == DYNAMIC_SQL_MODE)
       && is_rust_select(stmt)) {
-    return parse_rust_select(stmt, parse_result);
+    // Keep headroom for traversal and destruction of the Rust-owned tree.
+    return SMART_CALL_LARGE(parse_rust_select(stmt, parse_result));
   }
 #endif
   if (OB_SUCC(ret)) {

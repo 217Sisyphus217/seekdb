@@ -127,107 +127,105 @@ ObItemType node_type(const peg::Node &node)
   }
 }
 
-int build_tree(const common::ObString &sql, const peg::SelectTree &tree, ParseResult &result)
+int build_node(const common::ObString &sql, const peg::Node &source, size_t parameters,
+               void *pool, ParseNode *&node)
 {
-  void *pool = result.malloc_pool_;
-  auto **nodes = static_cast<ParseNode **>(parse_malloc(tree.nodes.size() * sizeof(ParseNode *), pool));
-  if (nodes == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-  nodes[0] = nullptr;
-  // Children precede their parents, so conversion needs no recursive FFI calls.
-  for (size_t i = 1; i < tree.nodes.size(); ++i) {
-    const peg::Node &source = tree.nodes[i];
-    if (source.kind == Kind::Parenthesized) {
-      nodes[i] = nodes[source.children[0]];
-      nodes[i]->is_assigned_from_child_ = true;
-      continue;
-    }
-    const ObItemType type = node_type(source);
-    if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
-    ParseNode *node = new_node(pool, type, type == T_SELECT ? PARSE_SELECT_MAX_IDX : source.children.size());
-    if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-    nodes[i] = node;
-    if (type == T_SELECT) {
-      const int slots[] = {PARSE_SELECT_DISTINCT, PARSE_SELECT_SELECT, PARSE_SELECT_FROM,
-                           PARSE_SELECT_WHERE, PARSE_SELECT_DYNAMIC_GROUP, PARSE_SELECT_DYNAMIC_HAVING,
-                           PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT};
-      for (size_t child = 0; child < source.children.size(); ++child) {
-        node->children_[slots[child]] = nodes[source.children[child]];
-      }
-      if (node->children_[PARSE_SELECT_DISTINCT] != nullptr) {
-        ParseNode *options = new_node(pool, T_QEURY_EXPRESSION_LIST, 1);
-        if (options == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-        options->children_[0] = node->children_[PARSE_SELECT_DISTINCT];
-        node->children_[PARSE_SELECT_DISTINCT] = options;
-      }
-      node->value_ = tree.parameters;
+  node = nullptr;
+  if (source.kind == Kind::Missing) return common::OB_SUCCESS;
+  if (source.kind == Kind::Parenthesized) {
+    const int ret = build_node(sql, source.children[0], parameters, pool, node);
+    if (ret != common::OB_SUCCESS) return ret;
+    node->is_assigned_from_child_ = true;
+    return common::OB_SUCCESS;
+  }
+  const ObItemType type = node_type(source);
+  if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
+  node = new_node(pool, type, type == T_SELECT ? PARSE_SELECT_MAX_IDX : source.children.size());
+  if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+  const int select_slots[] = {PARSE_SELECT_DISTINCT, PARSE_SELECT_SELECT, PARSE_SELECT_FROM,
+                             PARSE_SELECT_WHERE, PARSE_SELECT_DYNAMIC_GROUP, PARSE_SELECT_DYNAMIC_HAVING,
+                             PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT};
+  for (size_t child = 0; child < source.children.size(); ++child) {
+    const size_t slot = type == T_SELECT ? select_slots[child] : child;
+    const int ret = build_node(sql, source.children[child], parameters, pool, node->children_[slot]);
+    if (ret != common::OB_SUCCESS) return ret;
+  }
+  if (type == T_SELECT && node->children_[PARSE_SELECT_DISTINCT] != nullptr) {
+    ParseNode *options = new_node(pool, T_QEURY_EXPRESSION_LIST, 1);
+    if (options == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    options->children_[0] = node->children_[PARSE_SELECT_DISTINCT];
+    node->children_[PARSE_SELECT_DISTINCT] = options;
+  }
+  node->value_ = type == T_SELECT ? parameters : source.value;
+  node->sql_str_off_ = source.start;
+  node->raw_sql_offset_ = source.start;
+  node->stmt_loc_.first_column_ = source.start + 1;
+  node->stmt_loc_.last_column_ = source.end;
+  const char *raw = sql.ptr() + source.start;
+  const size_t raw_length = source.end - source.start;
+  const bool literal = type == T_INT || type == T_UINT64 || type == T_NUMBER || type == T_DOUBLE
+      || type == T_VARCHAR || type == T_BOOL || type == T_NULL || type == T_QUESTIONMARK;
+  if (literal) {
+    node->raw_text_ = parse_strndup(raw, raw_length, pool);
+    if (node->raw_text_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    node->text_len_ = raw_length;
+    node->param_num_ = 1;
+  }
+  const char *text = source.text.data();
+  size_t length = source.text.size();
+  if (type == T_PROJECT_STRING || type == T_COLUMN_REF || type == T_OP_POS || type == T_OP_NEG
+      || source.kind == Kind::Binary || source.kind == Kind::Between || source.kind == Kind::In
+      || source.kind == Kind::Is) {
+    text = raw;
+    length = raw_length;
+  }
+  if (length != 0 || type == T_VARCHAR) {
+    node->str_value_ = parse_strndup(text, length, pool);
+    if (node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    node->str_len_ = length;
+  }
+  if (type == T_BOOL) node->is_literal_bool_ = true;
+  if (type == T_SORT_ASC || type == T_SORT_DESC) node->value_ = 2;
+  if (type == T_IDENT) {
+    node->is_input_quoted_ = raw_length > 0 && (*raw == '`' || *raw == '"');
+  }
+  if (type == T_PROJECT_STRING && node->children_[0]->type_ == T_VARCHAR) {
+    node->str_value_ = node->children_[0]->str_value_;
+    node->str_len_ = node->children_[0]->str_len_;
+  }
+  if (type == T_OP_NEG && node->children_[0]->type_ == T_UINT64) {
+    ParseNode *child = node->children_[0];
+    if (!child->is_assigned_from_child_
+        && static_cast<uint64_t>(child->value_) == (uint64_t(1) << 63)) {
+      child->type_ = T_INT;
+      child->value_ = INT64_MIN;
+      child->str_value_ = node->str_value_;
+      child->str_len_ = node->str_len_;
+      child->raw_text_ = node->str_value_;
+      child->text_len_ = node->str_len_;
+      child->sql_str_off_ = source.start;
+      node = child;
     } else {
-      for (size_t child = 0; child < source.children.size(); ++child) {
-        node->children_[child] = nodes[source.children[child]];
-      }
-      node->value_ = source.value;
-    }
-    node->sql_str_off_ = source.start;
-    node->raw_sql_offset_ = source.start;
-    node->stmt_loc_.first_column_ = source.start + 1;
-    node->stmt_loc_.last_column_ = source.end;
-    const char *raw = sql.ptr() + source.start;
-    const size_t raw_length = source.end - source.start;
-    const bool literal = type == T_INT || type == T_UINT64 || type == T_NUMBER || type == T_DOUBLE
-        || type == T_VARCHAR || type == T_BOOL || type == T_NULL || type == T_QUESTIONMARK;
-    if (literal) {
-      node->raw_text_ = parse_strndup(raw, raw_length, pool);
-      if (node->raw_text_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-      node->text_len_ = raw_length;
-      node->param_num_ = 1;
-    }
-    const char *text = source.text.data();
-    size_t length = source.text.size();
-    if (type == T_PROJECT_STRING || type == T_COLUMN_REF || type == T_OP_POS || type == T_OP_NEG
-        || source.kind == Kind::Binary || source.kind == Kind::Between || source.kind == Kind::In
-        || source.kind == Kind::Is) {
-      text = raw;
-      length = raw_length;
-    }
-    if (length != 0 || type == T_VARCHAR) {
-      node->str_value_ = parse_strndup(text, length, pool);
-      if (node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-      node->str_len_ = length;
-    }
-    if (type == T_BOOL) node->is_literal_bool_ = true;
-    if (type == T_SORT_ASC || type == T_SORT_DESC) node->value_ = 2;
-    if (type == T_IDENT) {
-      node->is_input_quoted_ = raw_length > 0 && (*raw == '`' || *raw == '"');
-    }
-    if (type == T_PROJECT_STRING && node->children_[0]->type_ == T_VARCHAR) {
-      node->str_value_ = node->children_[0]->str_value_;
-      node->str_len_ = node->children_[0]->str_len_;
-    }
-    if (type == T_OP_NEG && node->children_[0]->type_ == T_UINT64) {
-      ParseNode *child = node->children_[0];
-      if (!child->is_assigned_from_child_
-          && static_cast<uint64_t>(child->value_) == (uint64_t(1) << 63)) {
-        child->type_ = T_INT;
-        child->value_ = INT64_MIN;
-        child->str_value_ = node->str_value_;
-        child->str_len_ = node->str_len_;
-        child->raw_text_ = node->str_value_;
-        child->text_len_ = node->str_len_;
-        child->sql_str_off_ = source.start;
-        nodes[i] = child;
-      } else {
-        child->type_ = T_NUMBER;
-      }
-    }
-    if (type == T_OP_LIKE && source.text == "not like") {
-      ParseNode *negation = new_node(pool, T_OP_NOT, 1);
-      if (negation == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-      negation->children_[0] = node;
-      nodes[i] = negation;
+      child->type_ = T_NUMBER;
     }
   }
-  ParseNode *root = new_node(pool, T_STMT_LIST, 1);
+  if (type == T_OP_LIKE && source.text == "not like") {
+    ParseNode *negation = new_node(pool, T_OP_NOT, 1);
+    if (negation == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    negation->children_[0] = node;
+    node = negation;
+  }
+  return common::OB_SUCCESS;
+}
+
+int build_tree(const common::ObString &sql, const peg::SelectTree &tree, ParseResult &result)
+{
+  ParseNode *query = nullptr;
+  const int ret = build_node(sql, tree.root, tree.parameters, result.malloc_pool_, query);
+  if (ret != common::OB_SUCCESS) return ret;
+  ParseNode *root = new_node(result.malloc_pool_, T_STMT_LIST, 1);
   if (root == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-  root->children_[0] = nodes[tree.nodes.size() - 1];
+  root->children_[0] = query;
   result.result_tree_ = root;
   result.question_mark_ctx_.count_ = tree.parameters;
   result.question_mark_ctx_.by_ordinal_ = tree.parameters != 0;
