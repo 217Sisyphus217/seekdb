@@ -221,6 +221,79 @@ pub(crate) mod ffi {
         Execute,
         ExecuteArguments,
         Deallocate,
+        CreateProcedure,
+        CreateFunction,
+        DropProcedure,
+        DropFunction,
+        AlterProcedure,
+        AlterFunction,
+        RoutineName,
+        RoutineParameters,
+        RoutineParameter,
+        RoutineClauses,
+        Deterministic,
+        DataAccess,
+        InvokeRights,
+        PlBlock,
+        PlStatements,
+        PlDeclarations,
+        PlDeclaration,
+        PlIdentifiers,
+        PlDefault,
+        PlHandler,
+        PlHandlerConditions,
+        PlConditionDeclaration,
+        PlCondition,
+        SqlState,
+        SqlException,
+        SqlWarning,
+        SqlNotFound,
+        PlSql,
+        PlSubquery,
+        PlIf,
+        PlElse,
+        PlCase,
+        PlWhen,
+        PlWhile,
+        PlLoop,
+        PlRepeat,
+        PlReturn,
+        PlLeave,
+        PlIterate,
+        PlLabeledBlock,
+        PlLabeledControl,
+        PlCall,
+        PlCallName,
+        PlCallArguments,
+        Diagnostics,
+        PlSignal,
+        PlResignal,
+        PlSignalItems,
+        PlSignalItem,
+        PlCursor,
+        PlOpen,
+        PlClose,
+        PlFetch,
+        PlInto,
+        IntoVariables,
+        IntoVariableList,
+        CreatePackage,
+        CreatePackageBody,
+        DropPackage,
+        Package,
+        PackageBody,
+        PackageStatements,
+        PackageBodyStatements,
+        SubProcedureDeclaration,
+        SubFunctionDeclaration,
+        SubProcedureDefinition,
+        SubFunctionDefinition,
+        InterfacePragma,
+        ObjectAccess,
+        JsonTable,
+        JsonColumn,
+        HiddenNull,
+        NullClause,
     }
 
     struct Node {
@@ -236,6 +309,7 @@ pub(crate) mod ffi {
     struct ParseTree {
         root: Node,
         parameters: usize,
+        parameter_names: Vec<String>,
         error: String,
         error_offset: usize,
     }
@@ -247,18 +321,41 @@ pub(crate) mod ffi {
             no_backslash_escapes: bool,
             pipes_as_concat: bool,
             high_not_precedence: bool,
+            routine_body: bool,
         ) -> ParseTree;
     }
 }
 
-fn number_parameters(node: &mut Node, count: &mut usize) {
+fn number_parameters(
+    node: &mut Node,
+    count: &mut usize,
+    names: &mut Vec<String>,
+) -> Result<(), usize> {
     for child in &mut node.children {
-        number_parameters(child, count);
+        number_parameters(child, count, names)?;
     }
     if node.kind == Kind::Parameter {
-        node.value = *count as u64;
-        *count += 1;
+        if node.text.is_empty() {
+            if !names.is_empty() {
+                return Err(node.start);
+            }
+            node.value = *count as u64;
+            *count += 1;
+        } else {
+            if *count != names.len() {
+                return Err(node.start);
+            }
+            let index = names
+                .iter()
+                .position(|name| name.eq_ignore_ascii_case(&node.text));
+            node.value = index.unwrap_or_else(|| {
+                names.push(node.text.clone());
+                *count += 1;
+                names.len() - 1
+            }) as u64;
+        }
     }
+    Ok(())
 }
 
 fn parse_sql(
@@ -267,10 +364,12 @@ fn parse_sql(
     no_backslash_escapes: bool,
     pipes_as_concat: bool,
     high_not_precedence: bool,
+    routine_body: bool,
 ) -> ffi::ParseTree {
     let mut result = ffi::ParseTree {
         root: Node::missing(),
         parameters: 0,
+        parameter_names: Vec::new(),
         error: String::new(),
         error_offset: 0,
     };
@@ -288,10 +387,24 @@ fn parse_sql(
         pipes_as_concat,
         high_not_precedence,
     };
-    match grammar::sql::query(sql, mode) {
+    let parsed = if routine_body {
+        grammar::sql::routine_body(sql, mode)
+    } else {
+        grammar::sql::query(sql, mode)
+    };
+    match parsed {
         Ok(mut query) => {
-            number_parameters(&mut query, &mut result.parameters);
-            result.root = query;
+            match number_parameters(
+                &mut query,
+                &mut result.parameters,
+                &mut result.parameter_names,
+            ) {
+                Ok(()) => result.root = query,
+                Err(offset) => {
+                    result.error_offset = offset;
+                    result.error = "ordinal and named parameters cannot be combined".into();
+                }
+            }
         }
         Err(error) => {
             result.error_offset = error.location.offset;

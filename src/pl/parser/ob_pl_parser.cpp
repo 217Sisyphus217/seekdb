@@ -17,6 +17,9 @@
 #define USING_LOG_PREFIX PL
 #include "ob_pl_parser.h"
 #include "pl/ob_pl_resolver.h"
+#ifdef ENABLE_RUST_PARSER
+#include "sql/parser/rust_sql_parser.h"
+#endif
 
 
 #ifdef __cplusplus
@@ -164,6 +167,14 @@ int ObPLParser::parse_routine_body(const ObString &routine_body,
                                    bool is_for_trigger)
 {
   int ret = OB_SUCCESS;
+#ifdef ENABLE_RUST_PARSER
+  ParseResult result{};
+  result.malloc_pool_ = &allocator_;
+  result.sql_mode_ = sql_mode_;
+  ret = sql::parse_rust_sql(routine_body, result, true);
+  routine_stmt = result.result_tree_;
+  return ret;
+#endif
   int32_t prefix_len = 0;
   char *buf = NULL;
   const char *prefix = "^ ";  // something totally different from SQL style
@@ -211,6 +222,14 @@ int ObPLParser::parse_package(const ObString &package,
                               const ObTriggerInfo *trg_info)
 {
   int ret = OB_SUCCESS;
+#ifdef ENABLE_RUST_PARSER
+  ParseResult result{};
+  result.malloc_pool_ = &allocator_;
+  result.sql_mode_ = sql_mode_;
+  ret = sql::parse_rust_sql(package, result, true);
+  package_stmt = result.result_tree_;
+  return ret;
+#endif
   ObParseCtx parse_ctx;
   memset(&parse_ctx, 0, sizeof(ObParseCtx));
   parse_ctx.global_errno_ = OB_SUCCESS;

@@ -28,6 +28,8 @@ pub(crate) struct Name {
 pub(crate) struct Select {
     pub distinct: bool,
     pub projection: Vec<Node>,
+    pub into: Option<Node>,
+    pub into_end: Option<Node>,
     pub from: Vec<Node>,
     pub filter: Option<Node>,
     pub group_by: Vec<Node>,
@@ -40,6 +42,28 @@ pub(crate) struct Select {
 }
 
 impl Node {
+    fn contains_user_variable(&self) -> bool {
+        self.kind == Kind::GetUserVariable || self.children.iter().any(Self::contains_user_variable)
+    }
+
+    pub fn pl_expression(self) -> Result<Self, &'static str> {
+        if !self.contains_user_variable() {
+            return Ok(self);
+        }
+        let (start, end) = (self.start, self.end);
+        let alias = Self::new(Kind::Ident, vec![]).text("SUBQUERY".into());
+        let projection = Self::new(
+            Kind::Projection,
+            vec![Self::new(Kind::Alias, vec![self, alias])],
+        );
+        let mut query = Self::select(Select {
+            projection: vec![projection],
+            ..Select::default()
+        })?;
+        query.kind = Kind::PlSubquery;
+        Ok(query.at(start, end))
+    }
+
     pub fn setting_value(variable: &Self, mut value: Self) -> Self {
         if variable.kind != Kind::UserVariable
             && value.kind == Kind::Column
@@ -288,8 +312,22 @@ impl Node {
         start: usize,
         end: usize,
     ) -> Result<Self, &'static str> {
-        if name.len() != 1 {
-            return Err("qualified function calls are not integrated yet");
+        if name.len() > 1 {
+            if name.len() > 3 || distinct || window.is_some() {
+                return Err("qualified function call");
+            }
+            let function = Self::new(
+                Kind::Function,
+                vec![
+                    Self::name(name.pop().unwrap()),
+                    Self::list(Kind::ExprList, arguments),
+                ],
+            );
+            let mut access = Self::new(Kind::ObjectAccess, vec![function, Self::missing()]);
+            for part in name.into_iter().rev() {
+                access = Self::new(Kind::ObjectAccess, vec![Self::name(part), access]);
+            }
+            return access.expression(start, end);
         }
         let mut name = name.pop().unwrap();
         let function = if !name.quoted {
@@ -484,6 +522,9 @@ impl Node {
     }
 
     pub fn select(query: Select) -> Result<Self, &'static str> {
+        if query.into.is_some() && query.into_end.is_some() {
+            return Err("one INTO clause");
+        }
         let distinct = if query.distinct {
             Self::new(Kind::Distinct, vec![])
         } else {
@@ -524,6 +565,7 @@ impl Node {
             vec![
                 distinct,
                 projection,
+                Self::optional(query.into),
                 from,
                 filter,
                 group,
@@ -533,6 +575,7 @@ impl Node {
                 query.limit.unwrap_or_else(Self::missing),
                 query.lock.unwrap_or_else(Self::missing),
                 Self::list(Kind::Hints, query.hints),
+                Self::optional(query.into_end),
             ],
         )
         .expression(0, 0)

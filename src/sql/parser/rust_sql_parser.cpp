@@ -14,6 +14,7 @@
 
 #define USING_LOG_PREFIX SQL_PARSER
 #include "rust/sql_parser.h"
+#include "sql/parser/rust_sql_parser.h"
 #include "sql/parser/parse_node.h"
 #include "sql/parser/parse_malloc.h"
 #include "lib/string/ob_string.h"
@@ -263,6 +264,79 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Execute: return T_EXECUTE;
     case Kind::ExecuteArguments: return T_ARGUMENT_LIST;
     case Kind::Deallocate: return T_DEALLOCATE;
+    case Kind::CreateProcedure: return T_SP_CREATE;
+    case Kind::CreateFunction: return T_SF_CREATE;
+    case Kind::DropProcedure: return T_SP_DROP;
+    case Kind::DropFunction: return T_SF_DROP;
+    case Kind::AlterProcedure: return T_SP_ALTER;
+    case Kind::AlterFunction: return T_SF_ALTER;
+    case Kind::RoutineName: return T_SP_NAME;
+    case Kind::RoutineParameters: return T_SP_PARAM_LIST;
+    case Kind::RoutineParameter: return T_SP_PARAM;
+    case Kind::RoutineClauses: return T_SP_CLAUSE_LIST;
+    case Kind::Deterministic: return T_SP_DETERMINISTIC;
+    case Kind::DataAccess: return T_SP_DATA_ACCESS;
+    case Kind::InvokeRights: return T_SP_INVOKE;
+    case Kind::PlBlock: return T_SP_BLOCK_CONTENT;
+    case Kind::PlStatements: return T_SP_PROC_STMT_LIST;
+    case Kind::PlDeclarations: return T_SP_DECL_LIST;
+    case Kind::PlDeclaration: return T_SP_DECL;
+    case Kind::PlIdentifiers: return T_SP_DECL_IDENT_LIST;
+    case Kind::PlDefault: return T_SP_DECL_DEFAULT;
+    case Kind::PlHandler: return T_SP_DECL_HANDLER;
+    case Kind::PlHandlerConditions: return T_SP_HCOND_LIST;
+    case Kind::PlConditionDeclaration: return T_SP_DECL_COND;
+    case Kind::PlCondition: return T_SP_CONDITION;
+    case Kind::SqlState: return T_SQL_STATE;
+    case Kind::SqlException: return T_SQL_EXCEPTION;
+    case Kind::SqlWarning: return T_SQL_WARNING;
+    case Kind::SqlNotFound: return T_SQL_NOT_FOUND;
+    case Kind::PlSql: return T_SQL_STMT;
+    case Kind::PlSubquery: return T_SELECT;
+    case Kind::PlIf: return T_SP_IF;
+    case Kind::PlElse: return T_SP_ELSE;
+    case Kind::PlCase: return T_SP_CASE;
+    case Kind::PlWhen: return T_SP_WHEN;
+    case Kind::PlWhile: return T_SP_WHILE;
+    case Kind::PlLoop: return T_SP_LOOP;
+    case Kind::PlRepeat: return T_SP_REPEAT;
+    case Kind::PlReturn: return T_SP_RETURN;
+    case Kind::PlLeave: return T_SP_LEAVE;
+    case Kind::PlIterate: return T_SP_ITERATE;
+    case Kind::PlLabeledBlock: return T_SP_LABELED_BLOCK;
+    case Kind::PlLabeledControl: return T_SP_LABELED_CONTROL;
+    case Kind::PlCall: return T_SP_CALL_STMT;
+    case Kind::PlCallName: return T_SP_ACCESS_NAME;
+    case Kind::PlCallArguments: return T_SP_CPARAM_LIST;
+    case Kind::Diagnostics: return T_DIAGNOSTICS;
+    case Kind::PlSignal: return T_SP_SIGNAL;
+    case Kind::PlResignal: return T_SP_RESIGNAL;
+    case Kind::PlSignalItems: return T_SP_SIGNAL_INFO_LIST;
+    case Kind::PlSignalItem: return T_SP_SIGNAL_INFO_ITEM;
+    case Kind::PlCursor: return T_SP_DECL_CURSOR;
+    case Kind::PlOpen: return T_SP_PROC_OPEN;
+    case Kind::PlClose: return T_SP_PROC_CLOSE;
+    case Kind::PlFetch: return T_SP_PROC_FETCH;
+    case Kind::PlInto: return T_SP_INTO_LIST;
+    case Kind::IntoVariables: return T_INTO_VARIABLES;
+    case Kind::IntoVariableList: return T_INTO_VARS_LIST;
+    case Kind::CreatePackage: return T_PACKAGE_CREATE;
+    case Kind::CreatePackageBody: return T_PACKAGE_CREATE_BODY;
+    case Kind::DropPackage: return T_PACKAGE_DROP;
+    case Kind::Package: return T_PACKAGE_BLOCK;
+    case Kind::PackageBody: return T_PACKAGE_BODY_BLOCK;
+    case Kind::PackageStatements: return T_PACKAGE_STMTS;
+    case Kind::PackageBodyStatements: return T_PACKAGE_BODY_STMTS;
+    case Kind::SubProcedureDeclaration: return T_SUB_PROC_DECL;
+    case Kind::SubFunctionDeclaration: return T_SUB_FUNC_DECL;
+    case Kind::SubProcedureDefinition: return T_SUB_PROC_DEF;
+    case Kind::SubFunctionDefinition: return T_SUB_FUNC_DEF;
+    case Kind::InterfacePragma: return T_SP_PRAGMA_INTERFACE;
+    case Kind::ObjectAccess: return T_OBJ_ACCESS_REF;
+    case Kind::JsonTable: return T_JSON_TABLE_EXPRESSION;
+    case Kind::JsonColumn: return T_JSON_TABLE_COLUMN;
+    case Kind::HiddenNull: return T_NULL;
+    case Kind::NullClause: return T_NULLX_CLAUSE;
     default: return T_INVALID;
   }
 }
@@ -325,6 +399,7 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   else if (name == "varchar" || name == "varbinary") type = T_VARCHAR;
   else if (name == "char" || name == "binary") type = T_CHAR;
   else if (name == "text" || name == "blob") type = T_TEXT;
+  else if (name == "longtext" || name == "longblob") type = T_LONGTEXT;
   else if (name == "datetime") type = T_DATETIME;
   else if (name == "timestamp") type = T_TIMESTAMP;
   else if (name == "time") type = T_TIME;
@@ -334,8 +409,8 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
   const bool integer = type == T_TINYINT || type == T_SMALLINT || type == T_MEDIUMINT
       || type == T_INT32 || type == T_INT;
-  const bool string = type == T_CHAR || type == T_VARCHAR || type == T_TEXT;
-  const bool binary = name == "binary" || name == "varbinary" || name == "blob";
+  const bool string = type == T_CHAR || type == T_VARCHAR || type == T_TEXT || type == T_LONGTEXT;
+  const bool binary = name == "binary" || name == "varbinary" || name == "blob" || name == "longblob";
   if (source.value != 0) {
     if (integer) type = static_cast<ObItemType>(type + T_UTINYINT - T_TINYINT);
     else if (type == T_FLOAT || type == T_DOUBLE) type = static_cast<ObItemType>(type + T_UFLOAT - T_FLOAT);
@@ -386,28 +461,30 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
 }
 
 int build_node(const common::ObString &sql, const peg::Node &source, size_t parameters,
-               void *pool, ParseNode *&node)
+               void *pool, ParseNode *&node, bool pl = false)
 {
   node = nullptr;
   if (source.kind == Kind::Missing) return common::OB_SUCCESS;
   if (source.kind == Kind::DataType || source.kind == Kind::CastType) return build_type(source, pool, node);
   if (source.kind == Kind::Parenthesized) {
-    const int ret = build_node(sql, source.children[0], parameters, pool, node);
+    const int ret = build_node(sql, source.children[0], parameters, pool, node, pl);
     if (ret != common::OB_SUCCESS) return ret;
     node->is_assigned_from_child_ = true;
     return common::OB_SUCCESS;
   }
   const ObItemType type = node_type(source);
+  pl = pl || type == T_SP_CREATE || type == T_SF_CREATE || type == T_SP_CALL_STMT
+      || type == T_PACKAGE_CREATE || type == T_PACKAGE_CREATE_BODY;
   if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
   node = new_node(pool, type, type == T_SELECT ? PARSE_SELECT_MAX_IDX : source.children.size());
   if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-  const int select_slots[] = {PARSE_SELECT_DISTINCT, PARSE_SELECT_SELECT, PARSE_SELECT_FROM,
+  const int select_slots[] = {PARSE_SELECT_DISTINCT, PARSE_SELECT_SELECT, PARSE_SELECT_INTO, PARSE_SELECT_FROM,
                              PARSE_SELECT_WHERE, PARSE_SELECT_DYNAMIC_GROUP, PARSE_SELECT_DYNAMIC_HAVING,
                              PARSE_SELECT_NAMED_WINDOWS, PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT,
-                             PARSE_SELECT_FOR_UPD, PARSE_SELECT_HINTS};
+                             PARSE_SELECT_FOR_UPD, PARSE_SELECT_HINTS, PARSE_SELECT_INTO_EXTRA};
   for (size_t child = 0; child < source.children.size(); ++child) {
     const size_t slot = type == T_SELECT ? select_slots[child] : child;
-    const int ret = build_node(sql, source.children[child], parameters, pool, node->children_[slot]);
+    const int ret = build_node(sql, source.children[child], parameters, pool, node->children_[slot], pl);
     if (ret != common::OB_SUCCESS) return ret;
   }
   if (type == T_SELECT && node->children_[PARSE_SELECT_DISTINCT] != nullptr) {
@@ -416,16 +493,21 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
     options->children_[0] = node->children_[PARSE_SELECT_DISTINCT];
     node->children_[PARSE_SELECT_DISTINCT] = options;
   }
-  node->value_ = type == T_SELECT ? parameters : source.value;
+  if (type != T_FUN_SYS) node->value_ = type == T_SELECT ? parameters : source.value;
   node->sql_str_off_ = source.start;
   node->raw_sql_offset_ = source.start;
   node->stmt_loc_.first_column_ = source.start + 1;
   node->stmt_loc_.last_column_ = source.end;
+  if (pl) {
+    node->pl_str_off_ = source.start;
+    node->stmt_loc_.first_column_ = source.start;
+    node->stmt_loc_.last_column_ = source.end == 0 ? 0 : source.end - 1;
+  }
   const char *raw = sql.ptr() + source.start;
   const size_t raw_length = source.end - source.start;
   const bool literal = type == T_INT || type == T_UINT64 || type == T_NUMBER || type == T_DOUBLE
       || type == T_VARCHAR || type == T_HEX_STRING || type == T_BOOL || type == T_NULL || type == T_QUESTIONMARK;
-  if (literal && source.kind != Kind::HiddenInt && source.kind != Kind::CacheType) {
+  if (literal && source.kind != Kind::HiddenInt && source.kind != Kind::HiddenNull && source.kind != Kind::CacheType) {
     node->raw_text_ = parse_strndup(raw, raw_length, pool);
     if (node->raw_text_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     node->text_len_ = raw_length;
@@ -435,7 +517,9 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
   size_t length = source.text.size();
   if (type == T_PROJECT_STRING || type == T_COLUMN_REF || type == T_OP_POS || type == T_OP_NEG
       || source.kind == Kind::Binary || source.kind == Kind::Between || source.kind == Kind::In
-      || source.kind == Kind::Is || source.kind == Kind::Window) {
+      || source.kind == Kind::Is || source.kind == Kind::Window || source.kind == Kind::PlSql
+      || source.kind == Kind::RoutineParameters || source.kind == Kind::PlDefault
+      || source.kind == Kind::SubProcedureDeclaration || source.kind == Kind::SubFunctionDeclaration || source.kind == Kind::ObjectAccess) {
     text = raw;
     length = raw_length;
   }
@@ -454,6 +538,17 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
     if (node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     node->str_len_ = length;
   }
+  if (source.kind == Kind::PlSubquery) {
+    const char *prefix = "(SELECT ";
+    const char *suffix = " AS SUBQUERY)";
+    const size_t length = strlen(prefix) + raw_length + strlen(suffix);
+    char *query = static_cast<char *>(parse_malloc(length + 1, pool));
+    if (query == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    snprintf(query, length + 1, "%s%.*s%s", prefix, static_cast<int>(raw_length), raw, suffix);
+    node->str_value_ = query;
+    node->str_len_ = length;
+    node->pl_str_off_ = -1;
+  }
   if (source.kind == Kind::Privilege) {
     node->value_ = privilege_type(source);
     if (node->value_ < 0) return common::OB_ERR_UNEXPECTED;
@@ -466,7 +561,7 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
     node->param_num_ = 1;
     node->children_[1]->is_input_quoted_ = false;
   }
-  if (source.kind == Kind::HiddenInt) node->is_hidden_const_ = true;
+  if (source.kind == Kind::HiddenInt || source.kind == Kind::HiddenNull) node->is_hidden_const_ = true;
   if (source.kind == Kind::CacheType) {
     node->value_ = source.text == "plan" ? CACHE_TYPE_PLAN : source.text == "pl" ? CACHE_TYPE_PL_OBJ
         : source.text == "ps" ? CACHE_TYPE_PS_OBJ : CACHE_TYPE_LIB_CACHE;
@@ -504,6 +599,30 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
       child->type_ = T_NUMBER;
     }
   }
+  if (type == T_PACKAGE_BLOCK || type == T_PACKAGE_BODY_BLOCK) {
+    const size_t start = source.children[type == T_PACKAGE_BLOCK ? 2 : 1].start;
+    node->str_value_ = parse_strndup(sql.ptr() + start, source.end - start, pool);
+    if (node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    node->str_len_ = source.end - start;
+    node->pl_str_off_ = start;
+  }
+  if (type == T_PACKAGE_CREATE || type == T_PACKAGE_CREATE_BODY) {
+    const auto &body_source = source.children[0];
+    ParseNode *body = node->children_[0];
+    body->str_value_ = parse_strndup(sql.ptr() + body_source.start, body_source.end - body_source.start, pool);
+    if (body->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    body->str_len_ = body_source.end - body_source.start;
+    body->pl_str_off_ = body_source.start;
+  }
+  if (type == T_SP_CREATE || type == T_SF_CREATE || type == T_SUB_PROC_DEF || type == T_SUB_FUNC_DEF) {
+    ParseNode *body = node->children_[node->num_child_ - 1];
+    body->str_value_ = parse_strndup(raw, raw_length, pool);
+    if (body->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    body->str_len_ = raw_length;
+    const auto &body_source = source.children[source.children.size() - 1];
+    body->raw_text_ = body->str_value_ + body_source.start - source.start;
+    body->text_len_ = body_source.end - body_source.start;
+  }
   if (type == T_OP_LIKE && source.text == "not like") {
     ParseNode *negation = new_node(pool, T_OP_NOT, 1);
     if (negation == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
@@ -513,10 +632,10 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
   return common::OB_SUCCESS;
 }
 
-int build_tree(const common::ObString &sql, const peg::ParseTree &tree, ParseResult &result)
+int build_tree(const common::ObString &sql, peg::ParseTree &tree, ParseResult &result, bool routine_body)
 {
   ParseNode *query = nullptr;
-  const int ret = build_node(sql, tree.root, tree.parameters, result.malloc_pool_, query);
+  const int ret = build_node(sql, tree.root, tree.parameters, result.malloc_pool_, query, routine_body);
   if (ret != common::OB_SUCCESS) return ret;
   ParseNode *root = new_node(result.malloc_pool_, T_STMT_LIST, 1);
   if (root == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
@@ -526,8 +645,17 @@ int build_tree(const common::ObString &sql, const peg::ParseTree &tree, ParseRes
       || tree.root.kind == Kind::CreateUser || tree.root.kind == Kind::SetPassword || tree.root.kind == Kind::Grant;
   result.may_contain_sensitive_data_ = result.contain_sensitive_data_
       || tree.root.kind == Kind::DropUser || tree.root.kind == Kind::Revoke || tree.root.kind == Kind::RevokeAll;
-  result.question_mark_ctx_.count_ = tree.parameters;
-  result.question_mark_ctx_.by_ordinal_ = tree.parameters != 0;
+  if (tree.parameter_names.empty()) {
+    result.question_mark_ctx_.count_ = tree.parameters;
+    result.question_mark_ctx_.by_ordinal_ = tree.parameters != 0;
+  } else {
+    for (auto &name : tree.parameter_names) {
+      if (get_question_mark(&result.question_mark_ctx_, result.malloc_pool_, name.c_str()) < 0) {
+        return common::OB_ALLOCATE_MEMORY_FAILED;
+      }
+      result.question_mark_ctx_.by_name_ |= name.data()[1] < '0' || name.data()[1] > '9';
+    }
+  }
   if (result.is_dynamic_sql_) {
     MEMCPY(result.no_param_sql_, sql.ptr(), sql.length());
     result.no_param_sql_[sql.length()] = '\0';
@@ -537,7 +665,7 @@ int build_tree(const common::ObString &sql, const peg::ParseTree &tree, ParseRes
 }
 }
 
-int parse_rust_sql(const common::ObString &sql, ParseResult &result)
+int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routine_body)
 {
   static thread_local char error[MAX_ERROR_MSG];
   error[0] = '\0';
@@ -547,7 +675,7 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result)
   auto parsed = peg::parse_sql(rust::Slice<const uint8_t>(
       reinterpret_cast<const uint8_t *>(sql.ptr()), sql.length()),
       result.sql_mode_ & SMO_ANSI_QUOTES, result.sql_mode_ & SMO_NO_BACKSLASH_ESCAPES,
-      result.sql_mode_ & SMO_PIPES_AS_CONCAT, result.sql_mode_ & SMO_HIGH_NOT_PRECEDENCE);
+      result.sql_mode_ & SMO_PIPES_AS_CONCAT, result.sql_mode_ & SMO_HIGH_NOT_PRECEDENCE, routine_body);
   if (!parsed.error.empty()) {
     snprintf(error, sizeof(error), "rust-peg: %s", parsed.error.c_str());
     result.start_col_ = parsed.error_offset + 1;
@@ -557,6 +685,6 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result)
     LOG_USER_ERROR(OB_ERR_PARSE_SQL, error, 0, "", line);
     return common::OB_ERR_PARSE_SQL;
   }
-  return build_tree(sql, parsed, result);
+  return build_tree(sql, parsed, result, routine_body);
 }
 }

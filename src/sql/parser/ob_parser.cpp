@@ -15,6 +15,9 @@
  */
 
 #define USING_LOG_PREFIX SQL_PARSER
+#ifdef ENABLE_RUST_PARSER
+#include "sql/parser/rust_sql_parser.h"
+#endif
 #include "ob_parser.h"
 #include "lib/utility/ob_smart_call.h"
 #include "lib/oblog/ob_log.h"
@@ -834,11 +837,6 @@ void ObParser::get_single_sql(const common::ObString &stmt, int64_t offset, int6
     in_string = sq_flag || bt_flag || dq_flag;
   }
 }
-#ifdef ENABLE_RUST_PARSER
-namespace oceanbase::sql {
-int parse_rust_sql(const ObString &sql, ParseResult &result);
-}
-#endif
 
 int ObParser::parse_sql(const ObString &stmt,
                         ParseResult &parse_result,

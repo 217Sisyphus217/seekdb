@@ -176,6 +176,9 @@ peg::parser! {
             / start:position!() kw("false") {? Node::new(Kind::Bool, vec![]).value(0).expression(start, start+5) }
         rule parameter() -> Node
             = start:position!() "?" end:position!() _ {? Node::new(Kind::Parameter, vec![]).expression(start, end) }
+            / start:position!() text:$(":" (['0'..='9']+ !cont()
+                / ['a'..='z' | 'A'..='Z' | '_' | '$' | '\u{80}'..='\u{10ffff}'] cont()*)) end:position!() _
+                {? Node::new(Kind::Parameter, vec![]).text(text.into()).expression(start, end) }
         rule hex_digit() = ['0'..='9' | 'a'..='f' | 'A'..='F']
         rule binary_literal() -> Node
             = start:position!() ['x'|'X'] "'" text:$(hex_digit()*) "'" end:position!() _ {?
@@ -290,7 +293,29 @@ peg::parser! {
         rule expr(level: usize) -> Node = left:xor_expr(level) rest:((kw("or") / enabled(!mode.pipes_as_concat) "||" _) right:xor_expr(level) { ("or".into(), right) })* {? chain(left, rest) }
         rule expr_list(level: usize) -> Vec<Node> = values:(expr(level) ++ ("," _)) { values }
         rule item(level: usize) -> Node = expression:expr(level) alias:(kw("as")? value:(name:ident() { Node::name(name) } / string()) { value })? {? Node::projection(expression, alias) }
-        rule relation(level: usize) -> Node = lateral:kw("lateral")? source:("(" _ query:select(level+1) ")" _ { query }
+        rule json_response() -> (Node,Node) = kw("error") { (Node::new(Kind::HiddenInt,vec![]),Node::new(Kind::HiddenNull,vec![])) }
+            / start:position!() kw("null") { (Node::new(Kind::NullClause,vec![]).value(1).at(start,start+4),Node::new(Kind::HiddenNull,vec![])) }
+            / kw("default") value:(string() / number() / bool_null()) { (Node::new(Kind::HiddenInt,vec![]).value(2),value) }
+        rule json_options() -> Node = options:((response:json_response() kw("on") empty:(kw("empty") { true } / kw("error") { false }) { (empty,response) })*) {?
+            let mut empty=None;let mut error=None;
+            for (is_empty,value) in options { let slot=if is_empty { &mut empty } else { &mut error };if slot.is_some() { return Err("duplicate JSON response clause"); } *slot=Some(value); }
+            let default=|| (Node::new(Kind::HiddenInt,vec![]).value(3),Node::new(Kind::HiddenNull,vec![]));
+            let (empty_kind,empty_value)=empty.unwrap_or_else(default);let (error_kind,error_value)=error.unwrap_or_else(default);
+            Ok(Node::new(Kind::Link,vec![empty_kind,empty_value,error_kind,error_value,Node::new(Kind::Link,vec![Node::new(Kind::HiddenInt,vec![]).value(3),Node::new(Kind::HiddenInt,vec![]).value(3)])]))
+        }
+        rule json_column(level: usize) -> Node
+            = depth(level) kw("nested") kw("path")? path:string() kw("columns") "(" _ columns:(json_column(level+1) ++ ("," _)) ")" _ {
+                Node::new(Kind::JsonColumn,vec![path,Node::new(Kind::ExprList,columns)]).value(5)
+            }
+            / name:ident() kw("for") kw("ordinality") { Node::new(Kind::JsonColumn,vec![Node::name(name),Node::new(Kind::HiddenInt,vec![])]).value(1) }
+            / name:ident() data_type:data_type() exists:kw("exists")? kw("path") path:string() options:json_options() {
+                let options=if exists.is_some() { Node::new(Kind::Link,vec![Node::new(Kind::HiddenInt,vec![]).value(3),Node::new(Kind::HiddenInt,vec![]).value(3)]) } else { options };
+                Node::new(Kind::JsonColumn,vec![Node::name(name),data_type,Node::new(Kind::HiddenInt,vec![]),path,options]).value(if exists.is_some() { 2 } else { 4 })
+            }
+        rule json_table(level: usize) -> Node = kw("json_table") "(" _ document:expr(level+1) "," _ path:string() kw("columns") "(" _ columns:(json_column(level+1) ++ ("," _)) ")" _ ")" _ alias:alias()? {
+            Node::new(Kind::JsonTable,vec![document,path,Node::new(Kind::Link,vec![Node::new(Kind::HiddenInt,vec![]).value(3),Node::new(Kind::HiddenInt,vec![]).value(3)]),Node::new(Kind::ExprList,columns),alias.map(Node::name).unwrap_or_else(Node::missing)])
+        }
+        rule relation(level: usize) -> Node = json_table(level) / lateral:kw("lateral")? source:("(" _ query:select(level+1) ")" _ { query }
             / name:name() {? Node::relation(name) }) alias:alias()?
             columns:("(" _ names:(ident() ++ ("," _)) ")" _ { names })? {?
                 if (lateral.is_some() || columns.is_some()) && source.kind!=Kind::Select { return Err("derived table"); }
@@ -402,14 +427,17 @@ peg::parser! {
             / kw("opt_param") "(" _ name:string() ("," _)? value:(string() / number()) ")" _ { Node::new(Kind::OptParam,vec![name,value]) }
         rule hints() -> Vec<Node> = "/*+" _ options:(hint_option() ** (("," _)?)) "*/" _ { options }
         rule select(level: usize) -> Node = select_query(level) / values_query(level)
-        rule select_query(level: usize) -> Node = depth(level) kw("select") hints:hints()? distinct:kw("distinct")? projection:(item(level) ++ ("," _))
+        rule select_into() -> Node = kw("into") variables:((user_variable() / name:ident() { Node::name(name) }) ++ ("," _)) {
+            Node::new(Kind::IntoVariables,vec![Node::new(Kind::IntoVariableList,variables)])
+        }
+        rule select_query(level: usize) -> Node = depth(level) kw("select") hints:hints()? distinct:kw("distinct")? projection:(item(level) ++ ("," _)) into:select_into()?
             from:(kw("from") tables:(table(level) ++ ("," _)) { tables })?
             filter:(kw("where") value:expr(level) { value })?
             group_by:(kw("group") kw("by") values:expr_list(level) { values })?
             having:(kw("having") value:expr(level) { value })?
             windows:(kw("window") values:(named_window(level) ++ ("," _)) { values })?
             order_by:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })?
-            limit:limit()? lock:lock()? {? Node::select(Select { distinct: distinct.is_some(), projection, from: from.unwrap_or_default(), filter, group_by: group_by.unwrap_or_default(), having, order_by: order_by.unwrap_or_default(), limit, lock, hints:hints.unwrap_or_default(),windows:windows.unwrap_or_default() }) }
+            limit:limit()? lock:lock()? into_end:select_into()? {? Node::select(Select { distinct: distinct.is_some(), projection, into, into_end, from: from.unwrap_or_default(), filter, group_by: group_by.unwrap_or_default(), having, order_by: order_by.unwrap_or_default(), limit, lock, hints:hints.unwrap_or_default(),windows:windows.unwrap_or_default() }) }
         rule values_query(level: usize) -> Node = depth(level) kw("values") rows:((kw("row") value:row() { value }) ++ ("," _))
             order:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })? limit:limit()? {?
                 let values=Node::new(Kind::Values,vec![Node::new(Kind::ValuesRows,rows)]);
@@ -482,6 +510,7 @@ peg::parser! {
             / kw("boolean") { "boolean" } / kw("bool") { "bool" }
             / kw("varchar") { "varchar" } / (kw("char") / kw("character")) { "char" }
             / kw("text") { "text" } / kw("blob") { "blob" }
+            / kw("longtext") { "longtext" } / kw("longblob") { "longblob" }
             / kw("varbinary") { "varbinary" } / kw("binary") { "binary" }
             / kw("datetime") { "datetime" } / kw("timestamp") { "timestamp" }
             / kw("time") { "time" } / kw("date") { "date" } / kw("json") { "json" }
@@ -709,6 +738,177 @@ peg::parser! {
             / kw("revoke") exists:if_exists()? privileges:privileges() kw("on") object:privilege_object()? level:privilege_level() kw("from") users:accounts() {
                 Node::new(Kind::Revoke,vec![Node::new(Kind::Privileges,privileges),Node::optional(object),level,users,Node::optional(exists),Node::missing()])
             }
+        rule package_routine() -> Node = start:position!() function:(kw("procedure") { false } / kw("function") { true }) name:ident() params:routine_parameters(false)
+            result:(enabled(function) kw("return") value:data_type() { value })? end:position!() {?
+                if function && result.is_none() { return Err("function return type"); }
+                let mut children=vec![Node::name(name),params];
+                if function { children.extend([Node::optional(result),Node::missing()]); }
+                children.push(Node::missing());
+                Ok(Node::new(if function { Kind::SubFunctionDeclaration } else { Kind::SubProcedureDeclaration },children).at(start,end))
+            }
+        rule package_declaration(body: bool) -> Node
+            = start:position!() declaration:package_routine() definition:(enabled(body) value:pl_statement(0) { value })? end:position!() {
+                match definition { Some(value) => Node::new(if declaration.kind==Kind::SubFunctionDeclaration { Kind::SubFunctionDefinition } else { Kind::SubProcedureDefinition },vec![declaration,value]).at(start,end),None => declaration }
+            }
+            / enabled(body) kw("pragma") kw("interface") "(" _ kw("c") "," _ name:ident() ")" _ { Node::new(Kind::InterfacePragma,vec![Node::name(name)]) }
+            / pl_declaration(0)
+        rule package_block() -> Node = start:position!() kw("package") body:kw("body")? name:routine_name()
+            rights:(enabled(body.is_none()) kw("authid") value:(kw("current_user") { 1 } / kw("definer") { 0 }) { Node::new(Kind::InvokeRights,vec![]).value(value) })?
+            contents_start:position!() declarations:((value:package_declaration(body.is_some()) ";" _ { value })*)
+            statements:(enabled(body.is_some()) value:pl_statements(0) { value })? kw("end") tail:ident()? end:position!() {
+                let declarations=Node::list(if body.is_some() { Kind::PackageBodyStatements } else { Kind::PackageStatements },declarations).at(contents_start,end);
+                let middle=if body.is_some() { vec![declarations,Node::optional(statements)] } else { vec![Node::list(Kind::RoutineClauses,rights.into_iter().collect()),declarations] };
+                let mut children=vec![name];children.extend(middle);children.push(tail.map(Node::name).unwrap_or_else(Node::missing));
+                Node::new(if body.is_some() { Kind::PackageBody } else { Kind::Package },children).at(start,end)
+            }
+        rule package_statement() -> Node
+            = kw("create") replace:(kw("or") kw("replace"))? value:package_block() {
+                Node::new(if value.kind==Kind::PackageBody { Kind::CreatePackageBody } else { Kind::CreatePackage },vec![value]).value(u64::from(replace.is_some()))
+            }
+            / kw("drop") kw("package") body:kw("body")? name:routine_name() { Node::new(Kind::DropPackage,vec![name]).value(if body.is_some() { 2 } else { 0 }) }
+        rule routine_name() -> Node = parts:name() {?
+            if parts.len()>2 { return Err("routine name has at most two parts"); }
+            let mut names:Vec<_>=(parts.len()..2).map(|_| Node::missing()).collect();
+            names.extend(parts.into_iter().map(Node::name));
+            Ok(Node::new(Kind::RoutineName,names))
+        }
+        rule routine_default() -> Node = kw("default") start:position!() value:expr(0) end:position!() {
+            Node::new(Kind::PlDefault,vec![value]).at(start,end)
+        }
+        rule routine_parameter(function: bool) -> Node
+            = direction:(enabled(!function) value:(kw("inout") { 2 } / kw("out") { 1 } / kw("in") { 0 }) { value })?
+                name:ident() data_type:data_type() default:(enabled(!function) value:routine_default() { value })? {
+                let mut children=vec![Node::name(name),data_type];
+                if !function { children.push(Node::optional(default)); }
+                Node::new(Kind::RoutineParameter,children).value(direction.unwrap_or(0))
+            }
+        rule routine_parameters(function: bool) -> Node = "(" start:position!() _ values:(routine_parameter(function) ** ("," _)) end:position!() ")" _ {
+            Node::list(Kind::RoutineParameters,values).at(start,end)
+        }
+        rule routine_characteristic() -> Node
+            = kw("comment") value:string() { Node { kind:Kind::ColumnComment,..value } }
+            / kw("language") kw("sql") { Node::missing() }
+            / kw("not") kw("deterministic") { Node::missing() }
+            / kw("deterministic") { Node::new(Kind::Deterministic,vec![]) }
+            / value:(kw("contains") kw("sql") { 0 } / kw("no") kw("sql") { 1 }
+                / kw("reads") kw("sql") kw("data") { 2 } / kw("modifies") kw("sql") kw("data") { 3 }) {
+                Node::new(Kind::DataAccess,vec![]).value(value)
+            }
+            / kw("sql") kw("security") value:(kw("definer") { 0 } / kw("invoker") { 2 }) { Node::new(Kind::InvokeRights,vec![]).value(value) }
+        rule routine_definition() -> Node = start:position!() function:(kw("procedure") { false } / kw("function") { true })
+            absent:if_not_exists()? name:routine_name() params:routine_parameters(function)
+            result:(enabled(function) kw("returns") value:data_type() { value })?
+            clauses:routine_characteristic()* body:pl_statement(0) end:position!() {?
+                if function && result.is_none() { return Err("function return type"); }
+                let mut children=vec![Node::missing(),name,params];
+                if function { children.push(Node::optional(result)); }
+                children.push(Node::list(Kind::RoutineClauses,clauses.into_iter().filter(|node| node.kind!=Kind::Missing).collect()));
+                children.push(body);
+                Ok(Node::new(if function { Kind::CreateFunction } else { Kind::CreateProcedure },children).value(u64::from(absent.is_some())).at(start,end))
+            }
+        rule routine_statement() -> Node
+            = kw("create") definer:(kw("definer") "=" _ value:(kw("current_user") ("(" _ ")" _)? {
+                Node::new(Kind::UserHost,vec![Node::new(Kind::Ident,vec![]).text("CURRENT_USER".into()),Node::missing()])
+            } / account()) { value })? mut_value:routine_definition() {
+                let mut value=mut_value;value.children[0]=Node::optional(definer);value
+            }
+            / kw("drop") kind:(kw("procedure") { Kind::DropProcedure } / kw("function") { Kind::DropFunction }) exists:if_exists()? name:routine_name() {
+                Node::new(kind,vec![name]).value(u64::from(exists.is_some()))
+            }
+            / kw("alter") kind:(kw("procedure") { Kind::AlterProcedure } / kw("function") { Kind::AlterFunction }) name:routine_name() clauses:routine_characteristic()* {
+                Node::new(kind,vec![name,Node::list(Kind::RoutineClauses,clauses.into_iter().filter(|node| node.kind!=Kind::Missing).collect())])
+            }
+        rule pl_expression(level: usize) -> Node = value:expr(level) {? value.pl_expression() }
+        rule pl_statements(level: usize) -> Node = values:((value:pl_statement(level) ";" _ { value })*) { Node::list(Kind::PlStatements,values) }
+        rule pl_block(level: usize) -> Node = kw("begin")
+            declarations:((value:pl_declaration(level) ";" _ { value })*) statements:pl_statements(level) kw("end") {
+                Node::new(Kind::PlBlock,vec![Node::list(Kind::PlDeclarations,declarations),statements])
+            }
+        rule sql_state() -> Node = kw("sqlstate") kw("value")? value:string() { Node::new(Kind::SqlState,vec![value]) }
+        rule pl_condition() -> Node = value:(type_size() / sql_state()) { Node::new(Kind::PlCondition,vec![value]) }
+        rule handler_condition() -> Node
+            = kw("sqlexception") { Node::new(Kind::SqlException,vec![]) }
+            / kw("sqlwarning") { Node::new(Kind::SqlWarning,vec![]) }
+            / kw("not") kw("found") { Node::new(Kind::SqlNotFound,vec![]) }
+            / pl_condition() / value:ident() { Node::name(value) }
+        rule pl_declaration(level: usize) -> Node = start:position!() kw("declare") value:(
+            kind:(kw("continue") { 1 } / kw("exit") { 0 }) kw("handler") kw("for") conditions:(handler_condition() ++ ("," _)) body:pl_statement(level+1) {
+                Node::new(Kind::PlHandler,vec![Node::new(Kind::PlHandlerConditions,conditions),Node::new(Kind::PlStatements,vec![body])]).value(kind)
+            }
+            / name:ident() kw("condition") kw("for") value:pl_condition() { Node::new(Kind::PlConditionDeclaration,vec![Node::name(name),value]) }
+            / name:ident() kw("cursor") kw("for") start:position!() query:select(level+1) end:position!() {
+                Node::new(Kind::PlCursor,vec![Node::name(name),Node::missing(),Node::missing(),Node::new(Kind::PlSql,vec![query]).at(start,end)])
+            }
+            / names:(ident() ++ ("," _)) data_type:data_type() default:routine_default()? {
+                Node::new(Kind::PlDeclaration,vec![Node::new(Kind::PlIdentifiers,names.into_iter().map(Node::name).collect()),data_type,Node::optional(default)])
+            }
+        ) end:position!() { value.at(start,end) }
+        rule pl_if(level: usize) -> Node = condition:pl_expression(level) kw("then") body:pl_statements(level) alternative:pl_else(level)? {
+            Node::new(Kind::PlIf,vec![condition,body,Node::optional(alternative)])
+        }
+        rule pl_else(level: usize) -> Node
+            = kw("elseif") value:pl_if(level) { Node::new(Kind::PlElse,vec![Node::new(Kind::PlStatements,vec![value])]) }
+            / kw("else") body:pl_statements(level) { Node::new(Kind::PlElse,vec![body]) }
+        rule pl_control(level: usize) -> Node
+            = kw("loop") body:pl_statements(level) kw("end") kw("loop") { Node::new(Kind::PlLoop,vec![body]) }
+            / kw("while") condition:pl_expression(level) kw("do") body:pl_statements(level) kw("end") kw("while") { Node::new(Kind::PlWhile,vec![condition,body]) }
+            / kw("repeat") body:pl_statements(level) kw("until") condition:pl_expression(level) kw("end") kw("repeat") { Node::new(Kind::PlRepeat,vec![body,condition]) }
+        rule pl_setting(level: usize) -> Node = kw("set") assignments:((
+            variable:(user_variable() / system_variable() / name:ident() { Node::name(name) }) (":=" / "=") _ value:pl_expression(level) {
+                Node::new(Kind::VariableValue,vec![variable,value]).value(2)
+            }
+        ) ++ ("," _)) { Node::new(Kind::VariableSet,assignments) }
+        rule pl_call() -> Node = start:position!() kw("call") names:name()
+            arguments:("(" _ values:(expr(0) ** ("," _)) ")" _ { values })? end:position!() {?
+                if names.len()>3 { return Err("routine name has at most three parts"); }
+                let mut parts:Vec<_>=(names.len()..3).map(|_| Node::missing()).collect();parts.extend(names.into_iter().map(Node::name));
+                Ok(Node::new(Kind::PlCall,vec![Node::new(Kind::PlCallName,parts),Node::list(Kind::PlCallArguments,arguments.unwrap_or_default())]).at(start,end))
+            }
+        rule signal_item_name() -> (&'static str,u64)
+            = kw("class_origin") { ("CLASS_ORIGIN",0) } / kw("subclass_origin") { ("SUBCLASS_ORIGIN",1) }
+            / kw("constraint_catalog") { ("CONSTRAINT_CATALOG",2) } / kw("constraint_schema") { ("CONSTRAINT_SCHEMA",3) }
+            / kw("constraint_name") { ("CONSTRAINT_NAME",4) } / kw("catalog_name") { ("CATALOG_NAME",5) }
+            / kw("schema_name") { ("SCHEMA_NAME",6) } / kw("table_name") { ("TABLE_NAME",7) }
+            / kw("column_name") { ("COLUMN_NAME",8) } / kw("cursor_name") { ("CURSOR_NAME",9) }
+            / kw("message_text") { ("MESSAGE_TEXT",10) } / kw("mysql_errno") { ("MYSQL_ERRNO",11) }
+        rule pl_signal() -> Node = kind:(kw("signal") { Kind::PlSignal } / kw("resignal") { Kind::PlResignal })
+            condition:(sql_state() / !kw("set") value:ident() { Node::name(value) })?
+            items:(kw("set") values:((name:signal_item_name() "=" _ value:(string() / number() / bool_null() / user_variable() / system_variable() / names:name() {? Node::column(names,false,0,0) }) {
+                Node::new(Kind::PlSignalItem,vec![value]).value(name.1)
+            }) ++ ("," _)) { values })? {?
+                if kind==Kind::PlSignal && condition.is_none() { Err("SIGNAL condition") }
+                else { Ok(Node::new(kind,vec![Node::optional(condition),Node::list(Kind::PlSignalItems,items.unwrap_or_default())])) }
+            }
+        rule diagnostics_target() -> Node = user_variable() / parameter() / name:ident() { Node::name(name) }
+        rule diagnostics_item(condition: bool) -> Node = target:diagnostics_target() "=" _ name:(
+            enabled(condition) name:(kw("returned_sqlstate") { "RETURNED_SQLSTATE" } / name:signal_item_name() { name.0 }) { name }
+            / enabled(!condition) name:(kw("number") { "NUMBER" } / kw("row_count") { "ROW_COUNT" }) { name }
+        ) { Node::new(Kind::Binary,vec![target,Node::new(Kind::String,vec![]).text(name.into())]).text("=".into()) }
+        rule diagnostics() -> Node = kw("get") current:(kw("current") { 1 } / kw("stacked") { 0 })? kw("diagnostics")
+            condition:(kw("condition") value:(user_variable() / parameter() / string() / type_size() / name:ident() { Node::name(name) }) { value })?
+            items:(diagnostics_item(condition.is_some()) ++ ("," _)) {
+                Node::new(Kind::Diagnostics,vec![Node::new(Kind::Bool,vec![]).value(u64::from(condition.is_some())),Node::new(Kind::Bool,vec![]).value(current.unwrap_or(1)),Node::optional(condition),Node::new(Kind::Link,items)])
+            }
+        rule pl_statement(level: usize) -> Node = depth(level) start:position!() value:(
+            label:ident() ":" _ body:(pl_block(level+1) / pl_control(level+1)) tail:ident()? {
+                Node::new(if body.kind==Kind::PlBlock { Kind::PlLabeledBlock } else { Kind::PlLabeledControl },vec![Node::name(label),body,tail.map(Node::name).unwrap_or_else(Node::missing)])
+            }
+            / pl_block(level+1) / pl_control(level+1)
+            / kw("if") body:pl_if(level+1) kw("end") kw("if") { body }
+            / kw("case") value:pl_expression(level+1)
+                arms:((kw("when") condition:pl_expression(level+1) kw("then") body:pl_statements(level+1) { Node::new(Kind::PlWhen,vec![condition,body]) })+)
+                alternative:pl_else(level+1)? kw("end") kw("case") { Node::new(Kind::PlCase,vec![value,Node::new(Kind::WhenList,arms),Node::optional(alternative)]) }
+            / kw("return") value:pl_expression(level+1) { Node::new(Kind::PlReturn,vec![value]) }
+            / kind:(kw("leave") { Kind::PlLeave } / kw("iterate") { Kind::PlIterate }) label:ident() { Node::new(kind,vec![Node::name(label),Node::missing()]) }
+            / kw("open") name:ident() { Node::new(Kind::PlOpen,vec![Node::name(name),Node::missing(),Node::missing()]) }
+            / kw("close") name:ident() { Node::new(Kind::PlClose,vec![Node::name(name)]) }
+            / kw("fetch") (kw("next") kw("from") / kw("from"))? name:ident() kw("into") variables:(pl_expression(level+1) ++ ("," _)) {
+                Node::new(Kind::PlFetch,vec![Node::name(name),Node::new(Kind::IntoVariables,vec![Node::new(Kind::PlInto,variables)])])
+            }
+            / pl_call() / pl_signal() / pl_setting(level+1)
+            / statement:sql_statement() { Node::new(Kind::PlSql,vec![statement]) }
+        ) end:position!() { value.at(start,end) }
+        pub rule routine_body() -> Node = _ value:(package_block() / value:routine_definition() { value.children.into_iter().last().unwrap() } / pl_statement(0)) (";" _)* { value }
         rule prepared_statement() -> Node
             = kw("prepare") name:ident() kw("from") source:(string() / value:user_variable() { Node::new(Kind::GetUserVariable,vec![value]) }) {
                 Node::new(Kind::Prepare,vec![Node::name(name),source])
@@ -717,7 +917,8 @@ peg::parser! {
                 Node::new(Kind::Execute,vec![Node::name(name),Node::list(Kind::ExecuteArguments,args.unwrap_or_default())])
             }
             / (kw("deallocate") / kw("drop")) kw("prepare") name:ident() { Node::new(Kind::Deallocate,vec![Node::name(name)]) }
-        pub rule query() -> Node = _ value:(select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / setting() / show() / alter_system() / prepared_statement()) (";" _)* { value }
+        rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / setting() / show() / alter_system() / prepared_statement() / diagnostics()
+        pub rule query() -> Node = _ value:(package_statement() / routine_statement() / pl_call() / sql_statement()) (";" _)* { value }
             / text:$(_ (";" _)*) { Node::new(Kind::EmptyQuery,vec![]).value(u64::from(text.chars().any(|ch| !ch.is_ascii_whitespace() && ch!=';'))) }
     }
 }
