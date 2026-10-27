@@ -93,7 +93,8 @@ impl Select {
 
 impl Node {
     fn contains_user_variable(&self) -> bool {
-        self.kind == Kind::GetUserVariable || self.children.iter().any(Self::contains_user_variable)
+        matches!(self.kind, Kind::GetUserVariable | Kind::UserAssignment)
+            || self.children.iter().any(Self::contains_user_variable)
     }
 
     pub fn pl_expression(self) -> Result<Self, &'static str> {
@@ -345,7 +346,7 @@ impl Node {
             .expression(start, end)
     }
 
-    fn is_wildcard(&self) -> bool {
+    pub fn is_wildcard(&self) -> bool {
         self.kind == Kind::Star
             || (self.kind == Kind::Column
                 && self
@@ -385,6 +386,15 @@ impl Node {
         } else {
             String::new()
         };
+        if function == "cast" && (arguments.len() != 2 || arguments[1].kind != Kind::CastType) {
+            return Err("CAST requires an expression and AS type");
+        }
+        if matches!(
+            function.as_str(),
+            "first_value" | "last_value" | "nth_value" | "lead" | "lag"
+        ) {
+            return Err("window function requires OVER");
+        }
         if function == "mod" {
             if window.is_some() || distinct || arguments.len() != 2 {
                 return Err("MOD requires two arguments");
@@ -586,12 +596,9 @@ impl Node {
         }
     }
 
-    pub fn projection(mut value: Self, alias: Option<Self>) -> Result<Self, &'static str> {
+    pub fn projection(mut value: Self, alias: Option<Self>) -> Self {
         let (start, end) = (value.start, value.end);
         if let Some(mut alias) = alias {
-            if value.is_wildcard() {
-                return Err("a wildcard cannot have a column alias");
-            }
             let text = alias.text.clone();
             let string = alias.kind == Kind::String;
             let span = if string {
@@ -611,7 +618,7 @@ impl Node {
             .text(text)
             .at(span.0, span.1);
         }
-        Ok(Self::new(Kind::Projection, vec![value]).at(start, end))
+        Self::new(Kind::Projection, vec![value]).at(start, end)
     }
 
     pub fn select(query: Select) -> Result<Self, &'static str> {

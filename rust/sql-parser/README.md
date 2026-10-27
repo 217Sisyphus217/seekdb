@@ -14,7 +14,7 @@
 实验开关和旧解析链路在全量验证通过后删除。
 
 已接入基本 SELECT、表和列别名、DISTINCT、表达式、WHERE、ORDER BY、LIMIT，
-以及 INNER／LEFT／RIGHT／CROSS JOIN、ON／USING、普通函数调用、
+以及 INNER／LEFT／RIGHT／FULL／CROSS JOIN、ON／USING、普通函数调用、
 COUNT／SUM／MIN／MAX／AVG、IF／ISNULL、时间函数调用、GROUP BY／HAVING、标量子查询、EXISTS、
 IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用现有 C++ 引擎。
 支持 ANSI_QUOTES、NO_BACKSLASH_ESCAPES、PIPES_AS_CONCAT、HIGH_NOT_PRECEDENCE。
@@ -35,6 +35,8 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持列和索引的基础 ALTER TABLE 操作、重命名表、TRUNCATE、SHOW INDEX 和 COLLATE 表达式。
 支持视图创建／替换／修改、CREATE TABLE AS／LIKE、列字符集、GROUP_CONCAT（含窗口用法），
 以及 FROM DUAL 和常用 EXPLAIN 格式。
+支持生成列、CHECK 约束、LIST 分区、指定分区读写和表级索引 hint；
+支持 FIRST_VALUE／LAST_VALUE／NTH_VALUE／LEAD／LAG、NULL 处理选项、LIKE ESCAPE 和用户变量赋值。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
 其他聚合函数和特殊函数语法、CTE、其他窗口函数、其他 DDL、完整 hint 语法、

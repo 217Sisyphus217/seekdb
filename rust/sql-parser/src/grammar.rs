@@ -83,7 +83,6 @@ fn reserved(word: &str) -> bool {
         "end",
         "for",
         "lock",
-        "cast",
         "convert",
         "lateral",
         "over",
@@ -134,6 +133,7 @@ fn chain(first: Node, rest: Vec<(String, Node)>) -> Result<Node, &'static str> {
 
 enum Tail {
     Compare(String, Node),
+    Like(bool, Node, Option<Node>),
     Between(bool, Node, Node),
     In(bool, Node, usize),
     Is(bool, Node),
@@ -227,7 +227,13 @@ peg::parser! {
                         default.unwrap_or_else(|| Node::new(Kind::DefaultNull,vec![]))]).expression(start,end+3)
                 }
             / system_variable()
-            / value:user_variable() {? let (start,end)=(value.start,value.end); Node::new(Kind::GetUserVariable,vec![value]).expression(start,end) }
+            / depth(level) value:user_variable() assigned:(":=" _ value:expr(level+1) { value })? {?
+                let (start,end)=(value.start,assigned.as_ref().map_or(value.end,|value| value.end));
+                match assigned {
+                    Some(assigned) => Node::new(Kind::UserAssignment,vec![Node { kind:Kind::UserVariableTarget,..value },assigned]),
+                    None => Node::new(Kind::GetUserVariable,vec![value]),
+                }.expression(start,end)
+            }
             / depth(level) start:position!() "(" _ query:select(level+1) ")" end:position!() _
                 {? query.expression(start, end) }
             / depth(level) start:position!() "(" _ first:expr(level+1) rest:("," _ values:expr_list(level+1) { values })? ")" end:position!() _ {?
@@ -241,6 +247,10 @@ peg::parser! {
             }
             / depth(level) start:position!() kw("exists") "(" _ query:select(level+1) ")" end:position!() _
                 {? Node::new(Kind::Exists, vec![query]).expression(start, end) }
+            / depth(level) start:position!() function:window_value(level+1) kw("over") window:window(level+1) {?
+                let end=window.end;
+                Node::new(Kind::WindowFunction,vec![function,window]).expression(start,end)
+            }
             / start:position!() "*" end:position!() _ {? Node::new(Kind::Star, vec![]).expression(start, end) }
             / depth(level) start:position!() kw("group_concat") "(" _
                 modifier:((kw("distinct") / kw("unique")) { Node::new(Kind::Distinct,vec![]) })?
@@ -292,12 +302,12 @@ peg::parser! {
             = op:$("<=>" / "<=" / ">=" / "<>" / "!=" / "=" / "<" / ">") _ right:bit_or(level) { Tail::Compare(op.into(), right) }
             / kw("is") negated:kw("not")? test:bool_null() { Tail::Is(negated.is_some(), test) }
             / negated:kw("not")? tail:(kw("between") low:bit_or(level) kw("and") high:bit_or(level) { Tail::Between(false, low, high) }
-                / kw("like") right:bit_or(level) { Tail::Compare("like".into(), right) }
+                / kw("like") right:bit_or(level) escape:(kw("escape") value:bit_or(level) { value })? { Tail::Like(false,right,escape) }
                 / kw("in") "(" _ values:(select(level+1) / values:expr_list(level+1) { Node::new(Kind::ExprList, values) }) ")" end:position!() _ { Tail::In(false, values, end) })
                 { match tail {
                     Tail::Between(_, low, high) => Tail::Between(negated.is_some(), low, high),
                     Tail::In(_, values, end) => Tail::In(negated.is_some(), values, end),
-                    Tail::Compare(_, right) => Tail::Compare(if negated.is_some() { "not like" } else { "like" }.into(), right),
+                    Tail::Like(_, right, escape) => Tail::Like(negated.is_some(), right, escape),
                     _ => unreachable!(),
                 } }
         rule predicate(level: usize) -> Node = left:bit_or(level) tails:tail(level)* {?
@@ -305,6 +315,15 @@ peg::parser! {
                 let start=value.start;
                 match tail {
                     Tail::Compare(op, right) => Node::binary(op, value, right),
+                    Tail::Like(negated,right,escape) => {
+                        let end=escape.as_ref().map_or(right.end,|value| value.end);
+                        let mut children=vec![value,right];
+                        if let Some(mut escape)=escape {
+                            if escape.kind==Kind::String && escape.text.is_empty() { escape.text="\\".into(); }
+                            children.push(escape);
+                        }
+                        Node::new(Kind::Binary,children).text(if negated { "not like" } else { "like" }.into()).expression(start,end)
+                    },
                     Tail::Between(negated, low, high) => { let end=high.end; Node::new(Kind::Between, vec![value, low, high]).value(u64::from(negated)).expression(start, end) },
                     Tail::In(negated, right, end) => Node::new(Kind::In, vec![value, right]).value(u64::from(negated)).expression(start, end),
                     Tail::Is(negated, test) => { let end=test.end; Node::new(Kind::Is, vec![value, test]).value(u64::from(negated)).expression(start, end) },
@@ -318,7 +337,7 @@ peg::parser! {
         rule xor_expr(level: usize) -> Node = left:and_expr(level) rest:(kw("xor") right:and_expr(level) { ("xor".into(), right) })* {? chain(left, rest) }
         rule expr(level: usize) -> Node = left:xor_expr(level) rest:((kw("or") / enabled(!mode.pipes_as_concat) "||" _) right:xor_expr(level) { ("or".into(), right) })* {? chain(left, rest) }
         rule expr_list(level: usize) -> Vec<Node> = values:(expr(level) ++ ("," _)) { values }
-        rule item(level: usize) -> Node = expression:expr(level) alias:(kw("as")? value:(name:ident() { Node::name(name) } / string()) { value })? {? Node::projection(expression, alias) }
+        rule item(level: usize) -> Node = expression:expr(level) alias:(enabled(!expression.is_wildcard()) kw("as")? value:(name:ident() { Node::name(name) } / string()) { value })? { Node::projection(expression, alias) }
         rule json_response() -> (Node,Node) = kw("error") { (Node::new(Kind::HiddenInt,vec![]),Node::new(Kind::HiddenNull,vec![])) }
             / start:position!() kw("null") { (Node::new(Kind::NullClause,vec![]).value(1).at(start,start+4),Node::new(Kind::HiddenNull,vec![])) }
             / kw("default") value:(string() / number() / bool_null()) { (Node::new(Kind::HiddenInt,vec![]).value(2),value) }
@@ -342,10 +361,17 @@ peg::parser! {
             Node::new(Kind::JsonTable,vec![document,path,Node::new(Kind::Link,vec![Node::new(Kind::HiddenInt,vec![]).value(3),Node::new(Kind::HiddenInt,vec![]).value(3)]),Node::new(Kind::ExprList,columns),alias.map(Node::name).unwrap_or_else(Node::missing)])
         }
         rule relation(level: usize) -> Node = json_table(level) / lateral:kw("lateral")? source:("(" _ query:select(level+1) ")" _ { query }
-            / name:name() {? Node::relation(name) }) snapshot:snapshot(level)? alias:alias()?
-            columns:("(" _ names:(ident() ++ ("," _)) ")" _ { names })? {?
+            / name:name() {? Node::relation(name) }) partition:use_partition()? snapshot:snapshot(level)?
+            alias:(!(kw("full") kw("outer")? kw("join") / (kw("use") / kw("force") / kw("ignore"))) value:alias() { value })?
+            columns:("(" _ names:(ident() ++ ("," _)) ")" _ { names })? indexes:table_index_hint()* {?
                 if (lateral.is_some() || columns.is_some()) && source.kind!=Kind::Select { return Err("derived table"); }
+                if (partition.is_some() || !indexes.is_empty()) && source.kind==Kind::Select { return Err("base table"); }
                 let mut table=Node::table(source,alias)?;
+                if partition.is_some() || !indexes.is_empty() {
+                    let offset=usize::from(table.kind==Kind::Alias);
+                    table.children[1+offset]=Node::list(Kind::TableIndexHints,indexes);
+                    table.children[2+offset]=Node::optional(partition);
+                }
                 if let Some(snapshot)=snapshot {
                     table.children.resize_with(if table.kind==Kind::Alias { 5 } else { 4 },Node::missing);
                     table.children.push(snapshot);
@@ -360,13 +386,23 @@ peg::parser! {
         rule snapshot(level: usize) -> Node = kw("as") kw("of") kw("snapshot") value:expr(level) {
             Node::new(Kind::Snapshot,vec![value,Node::new(Kind::Ident,vec![])])
         }
+        rule use_partition() -> Node = kw("partition") "(" _ names:(ident() ++ ("," _)) ")" _ {
+            Node::new(Kind::UsePartition,vec![Node::new(Kind::Names,names.into_iter().map(Node::name).collect())])
+        }
+        rule table_index_hint() -> Node = kind:(kw("use") { Kind::Use } / kw("force") { Kind::Force } / kw("ignore") { Kind::Ignore })
+            (kw("index") / kw("key")) (kw("for") (kw("join") / ((kw("order") / kw("group")) kw("by"))))?
+            "(" _ names:((name:ident() { Node::name(name) } / start:position!() kw("primary") { Node::new(Kind::Ident,vec![]).text("PRIMARY".into()).at(start,start+7) }) ** ("," _)) ")" _ {?
+                if names.is_empty() && kind!=Kind::Use { Err("index name") }
+                else { Ok(Node::new(Kind::TableIndexHint,vec![Node::new(kind,vec![]),Node::list(Kind::Names,names)])) }
+            }
         rule join(level: usize) -> (Kind, Node, Node) = kind:((kw("left") kw("outer")?) { Kind::LeftJoin }
-            / (kw("right") kw("outer")?) { Kind::RightJoin } / kw("inner") { Kind::InnerJoin } / kw("cross") { Kind::InnerJoin })?
+            / (kw("right") kw("outer")?) { Kind::RightJoin } / (kw("full") kw("outer")?) { Kind::FullJoin }
+            / kw("inner") { Kind::InnerJoin } / kw("cross") { Kind::InnerJoin })?
             kw("join") relation:relation(level)
             condition:(kw("on") value:expr(level) { value }
                 / kw("using") "(" _ names:(ident() ++ ("," _)) ")" _ { Node::new(Kind::ColumnList, names.into_iter().map(Node::name).collect()) })? {?
                 let kind=kind.unwrap_or(Kind::InnerJoin);
-                if matches!(kind, Kind::LeftJoin | Kind::RightJoin) && condition.is_none() { Err("join condition") }
+                if matches!(kind, Kind::LeftJoin | Kind::RightJoin | Kind::FullJoin) && condition.is_none() { Err("join condition") }
                 else { Ok((kind, relation, condition.unwrap_or_else(Node::missing))) }
             }
         rule table(level: usize) -> Node = relation:relation(level) joins:join(level)* {?
@@ -377,6 +413,23 @@ peg::parser! {
         rule order_item(level: usize) -> Node = expression:expr(level) direction:(kw("asc") { Kind::Asc } / kw("desc") { Kind::Desc })? {
             Node::new(Kind::SortKey, vec![expression, Node::new(direction.unwrap_or(Kind::Asc), vec![])])
         }
+        rule null_treatment() -> Node = kind:(kw("respect") { Kind::Respect } / kw("ignore") { Kind::Ignore }) kw("nulls") { Node::new(kind,vec![]) }
+        rule window_value(level: usize) -> Node
+            = kind:(kw("first_value") { Kind::FirstValue } / kw("last_value") { Kind::LastValue }) "(" _ value:expr(level)
+                nulls:(value:null_treatment() ")" _ { Some(value) } / ")" _ value:null_treatment()? { value }) {
+                Node::new(kind,vec![value,Node::optional(nulls)])
+            }
+            / kind:(kw("lead") { Kind::Lead } / kw("lag") { Kind::Lag }) "(" _ first:expr(level)
+                rest:(nulls:null_treatment() rest:("," _ values:expr_list(level) { values })? ")" _ { (rest.unwrap_or_default(),Some(nulls)) }
+                    / rest:("," _ values:expr_list(level) { values })? ")" _ nulls:null_treatment()? { (rest.unwrap_or_default(),nulls) }) {
+                let mut arguments=vec![first]; arguments.extend(rest.0);
+                Node::new(kind,vec![Node::new(Kind::ExprList,arguments),Node::optional(rest.1)])
+            }
+            / kw("nth_value") "(" _ value:expr(level) "," _ nth:expr(level) ")" _
+                from:(kw("from") kind:(kw("first") { Kind::First } / kw("last") { Kind::Last }) { Node::new(kind,vec![]) })?
+                nulls:null_treatment()? {
+                Node::new(Kind::NthValue,vec![value,nth,Node::optional(from),Node::optional(nulls)])
+            }
         rule window_bound() -> Node
             = kw("current") kw("row") { Node::new(Kind::WindowBound,vec![]).value(1) }
             / value:(start:position!() kw("unbounded") {
@@ -458,6 +511,7 @@ peg::parser! {
                 / kw("no_parallel") { Kind::NoParallel }) { Node::new(kind,vec![]) }
             / kw("dml_parallel") "(" _ value:type_size() ")" _ { Node::new(Kind::DmlParallel,vec![value]) }
             / kw("query_timeout") "(" _ value:type_size() ")" _ { Node::new(Kind::QueryTimeout,vec![value]) }
+            / kw("read_consistency") "(" _ level:(kw("weak") { 3 } / kw("strong") { 4 } / kw("frozen") { 2 }) ")" _ { Node::new(Kind::ReadConsistency,vec![]).value(level) }
             / kw("dynamic_sampling") "(" _ value:(value:type_size() { Node::new(Kind::DynamicSampling,vec![value]) }
                 / qb:hint_qb()? table:hint_relation() ("," _)? level:type_size() blocks:(("," _)? value:type_size() { value })? {
                     Node::new(Kind::TableDynamicSampling,vec![Node::optional(qb),table,level,Node::optional(blocks)])
@@ -524,7 +578,7 @@ peg::parser! {
             Node::new(Kind::ValueVector, if values.is_empty() { vec![Node::new(Kind::Empty, vec![])] } else { values })
         }
         rule insert() -> Node = replace:(kw("insert") { false } / kw("replace") { true }) hints:hints()?
-            (kw("low_priority") / kw("high_priority"))? ignore:kw("ignore")? kw("into")? table:name()
+            (kw("low_priority") / kw("high_priority"))? ignore:kw("ignore")? kw("into")? table:name() partition:use_partition()?
             columns:("(" _ columns:(column() ** ("," _)) ")" _ { columns })?
             values:((kw("values") / kw("value")) rows:(row() ++ ("," _)) { Node::new(Kind::ValueList, rows) }
                 / kw("set") values:assignments() { Node::new(Kind::AssignList, values) }
@@ -533,7 +587,7 @@ peg::parser! {
                 if replace && (ignore.is_some() || duplicate.is_some()) { Err("REPLACE does not accept IGNORE or ON DUPLICATE KEY UPDATE") }
                 else if values.kind == Kind::AssignList && columns.is_some() { Err("INSERT SET does not accept a column list") }
                 else {
-                    let table=Node::new(Kind::Table, vec![Node::relation(table)?, Node::missing(), Node::missing()]);
+                    let table=Node::new(Kind::Table, vec![Node::relation(table)?, Node::missing(), Node::optional(partition)]);
                     Ok(Node::insert(replace, ignore.is_some(), table, columns.unwrap_or_default(), values, duplicate.unwrap_or_default(), hints.unwrap_or_default()))
                 }
             }
@@ -584,7 +638,7 @@ peg::parser! {
             / kw("longtext") { "longtext" } / kw("longblob") { "longblob" }
             / kw("varbinary") { "varbinary" } / kw("binary") { "binary" }
             / kw("datetime") { "datetime" } / kw("timestamp") { "timestamp" }
-            / kw("time") { "time" } / kw("date") { "date" } / kw("json") { "json" }
+            / kw("time") { "time" } / kw("date") { "date" } / kw("year") { "year" } / kw("json") { "json" }
         rule type_size() -> Node = start:position!() text:$(['0'..='9']+) !cont() end:position!() _ {? Node::number(text, start, end) }
         rule cast_type() -> Node = start:position!() name:(kw("signed") kw("integer")? { "signed" }
                 / kw("unsigned") kw("integer")? { "unsigned" } / kw("binary") { "binary" }
@@ -608,24 +662,45 @@ peg::parser! {
                 }
                 Ok(value)
             }
-        rule column_attribute() -> Node
+        rule generated_column_attribute() -> Node
             = kw("not") kw("null") { Node::new(Kind::NotNull, vec![]) }
             / kw("null") { Node::new(Kind::Nullable, vec![]) }
-            / kw("primary") kw("key") { Node::new(Kind::ColumnPrimaryKey, vec![]) }
+            / kw("primary")? kw("key") { Node::new(Kind::ColumnPrimaryKey, vec![]) }
             / kw("unique") kw("key")? { Node::new(Kind::UniqueKey, vec![]) }
+            / kw("comment") value:string() { Node::new(Kind::ColumnComment, vec![value]) }
+            / check_constraint()
+        rule column_attribute() -> Node
+            = generated_column_attribute()
             / kw("auto_increment") { Node::new(Kind::AutoIncrement, vec![]) }
             / kw("default") value:expr(0) { Node::new(Kind::ColumnDefault, vec![value]) }
-            / kw("comment") value:string() { Node::new(Kind::ColumnComment, vec![value]) }
             / kw("collate") value:collation_name() { Node { kind:Kind::Collation,..value } }
         rule table_element() -> Node
-            = kw("primary") kw("key") ident()? method:index_method()? "(" _ names:(ident() ++ ("," _)) ")" _
+            = check_constraint()
+            / kw("primary") kw("key") ident()? method:index_method()? "(" _ names:(ident() ++ ("," _)) ")" _
                 method_end:index_method()? comment:(kw("comment") value:string() { value })? {
                 Node::new(Kind::PrimaryKey, vec![Node::new(Kind::ColumnList, names.into_iter().map(Node::name).collect()), Node::optional(method_end.or(method)), Node::optional(comment)])
             }
             / index_definition()
             / column_definition()
-        rule column_definition() -> Node = name:column() data_type:data_type() attributes:column_attribute()* position:column_position()? {
-                Node::new(Kind::ColumnDefinition, vec![name, data_type, Node::list(Kind::ColumnAttributes, attributes), Node::optional(position)])
+        rule check_constraint() -> Node = name:(kw("constraint") name:ident()? { Node::new(Kind::CheckConstraint,vec![name.map(Node::name).unwrap_or_else(Node::missing)]) })?
+            kw("check") "(" _ start:position!() value:expr(0) end:position!() ")" _
+            state:(kw("not") kw("enforced") { Kind::NotEnforced } / kw("enforced") { Kind::Enforced })? {
+                Node::new(Kind::CheckConstraint,vec![Node::optional(name),value.at(start,end),Node::new(state.unwrap_or(Kind::Enforced),vec![])]).value(1)
+            }
+        rule column_definition() -> Node = name:column() data_type:data_type() tail:(
+                collation:(kw("collate") value:collation_name() { Node { kind:Kind::Collation,..value } })?
+                generated:(kw("generated") kw("always") { Node::new(Kind::GeneratedColumn,vec![Node::new(Kind::Always,vec![])]) })?
+                kw("as") "(" _ start:position!() value:expr(0) end:position!() ")" _
+                storage:(kind:(kw("virtual") { Kind::VirtualColumn } / kw("stored") { Kind::StoredColumn }) { Node::new(kind,vec![]) })?
+                attributes:generated_column_attribute()* position:column_position()? {
+                    (vec![Node::list(Kind::ColumnAttributes,attributes),value.at(start,end),Node::optional(storage),Node::optional(position),Node::optional(generated)],collation)
+                }
+                / attributes:column_attribute()* position:column_position()? {
+                    (vec![Node::list(Kind::ColumnAttributes,attributes),Node::optional(position)],None)
+                }) {
+                let mut data_type=data_type; data_type.children.extend(tail.1);
+                let mut children=vec![name,data_type]; children.extend(tail.0);
+                Node::new(Kind::ColumnDefinition,children)
             }
         rule column_position() -> Node
             = kw("first") { Node::new(Kind::ColumnFirst,vec![]) }
@@ -661,6 +736,18 @@ peg::parser! {
                 let function=Node::new(if key { Kind::PartitionKeyFunction } else { Kind::PartitionHashFunction },vec![Node::new(Kind::Ident,vec![]).text(if key { "partition_key" } else { "partition_hash" }.into()),Node::list(Kind::ExprList,expressions)]);
                 let partition=Node::new(if key { Kind::KeyPartition } else { Kind::HashPartition },vec![function,Node::optional(count),Node::missing(),Node::missing(),Node::missing(),Node::missing()]).at(start,end);
                 Node::new(Kind::PartitionOption,vec![partition])
+            }
+            / kw("partition") kw("by") kw("list") columns:kw("columns")? "(" _ start:position!()
+                expressions:(enabled(columns.is_some()) names:(ident() ++ ("," _)) { names.into_iter().map(Node::name).collect() }
+                    / enabled(columns.is_none()) value:expr(0) { vec![value] }) end:position!() ")" _
+                count:(kw("partitions") value:type_size() { value })? "(" _ elements:(list_partition_element() ++ ("," _)) ")" _ {
+                    let partition=Node::new(if columns.is_some() { Kind::ListColumnsPartition } else { Kind::ListPartition },
+                        vec![Node::new(Kind::ExprList,expressions),Node::new(Kind::Partitions,elements),Node::missing(),Node::optional(count),Node::missing()]).at(start,end);
+                    Node::new(Kind::PartitionOption,vec![partition])
+                }
+        rule list_partition_element() -> Node = kw("partition") name:name() kw("values") kw("in") "(" _
+            values:(kw("default") { Node::new(Kind::Default,vec![]) } / values:expr_list(0) { Node::new(Kind::ExprList,values) }) ")" _ {?
+                Ok(Node::new(Kind::ListPartitionElement,vec![Node::relation(name)?,values,Node::missing(),Node::missing()]))
             }
         rule rename_table() -> Node = from:name() kw("to") to:name() {?
             Ok(Node::new(Kind::RenameTableAction,vec![Node::relation(from)?,Node::relation(to)?]))

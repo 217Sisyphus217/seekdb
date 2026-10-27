@@ -184,6 +184,22 @@ ObItemType node_type(const peg::Node &node)
     case Kind::InnerJoin: return T_JOIN_INNER;
     case Kind::LeftJoin: return T_JOIN_LEFT;
     case Kind::RightJoin: return T_JOIN_RIGHT;
+    case Kind::FullJoin: return T_JOIN_FULL;
+    case Kind::UsePartition: return T_USE_PARTITION;
+    case Kind::Names: return T_NAME_LIST;
+    case Kind::TableIndexHints: return T_INDEX_HINT_LIST;
+    case Kind::TableIndexHint: return T_INDEX_HINT_DEF;
+    case Kind::Use: return T_USE;
+    case Kind::Force: return T_FORCE;
+    case Kind::ListPartition: return T_LIST_PARTITION;
+    case Kind::ListColumnsPartition: return T_LIST_COLUMNS_PARTITION;
+    case Kind::Partitions: return T_PARTITION_LIST;
+    case Kind::ListPartitionElement: return T_PARTITION_LIST_ELEMENT;
+    case Kind::CheckConstraint: return T_CHECK_CONSTRAINT;
+    case Kind::Enforced: return T_ENFORCED_CONSTRAINT;
+    case Kind::NotEnforced: return T_NOENFORCED_CONSTRAINT;
+    case Kind::UserAssignment: return T_OP_ASSIGN;
+    case Kind::UserVariableTarget: return T_LEFT_VALUE;
     case Kind::ColumnList: return T_COLUMN_LIST;
     case Kind::GroupBy: return T_GROUPBY_CLAUSE;
     case Kind::WithRollup: return T_WITH_ROLLUP_CLAUSE;
@@ -257,6 +273,10 @@ ObItemType node_type(const peg::Node &node)
     case Kind::AutoIncrement: return T_CONSTR_AUTO_INCREMENT;
     case Kind::ColumnDefault: return T_CONSTR_DEFAULT;
     case Kind::ColumnComment: return T_COMMENT;
+    case Kind::GeneratedColumn: return T_GENERATED_COLUMN;
+    case Kind::Always: return T_CONSTR_ALWAYS;
+    case Kind::VirtualColumn: return T_VIRTUAL_COLUMN;
+    case Kind::StoredColumn: return T_STORED_COLUMN;
     case Kind::SystemVariable: return T_SYSTEM_VARIABLE;
     case Kind::UserVariable: return T_USER_VARIABLE_IDENTIFIER;
     case Kind::GetUserVariable: return T_OP_GET_USER_VAR;
@@ -335,6 +355,15 @@ ObItemType node_type(const peg::Node &node)
     case Kind::PercentRank: return T_WIN_FUN_PERCENT_RANK;
     case Kind::CumeDist: return T_WIN_FUN_CUME_DIST;
     case Kind::Ntile: return T_WIN_FUN_NTILE;
+    case Kind::FirstValue: return T_WIN_FUN_FIRST_VALUE;
+    case Kind::LastValue: return T_WIN_FUN_LAST_VALUE;
+    case Kind::NthValue: return T_WIN_FUN_NTH_VALUE;
+    case Kind::Lead: return T_WIN_FUN_LEAD;
+    case Kind::Lag: return T_WIN_FUN_LAG;
+    case Kind::First: return T_FIRST;
+    case Kind::Last: return T_LAST;
+    case Kind::Respect: return T_RESPECT;
+    case Kind::ReadConsistency: return T_READ_CONSISTENCY;
     case Kind::NamedWindows: return T_WIN_NAMED_WINDOWS;
     case Kind::NamedWindow: return T_WIN_NAMED_WINDOW;
     case Kind::CreateUser: return T_CREATE_USER;
@@ -513,8 +542,8 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   node->value_ = 0;
   const auto &args = source.children;
-  const bool has_charset = !args.empty() && args[args.size() - 1].kind == Kind::Charset;
-  const size_t size = args.size() - has_charset;
+  size_t size = args.size();
+  while (size > 0 && (args[size - 1].kind == Kind::Charset || args[size - 1].kind == Kind::Collation)) --size;
   const int32_t precision = (size == 0) ? 0 : std::min<uint64_t>(args[0].value, INT32_MAX);
   const int16_t short_precision = std::min<int32_t>(precision, INT16_MAX);
   const int16_t scale = size < 2 ? 0 : std::min<uint64_t>(args[1].value, INT16_MAX);
@@ -550,14 +579,14 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
     node->int16_values_[2] = (source.value & 2) != 0;
     node->int16_values_[3] = (source.value & 1) != 0;
   }
-  if (has_charset) {
-    const auto &charset = args[size];
-    ParseNode *charset_node = new_node(pool, T_CHARSET, 0);
-    if (charset_node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-    charset_node->str_value_ = parse_strndup(charset.text.data(), charset.text.size(), pool);
-    if (charset_node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-    charset_node->str_len_ = charset.text.size();
-    node->children_[0] = charset_node;
+  for (size_t i = size; i < args.size() && node->num_child_ >= 2; ++i) {
+    const auto &attribute = args[i];
+    ParseNode *child = new_node(pool, attribute.kind == Kind::Charset ? T_CHARSET : T_COLLATION, 0);
+    if (child == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    child->str_value_ = parse_strndup(attribute.text.data(), attribute.text.size(), pool);
+    if (child->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    child->str_len_ = attribute.text.size();
+    node->children_[attribute.kind == Kind::Charset ? 0 : 1] = child;
   }
   node->sql_str_off_ = source.start;
   return common::OB_SUCCESS;
@@ -603,6 +632,14 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
     }
   }
   if (type == T_CREATE_VIEW) node->reserved_ = source.value;
+  if ((type == T_COLUMN_DEFINITION && node->num_child_ == 7) || (type == T_CHECK_CONSTRAINT && node->num_child_ == 3)) {
+    const size_t slot = type == T_COLUMN_DEFINITION ? 3 : 1;
+    const auto &expression = source.children[slot];
+    ParseNode *child = node->children_[slot];
+    child->str_len_ = expression.end - expression.start;
+    child->str_value_ = parse_strndup(sql.ptr() + expression.start, child->str_len_, pool);
+    if (child->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+  }
   if (type != T_FUN_SYS) node->value_ = type == T_SELECT ? parameters : source.value;
   node->sql_str_off_ = source.start;
   node->raw_sql_offset_ = source.start;
@@ -630,7 +667,8 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
       || source.kind == Kind::Is || source.kind == Kind::Window || source.kind == Kind::PlSql
       || source.kind == Kind::RoutineParameters || source.kind == Kind::PlDefault
       || source.kind == Kind::SubProcedureDeclaration || source.kind == Kind::SubFunctionDeclaration
-      || source.kind == Kind::ObjectAccess || source.kind == Kind::KeyPartition || source.kind == Kind::HashPartition) {
+      || source.kind == Kind::ObjectAccess || source.kind == Kind::KeyPartition || source.kind == Kind::HashPartition
+      || source.kind == Kind::ListPartition || source.kind == Kind::ListColumnsPartition) {
     text = raw;
     length = raw_length;
   }
