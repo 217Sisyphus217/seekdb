@@ -1,3 +1,17 @@
+// Copyright (c) 2026 OceanBase.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use parser_mvp::Parser;
 use std::{hint::black_box, io::Read, process::ExitCode, time::Instant};
 
@@ -38,29 +52,38 @@ fn run() -> Result<(), String> {
             sql
         }
     };
-    let start = Instant::now();
-    let parser = Parser::new()?;
-    let initialization = start.elapsed();
+    let parser = Parser::default();
     if let Some(count) = repeat {
         // Validate and warm the same complete path that is measured below.
         if expression {
-            black_box(parser.parse_expression(&sql)?);
+            black_box(
+                parser
+                    .parse_expression(&sql)
+                    .map_err(|error| error.to_string())?,
+            );
         } else {
-            black_box(parser.parse(&sql)?);
+            black_box(parser.parse(&sql).map_err(|error| error.to_string())?);
         }
         let start = Instant::now();
         for _ in 0..count {
             if expression {
-                black_box(parser.parse_expression(black_box(&sql))?);
+                black_box(
+                    parser
+                        .parse_expression(black_box(&sql))
+                        .map_err(|error| error.to_string())?,
+                );
             } else {
-                black_box(parser.parse(black_box(&sql))?);
+                black_box(
+                    parser
+                        .parse(black_box(&sql))
+                        .map_err(|error| error.to_string())?,
+                );
             }
         }
         let elapsed = start.elapsed();
         println!(
             "{}",
             serde_json::json!({
-                "grammar_init_us": initialization.as_secs_f64() * 1e6,
                 "iterations": count, "successful_parses": count, "sql_bytes": sql.len(),
                 "total_ms": elapsed.as_secs_f64() * 1e3,
                 "us_per_parse": elapsed.as_secs_f64() * 1e6 / count as f64,
@@ -68,9 +91,13 @@ fn run() -> Result<(), String> {
         );
     } else {
         let output = if expression {
-            serde_json::to_string_pretty(&parser.parse_expression(&sql)?)
+            serde_json::to_string_pretty(
+                &parser
+                    .parse_expression(&sql)
+                    .map_err(|error| error.to_string())?,
+            )
         } else {
-            serde_json::to_string_pretty(&parser.parse(&sql)?)
+            serde_json::to_string_pretty(&parser.parse(&sql).map_err(|error| error.to_string())?)
         };
         println!("{}", output.map_err(|e| e.to_string())?);
     }

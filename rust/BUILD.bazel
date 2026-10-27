@@ -96,7 +96,7 @@ filegroup(
 cargo_library(
     name = "archive",
     srcs = glob(
-        ["**/*.rs", "**/*.py", "**/*.toml", "**/*.pest", "*.lock"],
+        ["**/*.rs", "**/*.py", "**/*.toml", "*.lock"],
         exclude = ["target/**", "config/generate.py"],
         allow_empty = True,
     ),
