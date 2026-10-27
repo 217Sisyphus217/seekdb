@@ -139,6 +139,7 @@ peg::parser! {
         rule _() = quiet!{(space() / "/*" !['!' | '+'] (!"*/" [_])* "*/"
             / ("--" &(space() / ![_]) / "#") (!"\n" [_])*)*}
         rule cont() = ['a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '$' | '\u{80}'..='\u{10ffff}']
+        rule word() = ['a'..='z' | 'A'..='Z' | '_' | '$' | '\u{80}'..='\u{10ffff}'] cont()*
         rule kw(word: &'static str) -> ()
             = text:$([_] *<{word.len()}>) !cont() _ {? if text.eq_ignore_ascii_case(word) { Ok(()) } else { Err(word) } }
         rule depth(level: usize)
@@ -149,7 +150,7 @@ peg::parser! {
                 { Name { text: text[1..text.len()-1].replace("``", "`"), quoted: true, start, end } }
             / enabled(mode.ansi_quotes) start:position!() text:$("\"" ("\"\"" / !"\"" [_])+ "\"") end:position!() _
                 { Name { text: text[1..text.len()-1].replace("\"\"", "\""), quoted: true, start, end } }
-            / start:position!() text:$(['a'..='z' | 'A'..='Z' | '_' | '$' | '\u{80}'..='\u{10ffff}'] cont()*) end:position!() _
+            / start:position!() text:$(word()) end:position!() _
                 {? if reserved(text) { Err("identifier") } else { Ok(Name { text: text.to_owned(), quoted: false, start, end }) } }
         rule name() -> Vec<Name> = parts:(ident() ++ ("." _)) { parts }
         rule expression_name() -> Vec<Name>
@@ -177,7 +178,7 @@ peg::parser! {
         rule parameter() -> Node
             = start:position!() "?" end:position!() _ {? Node::new(Kind::Parameter, vec![]).expression(start, end) }
             / start:position!() text:$(":" (['0'..='9']+ !cont()
-                / ['a'..='z' | 'A'..='Z' | '_' | '$' | '\u{80}'..='\u{10ffff}'] cont()*)) end:position!() _
+                / word())) end:position!() _
                 {? Node::new(Kind::Parameter, vec![]).text(text.into()).expression(start, end) }
         rule hex_digit() = ['0'..='9' | 'a'..='f' | 'A'..='F']
         rule binary_literal() -> Node
@@ -400,6 +401,7 @@ peg::parser! {
             = start:position!() text:$("\"" ("\"\"" / !"\"" [_])+ "\"") end:position!() _ {
                 Name { text:text[1..text.len()-1].replace("\"\"","\""),quoted:true,start,end }
             }
+            / start:position!() text:$(word()) end:position!() _ { Name { text:text.into(),quoted:false,start,end } }
             / ident()
         rule hint_qb() -> Node = "@" _ name:hint_name() { Node::name(name) }
         rule hint_relation() -> Node = names:(hint_name() ++ ("." _)) qb:hint_qb()? {?
@@ -415,6 +417,13 @@ peg::parser! {
             / hint_relation()
         rule hint_option() -> Node
             = kw("leading") "(" _ qb:hint_qb()? tables:hint_leading(0) ")" _ { Node::new(Kind::Leading,vec![Node::optional(qb),tables]) }
+            / kw("dbms_stats") { Node::new(Kind::DbmsStats,vec![]) }
+            / kw("full") "(" _ qb:hint_qb()? table:hint_relation() ")" _ { Node::new(Kind::FullScan,vec![Node::optional(qb),table]) }
+            / kind:(kw("index") { Kind::IndexScan } / kw("index_asc") { Kind::IndexAsc } / kw("index_desc") { Kind::IndexDesc })
+                "(" _ qb:hint_qb()? table:hint_relation() ("," _)? index:hint_name()
+                prefix:(negative:("-" _)? value:type_size() {
+                    let mut value=value;if negative.is_some() { value.value=value.value.wrapping_neg(); } value
+                })? ")" _ { Node::new(kind,vec![Node::optional(qb),table,Node::name(index),Node::optional(prefix)]) }
             / kind:(kw("use_nl") { Kind::UseNl } / kw("no_use_nl") { Kind::NoUseNl }
                 / kw("use_hash") { Kind::UseHash } / kw("no_use_hash") { Kind::NoUseHash }
                 / kw("use_merge") { Kind::UseMerge } / kw("no_use_merge") { Kind::NoUseMerge })
@@ -917,7 +926,11 @@ peg::parser! {
                 Node::new(Kind::Execute,vec![Node::name(name),Node::list(Kind::ExecuteArguments,args.unwrap_or_default())])
             }
             / (kw("deallocate") / kw("drop")) kw("prepare") name:ident() { Node::new(Kind::Deallocate,vec![Node::name(name)]) }
-        rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / setting() / show() / alter_system() / prepared_statement() / diagnostics()
+        rule analyze() -> Node = kw("analyze") kw("table") tables:((names:name() {? Node::relation(names) }) ++ ("," _)) {
+            let tables=tables.into_iter().reduce(|left,right| Node::new(Kind::Link,vec![left,right])).unwrap();
+            Node::new(Kind::Analyze,vec![tables,Node::missing(),Node::missing()])
+        }
+        rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / setting() / show() / alter_system() / prepared_statement() / diagnostics() / analyze()
         pub rule query() -> Node = _ value:(package_statement() / routine_statement() / pl_call() / sql_statement()) (";" _)* { value }
             / text:$(_ (";" _)*) { Node::new(Kind::EmptyQuery,vec![]).value(u64::from(text.chars().any(|ch| !ch.is_ascii_whitespace() && ch!=';'))) }
     }

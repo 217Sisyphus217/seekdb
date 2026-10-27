@@ -349,6 +349,12 @@ impl Node {
             "min" => Kind::Min,
             "max" => Kind::Max,
             "avg" => Kind::Avg,
+            "approx_count_distinct" => Kind::ApproxCountDistinct,
+            "approx_count_distinct_synopsis" => Kind::ApproxCountDistinctSynopsis,
+            "approx_count_distinct_synopsis_merge" => Kind::ApproxCountDistinctSynopsisMerge,
+            "sum_opnsize" => Kind::SumOpnsize,
+            "top_k_fre_hist" => Kind::TopFreHist,
+            "hybrid_hist" => Kind::HybridHist,
             "row_number" => Kind::RowNumber,
             "rank" => Kind::Rank,
             "dense_rank" => Kind::DenseRank,
@@ -395,10 +401,23 @@ impl Node {
         {
             return Err("time precision must be an integer from 0 to 6");
         }
-        let aggregate = matches!(
+        let approximate = matches!(
             kind,
-            Kind::Count | Kind::Sum | Kind::Min | Kind::Max | Kind::Avg
+            Kind::ApproxCountDistinct | Kind::ApproxCountDistinctSynopsis
         );
+        let histogram = matches!(kind, Kind::TopFreHist | Kind::HybridHist);
+        let aggregate = approximate
+            || histogram
+            || matches!(
+                kind,
+                Kind::Count
+                    | Kind::Sum
+                    | Kind::Min
+                    | Kind::Max
+                    | Kind::Avg
+                    | Kind::ApproxCountDistinctSynopsisMerge
+                    | Kind::SumOpnsize
+            );
         let ranking = matches!(
             kind,
             Kind::RowNumber
@@ -421,17 +440,37 @@ impl Node {
         if star && !count_star {
             return Err("only COUNT(*) accepts a wildcard argument");
         }
-        if !aggregate && distinct {
+        if distinct
+            && (!aggregate
+                || approximate
+                || histogram
+                || matches!(
+                    kind,
+                    Kind::ApproxCountDistinctSynopsisMerge | Kind::SumOpnsize
+                ))
+        {
             return Err("DISTINCT requires an aggregate function");
         }
+        let argument_count = match kind {
+            Kind::TopFreHist => 4,
+            Kind::HybridHist => 2,
+            _ => 1,
+        };
         if aggregate
             && !count_star
             && (arguments.is_empty()
-                || (!(kind == Kind::Count && distinct) && arguments.len() != 1))
+                || (!(approximate || kind == Kind::Count && distinct)
+                    && arguments.len() != argument_count))
         {
             return Err("invalid aggregate argument count");
         }
-        let children = if ranking {
+        if (kind == Kind::TopFreHist
+            && (arguments[0].kind != Kind::Number || arguments[2].kind != Kind::Int))
+            || (kind == Kind::HybridHist && arguments[1].kind != Kind::Int)
+        {
+            return Err("histogram rate and bucket count must be numeric constants");
+        }
+        let children = if ranking || histogram {
             arguments
         } else if timestamp || no_arguments {
             vec![arguments.into_iter().next().unwrap_or_else(Self::missing)]
@@ -442,7 +481,11 @@ impl Node {
             } else {
                 vec![name, Self::new(Kind::ExprList, arguments)]
             }
-        } else if count_star {
+        } else if approximate {
+            vec![Self::new(Kind::ExprList, arguments)]
+        } else if kind == Kind::SumOpnsize {
+            vec![Self::missing(), arguments.into_iter().next().unwrap()]
+        } else if count_star || kind == Kind::ApproxCountDistinctSynopsisMerge {
             arguments
         } else {
             let modifier = Self::new(if distinct { Kind::Distinct } else { Kind::All }, vec![]);

@@ -69,6 +69,18 @@ ObItemType node_type(const peg::Node &node)
 {
   switch (node.kind) {
     case Kind::EmptyQuery: return T_EMPTY_QUERY;
+    case Kind::Analyze: return T_MYSQL_ANALYZE;
+    case Kind::DbmsStats: return T_DBMS_STATS;
+    case Kind::FullScan: return T_FULL_HINT;
+    case Kind::IndexScan: return T_INDEX_HINT;
+    case Kind::IndexAsc: return T_INDEX_ASC_HINT;
+    case Kind::IndexDesc: return T_INDEX_DESC_HINT;
+    case Kind::ApproxCountDistinct: return T_FUN_APPROX_COUNT_DISTINCT;
+    case Kind::ApproxCountDistinctSynopsis: return T_FUN_APPROX_COUNT_DISTINCT_SYNOPSIS;
+    case Kind::ApproxCountDistinctSynopsisMerge: return T_FUN_APPROX_COUNT_DISTINCT_SYNOPSIS_MERGE;
+    case Kind::SumOpnsize: return T_FUN_SUM_OPNSIZE;
+    case Kind::TopFreHist: return T_FUN_TOP_FRE_HIST;
+    case Kind::HybridHist: return T_FUN_HYBRID_HIST;
     case Kind::Select: return T_SELECT;
     case Kind::ProjectList: return T_PROJECT_LIST;
     case Kind::Projection: return T_PROJECT_STRING;

@@ -294,6 +294,18 @@ pub(crate) mod ffi {
         JsonColumn,
         HiddenNull,
         NullClause,
+        Analyze,
+        DbmsStats,
+        FullScan,
+        IndexScan,
+        IndexAsc,
+        IndexDesc,
+        ApproxCountDistinct,
+        ApproxCountDistinctSynopsis,
+        ApproxCountDistinctSynopsisMerge,
+        SumOpnsize,
+        TopFreHist,
+        HybridHist,
     }
 
     struct Node {
