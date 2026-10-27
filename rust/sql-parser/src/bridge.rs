@@ -22,6 +22,7 @@ use crate::{
 pub(crate) mod ffi {
     enum NodeKind {
         Missing,
+        EmptyQuery,
         Select,
         ProjectList,
         Projection,
@@ -201,6 +202,25 @@ pub(crate) mod ffi {
         Ntile,
         NamedWindows,
         NamedWindow,
+        CreateUser,
+        DropUser,
+        Users,
+        UserSpec,
+        UserHost,
+        Password,
+        SetPassword,
+        Privilege,
+        Privileges,
+        PrivilegeLevel,
+        PrivilegeObject,
+        Grant,
+        Revoke,
+        RevokeAll,
+        ShowGrants,
+        Prepare,
+        Execute,
+        ExecuteArguments,
+        Deallocate,
     }
 
     struct Node {

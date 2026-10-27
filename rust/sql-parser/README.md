@@ -24,6 +24,7 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持 CASE、系统／用户变量、SET、字符集设置，以及基础 SHOW／DESCRIBE。
 已接入 CAST／CONVERT、二进制字面量、行锁、VALUES、LATERAL、排名和聚合窗口函数、
 命名窗口和数值窗口边界，以及启动和 schema 刷新使用的 ALTER SYSTEM 和基础 hint。
+支持基本账户创建／删除、改密、授权／撤销和 SHOW GRANTS，以及 SQL PREPARE／EXECUTE。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
 限定名称的函数调用、其他聚合函数和特殊函数语法、UNION、CTE、其他窗口函数、

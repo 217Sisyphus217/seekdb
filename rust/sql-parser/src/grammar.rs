@@ -194,7 +194,9 @@ peg::parser! {
             let end=name.end;
             Node::new(Kind::SystemVariable, vec![]).text(name.text).value(scope.unwrap_or(0)).at(start,end)
         }
-        rule user_variable() -> Node = start:position!() "@" !"@" name:ident() {
+        rule user_variable() -> Node = start:position!() "@" !"@" name:(string()
+            / start:position!() text:$((cont() / ".")+) end:position!() _ { Node::new(Kind::Ident,vec![]).text(text.into()).at(start,end) }
+            / name:ident() { Node::name(name) }) {
             let end=name.end;
             Node::new(Kind::UserVariable, vec![]).text(name.text).at(start,end)
         }
@@ -214,8 +216,15 @@ peg::parser! {
             / value:user_variable() {? let (start,end)=(value.start,value.end); Node::new(Kind::GetUserVariable,vec![value]).expression(start,end) }
             / depth(level) start:position!() "(" _ query:select(level+1) ")" end:position!() _
                 {? query.expression(start, end) }
-            / depth(level) start:position!() "(" _ value:expr(level+1) ")" end:position!() _
-                {? Node::new(Kind::Parenthesized, vec![value]).expression(start, end) }
+            / depth(level) start:position!() "(" _ first:expr(level+1) rest:("," _ values:expr_list(level+1) { values })? ")" end:position!() _ {?
+                match rest {
+                    None => Node::new(Kind::Parenthesized,vec![first]).expression(start,end),
+                    Some(rest) => { let mut values=vec![first]; values.extend(rest); Node::new(Kind::ExprList,values).expression(start,end) }
+                }
+            }
+            / depth(level) start:position!() kw("row") "(" _ first:expr(level+1) "," _ rest:expr_list(level+1) ")" end:position!() _ {?
+                let mut values=vec![first]; values.extend(rest); Node::new(Kind::ExprList,values).expression(start,end)
+            }
             / depth(level) start:position!() kw("exists") "(" _ query:select(level+1) ")" end:position!() _
                 {? Node::new(Kind::Exists, vec![query]).expression(start, end) }
             / start:position!() "*" end:position!() _ {? Node::new(Kind::Star, vec![]).expression(start, end) }
@@ -448,14 +457,18 @@ peg::parser! {
                     Node::missing(), Node::list(Kind::Hints,hints.unwrap_or_default()), Node::missing(), Node::missing(),
                     if ignore.is_some() { Node::new(Kind::Ignore,vec![]) } else { Node::missing() }])
             }
+        rule transaction_access() -> u64 = kw("read") value:(kw("only") { 2 } / kw("write") { 4 }) { value }
+        rule transaction_options() -> u64
+            = kw("with") kw("consistent") kw("snapshot") access:("," _ value:transaction_access() { value })? { 1|access.unwrap_or(0) }
+            / access:transaction_access() snapshot:("," _ kw("with") kw("consistent") kw("snapshot"))? { access|u64::from(snapshot.is_some()) }
         rule transaction() -> Node
             = kw("savepoint") name:ident() { Node::new(Kind::Savepoint,vec![]).text(name.text).at(name.start,name.end) }
             / kw("release") kw("savepoint") name:ident() { Node::new(Kind::ReleaseSavepoint,vec![]).text(name.text).at(name.start,name.end) }
             / kw("rollback") kw("work")? kw("to") kw("savepoint")? name:ident() {
                 Node::new(Kind::RollbackSavepoint,vec![]).text(name.text).at(name.start,name.end)
             }
-            / (kw("begin") kw("work")? / kw("start") kw("transaction")) {
-                Node::new(Kind::Begin, vec![Node::new(Kind::Int, vec![]), Node::missing()])
+            / options:(kw("begin") kw("work")? { 0 } / kw("start") kw("transaction") options:transaction_options()? { options.unwrap_or(0) }) {
+                Node::new(Kind::Begin, vec![Node::new(Kind::HiddenInt, vec![]).value(options), Node::missing()])
             }
             / kw("commit") kw("work")? { Node::new(Kind::Commit, vec![Node::missing()]) }
             / kw("rollback") kw("work")? { Node::new(Kind::Rollback, vec![Node::missing()]) }
@@ -554,7 +567,8 @@ peg::parser! {
                 None => Node::new(Kind::ShowLimit,vec![Node::missing(),first]) }
         }
         rule show_body() -> Node
-            = (kw("databases") / kw("schemas")) condition:show_condition()? { Node::new(Kind::ShowDatabases,vec![Node::optional(condition),Node::missing()]) }
+            = kw("grants") user:(kw("for") value:(kw("current_user") ("(" _ ")" _)? { Node::missing() } / account()) { value })? { Node::new(Kind::ShowGrants,vec![Node::optional(user),Node::missing()]) }
+            / (kw("databases") / kw("schemas")) condition:show_condition()? { Node::new(Kind::ShowDatabases,vec![Node::optional(condition),Node::missing()]) }
             / full:kw("full")? kw("tables") database:show_database()? condition:show_condition()? {
                 Node::new(Kind::ShowTables,vec![Node::optional(database),Node::optional(condition),Node::new(Kind::Int,vec![]).value(u64::from(full.is_some()))])
             }
@@ -603,6 +617,107 @@ peg::parser! {
             }
             / kw("set")? actions:(config_assignment() ++ ("," _)) { Node::new(Kind::SetConfig,vec![Node::new(Kind::ConfigList,actions)]) }
         ) { value }
-        pub rule query() -> Node = _ value:(select(0) / insert() / update() / delete() / transaction() / ddl() / setting() / show() / alter_system()) (";" _)* { value }
+        rule account_name() -> Node = string() / name:ident() { Node::name(name) }
+        rule account() -> Node = name:account_name() host:user_variable()? {
+            Node::new(Kind::UserHost,vec![name,Node::optional(host)])
+        }
+        rule password() -> Node = value:string() { Node { kind:Kind::Password,..value } }
+        rule authentication() -> (Node,Node,Node) = kw("identified")
+            plugin:(kw("with") value:account_name() { value })?
+            password:(kw("by") encoded:kw("password")? value:password() { (value,u64::from(encoded.is_none())) }
+                / kw("as") value:password() { (value,0) }) {
+                (password.0,Node::new(Kind::Bool,vec![]).value(password.1),Node::optional(plugin))
+            }
+        rule user_spec() -> Node = name:account_name() host:user_variable()? auth:authentication()? {
+            let (password,encrypted,plugin)=auth.unwrap_or_else(|| (Node::missing(),Node::new(Kind::Bool,vec![]),Node::missing()));
+            Node::new(Kind::UserSpec,vec![name,password,encrypted,Node::optional(host),plugin])
+        }
+        rule privilege_name() -> &'static str
+            = kw("create") kw("ai") kw("model") { "create ai model" }
+            / kw("alter") kw("ai") kw("model") { "alter ai model" }
+            / kw("drop") kw("ai") kw("model") { "drop ai model" }
+            / kw("access") kw("ai") kw("model") { "access ai model" }
+            / kw("create") kw("user") { "create user" }
+            / kw("grant") kw("option") { "grant option" }
+            / kw("create") kw("view") { "create view" }
+            / kw("show") kw("view") { "show view" }
+            / kw("show") kw("databases") { "show databases" }
+            / kw("replication") kw("slave") { "replication slave" }
+            / kw("replication") kw("client") { "replication client" }
+            / kw("alter") kw("system") { "alter system" }
+            / kw("alter") kw("routine") { "alter routine" }
+            / kw("create") kw("routine") { "create routine" }
+            / kw("lock") kw("tables") { "lock tables" }
+            / kw("create") kw("role") { "create role" }
+            / kw("drop") kw("role") { "drop role" }
+            / kw("alter") { "alter" }
+            / kw("create") { "create" }
+            / kw("delete") { "delete" }
+            / kw("drop") { "drop" }
+            / kw("insert") { "insert" }
+            / kw("update") { "update" }
+            / kw("select") { "select" }
+            / kw("index") { "index" }
+            / kw("super") { "super" }
+            / kw("process") { "process" }
+            / kw("file") { "file" }
+            / kw("execute") { "execute" }
+            / kw("shutdown") { "shutdown" }
+            / kw("reload") { "reload" }
+            / kw("references") { "references" }
+            / kw("trigger") { "trigger" }
+            / kw("read") { "read" }
+            / kw("write") { "write" }
+            / kw("usage") { "usage" }
+        rule privilege() -> Node = name:privilege_name()
+            columns:("(" _ names:(ident() ++ ("," _)) ")" _ { names })? {?
+                if columns.is_some() && !matches!(name,"select"|"insert"|"update"|"references") { return Err("column privilege"); }
+                let children=columns.map(|names| vec![Node::new(Kind::ColumnList,names.into_iter().map(Node::name).collect())]).unwrap_or_default();
+                Ok(Node::new(Kind::Privilege,children).text(name.into()))
+            }
+        rule privileges() -> Vec<Node> = kw("all") kw("privileges")? { vec![Node::new(Kind::Privilege,vec![]).text("all".into())] }
+            / values:(privilege() ++ ("," _)) { values }
+        rule privilege_level() -> Node = first:("*" _ { Node::new(Kind::Star,vec![]) } / name:ident() { Node::name(name) })
+            second:("." _ value:("*" _ { Node::new(Kind::Star,vec![]) } / name:ident() { Node::name(name) }) { value })? {
+                match second { Some(second) => Node::new(Kind::PrivilegeLevel,vec![first,second]),None => first }
+            }
+        rule privilege_object() -> Node = value:(kw("table") { 1 } / kw("procedure") { 2 } / kw("function") { 3 }) {
+            Node::new(Kind::PrivilegeObject,vec![]).value(value)
+        }
+        rule accounts() -> Node = values:(account() ++ ("," _)) { Node::new(Kind::Users,values) }
+        rule account_statement() -> Node
+            = kw("create") kw("user") absent:if_not_exists()? users:(user_spec() ++ ("," _)) {
+                Node::new(Kind::CreateUser,vec![Node::optional(absent),Node::new(Kind::Users,users),Node::missing(),Node::missing()])
+            }
+            / kw("drop") kw("user") exists:if_exists()? users:accounts() { Node::new(Kind::DropUser,vec![users,Node::optional(exists)]) }
+            / kw("alter") kw("user") user:account() auth:authentication() {
+                Node::new(Kind::SetPassword,vec![user,auth.0,auth.1,Node::missing(),auth.2])
+            }
+            / kw("set") kw("password") user:(kw("for") user:account() { user })? "=" _
+                auth:(kw("password") "(" _ password:password() ")" _ { (password,1) } / password:password() { (password,0) }) {
+                    Node::new(Kind::SetPassword,vec![Node::optional(user),auth.0,Node::new(Kind::Bool,vec![]).value(auth.1),Node::missing(),Node::missing()])
+                }
+            / kw("grant") privileges:privileges() kw("on") object:privilege_object()? level:privilege_level()
+                kw("to") users:(user_spec() ++ ("," _)) option:(kw("with") kw("grant") kw("option"))? {
+                    let mut privileges=privileges;
+                    if option.is_some() { privileges.push(Node::new(Kind::Privilege,vec![]).text("grant option".into())); }
+                    Node::new(Kind::Grant,vec![Node::new(Kind::Privileges,privileges),Node::optional(object),level,Node::new(Kind::Users,users)])
+                }
+            / kw("revoke") exists:if_exists()? kw("all") kw("privileges")? "," _ kw("grant") kw("option") kw("from") users:accounts() {
+                Node::new(Kind::RevokeAll,vec![users,Node::optional(exists),Node::missing()])
+            }
+            / kw("revoke") exists:if_exists()? privileges:privileges() kw("on") object:privilege_object()? level:privilege_level() kw("from") users:accounts() {
+                Node::new(Kind::Revoke,vec![Node::new(Kind::Privileges,privileges),Node::optional(object),level,users,Node::optional(exists),Node::missing()])
+            }
+        rule prepared_statement() -> Node
+            = kw("prepare") name:ident() kw("from") source:(string() / value:user_variable() { Node::new(Kind::GetUserVariable,vec![value]) }) {
+                Node::new(Kind::Prepare,vec![Node::name(name),source])
+            }
+            / kw("execute") name:ident() args:(kw("using") args:((value:user_variable() { Node::new(Kind::GetUserVariable,vec![value]) }) ++ ("," _)) { args })? {
+                Node::new(Kind::Execute,vec![Node::name(name),Node::list(Kind::ExecuteArguments,args.unwrap_or_default())])
+            }
+            / (kw("deallocate") / kw("drop")) kw("prepare") name:ident() { Node::new(Kind::Deallocate,vec![Node::name(name)]) }
+        pub rule query() -> Node = _ value:(select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / setting() / show() / alter_system() / prepared_statement()) (";" _)* { value }
+            / text:$(_ (";" _)*) { Node::new(Kind::EmptyQuery,vec![]).value(u64::from(text.chars().any(|ch| !ch.is_ascii_whitespace() && ch!=';'))) }
     }
 }

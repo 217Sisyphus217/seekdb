@@ -19,6 +19,7 @@
 #include "lib/string/ob_string.h"
 #include "share/ob_errno.h"
 #include "share/cache/ob_cache_type.h"
+#include "share/schema/ob_priv_type.h"
 #include "lib/oblog/ob_log.h"
 #include <algorithm>
 
@@ -66,6 +67,7 @@ ObItemType operator_type(const peg::Node &node)
 ObItemType node_type(const peg::Node &node)
 {
   switch (node.kind) {
+    case Kind::EmptyQuery: return T_EMPTY_QUERY;
     case Kind::Select: return T_SELECT;
     case Kind::ProjectList: return T_PROJECT_LIST;
     case Kind::Projection: return T_PROJECT_STRING;
@@ -242,8 +244,69 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Ntile: return T_WIN_FUN_NTILE;
     case Kind::NamedWindows: return T_WIN_NAMED_WINDOWS;
     case Kind::NamedWindow: return T_WIN_NAMED_WINDOW;
+    case Kind::CreateUser: return T_CREATE_USER;
+    case Kind::DropUser: return T_DROP_USER;
+    case Kind::Users: return T_USERS;
+    case Kind::UserSpec: return T_CREATE_USER_SPEC;
+    case Kind::UserHost: return T_USER_WITH_HOST_NAME;
+    case Kind::Password: return T_VARCHAR;
+    case Kind::SetPassword: return T_SET_PASSWORD;
+    case Kind::Privilege: return T_PRIV_TYPE;
+    case Kind::Privileges: return T_PRIVILEGES;
+    case Kind::PrivilegeLevel: return T_PRIV_LEVEL;
+    case Kind::PrivilegeObject: return T_PRIV_OBJECT;
+    case Kind::Grant: return T_GRANT;
+    case Kind::Revoke: return T_REVOKE;
+    case Kind::RevokeAll: return T_REVOKE_ALL;
+    case Kind::ShowGrants: return T_SHOW_GRANTS;
+    case Kind::Prepare: return T_PREPARE;
+    case Kind::Execute: return T_EXECUTE;
+    case Kind::ExecuteArguments: return T_ARGUMENT_LIST;
+    case Kind::Deallocate: return T_DEALLOCATE;
     default: return T_INVALID;
   }
+}
+
+ObPrivType privilege_type(const peg::Node &node)
+{
+  if (node.text == "all") return OB_PRIV_ALL;
+  if (node.text == "alter") return OB_PRIV_ALTER;
+  if (node.text == "create") return OB_PRIV_CREATE;
+  if (node.text == "create user") return OB_PRIV_CREATE_USER;
+  if (node.text == "delete") return OB_PRIV_DELETE;
+  if (node.text == "drop") return OB_PRIV_DROP;
+  if (node.text == "grant option") return OB_PRIV_GRANT;
+  if (node.text == "insert") return OB_PRIV_INSERT;
+  if (node.text == "update") return OB_PRIV_UPDATE;
+  if (node.text == "select") return OB_PRIV_SELECT;
+  if (node.text == "index") return OB_PRIV_INDEX;
+  if (node.text == "create view") return OB_PRIV_CREATE_VIEW;
+  if (node.text == "show view") return OB_PRIV_SHOW_VIEW;
+  if (node.text == "show databases") return OB_PRIV_SHOW_DB;
+  if (node.text == "super") return OB_PRIV_SUPER;
+  if (node.text == "process") return OB_PRIV_PROCESS;
+  if (node.text == "file") return OB_PRIV_FILE;
+  if (node.text == "replication slave") return OB_PRIV_REPL_SLAVE;
+  if (node.text == "replication client") return OB_PRIV_REPL_CLIENT;
+  if (node.text == "alter system") return OB_PRIV_ALTER_SYSTEM;
+  if (node.text == "execute") return OB_PRIV_EXECUTE;
+  if (node.text == "alter routine") return OB_PRIV_ALTER_ROUTINE;
+  if (node.text == "create routine") return OB_PRIV_CREATE_ROUTINE;
+  if (node.text == "shutdown") return OB_PRIV_SHUTDOWN;
+  if (node.text == "reload") return OB_PRIV_RELOAD;
+  if (node.text == "lock tables") return OB_PRIV_LOCK_TABLE;
+  if (node.text == "references") return OB_PRIV_REFERENCES;
+  if (node.text == "create role") return OB_PRIV_CREATE_ROLE;
+  if (node.text == "drop role") return OB_PRIV_DROP_ROLE;
+  if (node.text == "trigger") return OB_PRIV_TRIGGER;
+  if (node.text == "read") return OB_PRIV_READ;
+  if (node.text == "write") return OB_PRIV_WRITE;
+  if (node.text == "create ai model") return OB_PRIV_CREATE_AI_MODEL;
+  if (node.text == "alter ai model") return OB_PRIV_ALTER_AI_MODEL;
+  if (node.text == "drop ai model") return OB_PRIV_DROP_AI_MODEL;
+  if (node.text == "access ai model") return OB_PRIV_ACCESS_AI_MODEL;
+  if (node.text == "usage") return OB_PRIV_SET_EMPTY;
+  return -1;
 }
 
 int build_type(const peg::Node &source, void *pool, ParseNode *&node)
@@ -391,6 +454,14 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
     if (node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     node->str_len_ = length;
   }
+  if (source.kind == Kind::Privilege) {
+    node->value_ = privilege_type(source);
+    if (node->value_ < 0) return common::OB_ERR_UNEXPECTED;
+  }
+  if (source.kind == Kind::Password) {
+    node->stmt_loc_.first_column_ = source.start;
+    node->stmt_loc_.last_column_ = source.end - 1;
+  }
   if (source.kind == Kind::StringAlias) {
     node->param_num_ = 1;
     node->children_[1]->is_input_quoted_ = false;
@@ -451,7 +522,10 @@ int build_tree(const common::ObString &sql, const peg::ParseTree &tree, ParseRes
   if (root == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   root->children_[0] = query;
   result.result_tree_ = root;
-  result.contain_sensitive_data_ = tree.root.kind == Kind::SetConfig;
+  result.contain_sensitive_data_ = tree.root.kind == Kind::SetConfig
+      || tree.root.kind == Kind::CreateUser || tree.root.kind == Kind::SetPassword || tree.root.kind == Kind::Grant;
+  result.may_contain_sensitive_data_ = result.contain_sensitive_data_
+      || tree.root.kind == Kind::DropUser || tree.root.kind == Kind::Revoke || tree.root.kind == Kind::RevokeAll;
   result.question_mark_ctx_.count_ = tree.parameters;
   result.question_mark_ctx_.by_ordinal_ = tree.parameters != 0;
   if (result.is_dynamic_sql_) {
