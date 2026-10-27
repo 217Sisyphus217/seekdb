@@ -37,10 +37,11 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 以及 FROM DUAL 和常用 EXPLAIN 格式。
 支持生成列、CHECK 约束、LIST 分区、指定分区读写和表级索引 hint；
 支持 FIRST_VALUE／LAST_VALUE／NTH_VALUE／LEAD／LAG、NULL 处理选项、LIKE ESCAPE 和用户变量赋值。
+支持 DATE_ADD／DATE_SUB／ADDDATE／SUBDATE、TIMESTAMPADD／TIMESTAMPDIFF、EXTRACT 和 MySQL 可执行版本注释。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
 其他聚合函数和特殊函数语法、CTE、其他窗口函数、其他 DDL、完整 hint 语法、
-版本注释和其余 PL 语法尚未迁移。系统包和 mysqltest 初始化已通过，全量用例尚未通过；
+其余 PL 语法尚未迁移。系统包和 mysqltest 初始化已通过，全量用例尚未通过；
 当前不是默认解析器的全量替换。
 
 ## 跨语言接口

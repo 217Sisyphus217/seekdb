@@ -18,6 +18,7 @@
 #include "sql/parser/parse_node.h"
 #include "sql/parser/parse_malloc.h"
 #include "lib/string/ob_string.h"
+#include "lib/ob_date_unit_type.h"
 #include "share/ob_errno.h"
 #include "share/cache/ob_cache_type.h"
 #include "share/schema/ob_priv_type.h"
@@ -349,6 +350,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::WindowBound: return T_WIN_BOUND;
     case Kind::WindowInterval: return T_WIN_INTERVAL;
     case Kind::HiddenInt: return T_INT;
+    case Kind::DateUnit: return T_INT;
     case Kind::RowNumber: return T_WIN_FUN_ROW_NUMBER;
     case Kind::Rank: return T_WIN_FUN_RANK;
     case Kind::DenseRank: return T_WIN_FUN_DENSE_RANK;
@@ -592,14 +594,14 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   return common::OB_SUCCESS;
 }
 
-int build_node(const common::ObString &sql, const peg::Node &source, size_t parameters,
+int build_node(const common::ObString &sql, const common::ObString &expression_sql, const peg::Node &source, size_t parameters,
                void *pool, ParseNode *&node, bool pl = false)
 {
   node = nullptr;
   if (source.kind == Kind::Missing) return common::OB_SUCCESS;
   if (source.kind == Kind::DataType || source.kind == Kind::CastType) return build_type(source, pool, node);
   if (source.kind == Kind::Parenthesized) {
-    const int ret = build_node(sql, source.children[0], parameters, pool, node, pl);
+    const int ret = build_node(sql, expression_sql, source.children[0], parameters, pool, node, pl);
     if (ret != common::OB_SUCCESS) return ret;
     node->is_assigned_from_child_ = true;
     return common::OB_SUCCESS;
@@ -616,7 +618,7 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
                              PARSE_SELECT_FOR_UPD, PARSE_SELECT_HINTS, PARSE_SELECT_INTO_EXTRA};
   for (size_t child = 0; child < source.children.size(); ++child) {
     const size_t slot = type == T_SELECT ? select_slots[child] : child;
-    const int ret = build_node(sql, source.children[child], parameters, pool, node->children_[slot], pl);
+    const int ret = build_node(sql, expression_sql, source.children[child], parameters, pool, node->children_[slot], pl);
     if (ret != common::OB_SUCCESS) return ret;
   }
   if (type == T_SELECT && node->children_[PARSE_SELECT_DISTINCT] != nullptr) {
@@ -637,7 +639,7 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
     const auto &expression = source.children[slot];
     ParseNode *child = node->children_[slot];
     child->str_len_ = expression.end - expression.start;
-    child->str_value_ = parse_strndup(sql.ptr() + expression.start, child->str_len_, pool);
+    child->str_value_ = parse_strndup(expression_sql.ptr() + expression.start, child->str_len_, pool);
     if (child->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   }
   if (type != T_FUN_SYS) node->value_ = type == T_SELECT ? parameters : source.value;
@@ -654,7 +656,7 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
   const size_t raw_length = source.end - source.start;
   const bool literal = type == T_INT || type == T_UINT64 || type == T_NUMBER || type == T_DOUBLE
       || type == T_VARCHAR || type == T_HEX_STRING || type == T_BOOL || type == T_NULL || type == T_QUESTIONMARK;
-  if (literal && source.kind != Kind::HiddenInt && source.kind != Kind::HiddenNull && source.kind != Kind::CacheType) {
+  if (literal && source.kind != Kind::HiddenInt && source.kind != Kind::HiddenNull && source.kind != Kind::CacheType && source.kind != Kind::DateUnit) {
     node->raw_text_ = parse_strndup(raw, raw_length, pool);
     if (node->raw_text_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     node->text_len_ = raw_length;
@@ -668,7 +670,8 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
       || source.kind == Kind::RoutineParameters || source.kind == Kind::PlDefault
       || source.kind == Kind::SubProcedureDeclaration || source.kind == Kind::SubFunctionDeclaration
       || source.kind == Kind::ObjectAccess || source.kind == Kind::KeyPartition || source.kind == Kind::HashPartition
-      || source.kind == Kind::ListPartition || source.kind == Kind::ListColumnsPartition) {
+      || source.kind == Kind::ListPartition || source.kind == Kind::ListColumnsPartition
+      || (source.kind == Kind::DateUnit && raw_length != 0)) {
     text = raw;
     length = raw_length;
   }
@@ -711,6 +714,16 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
     node->children_[1]->is_input_quoted_ = false;
   }
   if (source.kind == Kind::HiddenInt || source.kind == Kind::HiddenNull) node->is_hidden_const_ = true;
+  if (source.kind == Kind::DateUnit) {
+    node->is_hidden_const_ = true;
+    node->is_date_unit_ = source.start != source.end;
+    for (int unit = DATE_UNIT_MICROSECOND; unit < DATE_UNIT_MAX; ++unit) {
+      if (source.text == ob_date_unit_type_str(static_cast<ObDateUnitType>(unit))) {
+        node->value_ = unit;
+        break;
+      }
+    }
+  }
   if (source.kind == Kind::CacheType) {
     node->value_ = source.text == "plan" ? CACHE_TYPE_PLAN : source.text == "pl" ? CACHE_TYPE_PL_OBJ
         : source.text == "ps" ? CACHE_TYPE_PS_OBJ : CACHE_TYPE_LIB_CACHE;
@@ -784,7 +797,9 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
 int build_tree(const common::ObString &sql, peg::ParseTree &tree, ParseResult &result, bool routine_body)
 {
   ParseNode *query = nullptr;
-  const int ret = build_node(sql, tree.root, tree.parameters, result.malloc_pool_, query, routine_body);
+  const common::ObString expression_sql = tree.expanded_sql.empty()
+      ? sql : common::ObString(tree.expanded_sql.size(), tree.expanded_sql.data());
+  const int ret = build_node(sql, expression_sql, tree.root, tree.parameters, result.malloc_pool_, query, routine_body);
   if (ret != common::OB_SUCCESS) return ret;
   ParseNode *root = new_node(result.malloc_pool_, T_STMT_LIST, 1);
   if (root == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;

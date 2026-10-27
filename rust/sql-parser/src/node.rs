@@ -395,6 +395,18 @@ impl Node {
         ) {
             return Err("window function requires OVER");
         }
+        if matches!(
+            function.as_str(),
+            "date_add"
+                | "date_sub"
+                | "adddate"
+                | "subdate"
+                | "timestampadd"
+                | "timestampdiff"
+                | "extract"
+        ) {
+            return Err("date function syntax");
+        }
         if function == "mod" {
             if window.is_some() || distinct || arguments.len() != 2 {
                 return Err("MOD requires two arguments");
@@ -492,7 +504,7 @@ impl Node {
         {
             return Err("invalid window function");
         }
-        let star = arguments.iter().any(|arg| arg.is_wildcard());
+        let star = arguments.iter().any(|arg| arg.kind == Kind::Star);
         let count_star = kind == Kind::Count
             && !distinct
             && arguments.len() == 1

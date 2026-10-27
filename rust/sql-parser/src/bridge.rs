@@ -294,6 +294,7 @@ pub(crate) mod ffi {
         WindowBound,
         WindowInterval,
         HiddenInt,
+        DateUnit,
         RowNumber,
         Rank,
         DenseRank,
@@ -429,6 +430,7 @@ pub(crate) mod ffi {
 
     struct ParseTree {
         root: Node,
+        expanded_sql: String,
         parameters: usize,
         parameter_names: Vec<String>,
         error: String,
@@ -489,6 +491,7 @@ fn parse_sql(
 ) -> ffi::ParseTree {
     let mut result = ffi::ParseTree {
         root: Node::missing(),
+        expanded_sql: String::new(),
         parameters: 0,
         parameter_names: Vec::new(),
         error: String::new(),
@@ -508,11 +511,17 @@ fn parse_sql(
         pipes_as_concat,
         high_not_precedence,
     };
-    let parsed = if routine_body {
-        grammar::sql::routine_body(sql, mode)
-    } else {
-        grammar::sql::query(sql, mode)
-    };
+    let parsed = grammar::executable_sql(sql, mode).and_then(|sql| {
+        let parsed = if routine_body {
+            grammar::sql::routine_body(&sql, mode)
+        } else {
+            grammar::sql::query(&sql, mode)
+        };
+        if let std::borrow::Cow::Owned(sql) = sql {
+            result.expanded_sql = sql;
+        }
+        parsed
+    });
     match parsed {
         Ok(mut query) => {
             match number_parameters(

@@ -13,6 +13,25 @@
 // limitations under the License.
 
 use crate::{node::*, SqlMode};
+use std::borrow::Cow;
+
+pub(crate) fn executable_sql(
+    sql: &str,
+    mode: SqlMode,
+) -> Result<Cow<'_, str>, peg::error::ParseError<peg::str::LineCol>> {
+    if !sql.contains("/*!") {
+        return Ok(Cow::Borrowed(sql));
+    }
+    let spans = sql::comment_delimiters(sql, mode)?;
+    if spans.is_empty() {
+        return Ok(Cow::Borrowed(sql));
+    }
+    let mut bytes = sql.as_bytes().to_vec();
+    for (start, end) in spans {
+        bytes[start..end].fill(b' ');
+    }
+    Ok(Cow::Owned(String::from_utf8(bytes).unwrap()))
+}
 
 fn reserved(word: &str) -> bool {
     [
@@ -44,6 +63,7 @@ fn reserved(word: &str) -> bool {
         "not",
         "between",
         "in",
+        "interval",
         "like",
         "is",
         "null",
@@ -141,6 +161,18 @@ enum Tail {
 
 peg::parser! {
     pub grammar sql(mode: SqlMode) for str {
+        rule opaque_comment_token()
+            = "'" ("''" / enabled(!mode.no_backslash_escapes) "\\" [_] / !"'" [_])* "'"
+            / "\"" ("\"\"" / enabled(!mode.ansi_quotes && !mode.no_backslash_escapes) "\\" [_] / !"\"" [_])* "\""
+            / "`" ("``" / !"`" [_])* "`"
+            / "/*" !"!" (!"*/" [_])* "*/"
+            / ("--" &(space() / ![_]) / "#") (!"\n" [_])*
+        pub rule comment_delimiters() -> Vec<(usize,usize)> = spans:(
+                start:position!() "/*!" (['0'..='9']*<5>)? content:position!()
+                (opaque_comment_token() / !"*/" [_])* close:position!() "*/" end:position!() { vec![(start,content),(close,end)] }
+                / opaque_comment_token() { vec![] }
+                / ((!['\''|'"'|'`'|'/'|'-'|'#'] [_])+ / !"/*!" [_]) { vec![] }
+            )* { spans.into_iter().flatten().collect() }
         rule space() = [' ' | '\t' | '\r' | '\n' | '\x0b' | '\x0c']
         rule _() = quiet!{(space() / "/*" !['!' | '+'] (!"*/" [_])* "*/"
             / ("--" &(space() / ![_]) / "#") (!"\n" [_])*)*}
@@ -215,7 +247,8 @@ peg::parser! {
             Node::new(Kind::UserVariable, vec![]).text(name.text).at(start,end)
         }
         rule atom(level: usize) -> Node
-            = depth(level) start:position!() value:(kw("cast") "(" _ value:expr(level+1) kw("as") target:cast_type() { (value,target) }
+            = depth(level) value:date_function(level+1) { value }
+            / depth(level) start:position!() value:(kw("cast") "(" _ value:expr(level+1) kw("as") target:cast_type() { (value,target) }
                 / kw("convert") "(" _ value:expr(level+1) "," _ target:cast_type() { (value,target) }) ")" end:position!() _ {?
                 Node::call(vec![Name { text:"cast".into(),quoted:false,start,end:start+4 }],false,vec![value.0,value.1],None,start,end)
             }
@@ -278,6 +311,28 @@ peg::parser! {
                     Some((None, end)) => Node::column(parts, true, start, end),
                     Some((Some((distinct, arguments, window)), end)) => Node::call(parts, distinct, arguments, window, start, end),
                 } }
+        rule date_unit() -> Node = start:position!() name:$(word()) end:position!() _ {?
+            let name=name.to_ascii_lowercase();
+            if ["microsecond","second","minute","hour","day","week","month","quarter","year",
+                "second_microsecond","minute_microsecond","minute_second","hour_microsecond","hour_second","hour_minute",
+                "day_microsecond","day_second","day_minute","day_hour","year_month"].contains(&name.as_str()) {
+                Ok(Node::new(Kind::DateUnit,vec![]).text(name).at(start,end))
+            } else { Err("date unit") }
+        }
+        rule date_function(level: usize) -> Node
+            = start:position!() function:(kw("date_add") { ("date_add",false) } / kw("date_sub") { ("date_sub",false) }
+                / kw("adddate") { ("date_add",true) } / kw("subdate") { ("date_sub",true) }) "(" _ date:expr(level) "," _
+                interval:(kw("interval") value:expr(level) unit:date_unit() { (value,unit) }
+                    / enabled(function.1) value:expr(level) { (value,Node::new(Kind::DateUnit,vec![]).text("day".into())) }) ")" end:position!() _ {?
+                Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text(function.0.into()),Node::new(Kind::ExprList,vec![date,interval.0,interval.1])]).expression(start,end)
+            }
+            / start:position!() function:(kw("timestampadd") { "timestampadd" } / kw("timestampdiff") { "timestampdiff" })
+                "(" _ unit:date_unit() "," _ left:expr(level) "," _ right:expr(level) ")" end:position!() _ {?
+                Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text(function.into()),Node::new(Kind::ExprList,vec![unit,left,right])]).expression(start,end)
+            }
+            / start:position!() kw("extract") "(" _ unit:date_unit() kw("from") value:expr(level) ")" end:position!() _ {?
+                Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text("extract".into()),Node::new(Kind::ExprList,vec![unit,value])]).expression(start,end)
+            }
         rule collated(level: usize) -> Node = value:atom(level) collations:(kw("collate") value:collation_name() { Node { kind:Kind::Collation,..value } })* {?
             collations.into_iter().try_fold(value,|value,collation| {
                 let (start,end)=(value.start,collation.end);
