@@ -28,7 +28,7 @@ pub(crate) struct Name {
 pub(crate) struct Select {
     pub parenthesized: bool,
     pub set: Option<Node>,
-    pub distinct: bool,
+    pub options: Vec<Node>,
     pub projection: Vec<Node>,
     pub into: Option<Node>,
     pub into_end: Option<Node>,
@@ -638,11 +638,6 @@ impl Node {
         if query.into.is_some() && query.into_end.is_some() {
             return Err("one INTO clause");
         }
-        let distinct = if query.distinct {
-            Self::new(Kind::Distinct, vec![])
-        } else {
-            Self::missing()
-        };
         let projection = Self::list(Kind::ProjectList, query.projection);
         let from = if query.from.is_empty() {
             Self::missing()
@@ -676,7 +671,7 @@ impl Node {
         Self::new(
             Kind::Select,
             vec![
-                distinct,
+                Self::list(Kind::SelectOptions, query.options),
                 projection,
                 Self::optional(query.into),
                 from,

@@ -367,7 +367,10 @@ peg::parser! {
         rule bit_and(level: usize) -> Node = left:shift(level) rest:("&" !"&" _ right:shift(level) { ("&".into(), right) })* {? chain(left, rest) }
         rule bit_or(level: usize) -> Node = left:bit_and(level) rest:("|" !"|" _ right:bit_and(level) { ("|".into(), right) })* {? chain(left, rest) }
         rule tail(level: usize) -> Tail
-            = op:$("<=>" / "<=" / ">=" / "<>" / "!=" / "=" / "<" / ">") _ right:bit_or(level) { Tail::Compare(op.into(), right) }
+            = op:$("<=>" / "<=" / ">=" / "<>" / "!=" / "=" / "<" / ">") _
+                right:(enabled(op!="<=>") start:position!() kind:(kw("all") { Kind::All } / (kw("any") / kw("some")) { Kind::Any })
+                    "(" _ query:select(level+1) ")" end:position!() _ {? Node::new(kind,vec![query]).expression(start,end) }
+                    / bit_or(level)) { Tail::Compare(op.into(), right) }
             / kw("is") negated:kw("not")? test:bool_null() { Tail::Is(negated.is_some(), test) }
             / negated:kw("not")? tail:(kw("between") low:bit_or(level) kw("and") high:bit_or(level) { Tail::Between(false, low, high) }
                 / kw("like") right:bit_or(level) escape:(kw("escape") value:bit_or(level) { value })? { Tail::Like(false,right,escape) }
@@ -558,7 +561,13 @@ peg::parser! {
             }
             / start:position!() text:$(word()) end:position!() _ { Name { text:text.into(),quoted:false,start,end } }
             / ident()
-        rule hint_qb() -> Node = "@" _ name:hint_name() { Node::name(name) }
+        rule hint_qb_name() -> Node = name:hint_name() {
+            let mut name=name;name.text.make_ascii_uppercase();Node::name(name)
+        }
+        rule hint_qb() -> Node = "@" _ name:hint_qb_name() { name }
+        rule hint_qb_names() -> Node = "(" _ names:(hint_qb_name() ++ (("," _)?)) ")" _ {
+            Node::new(Kind::HintQbNames,names)
+        }
         rule hint_relation() -> Node = names:(hint_name() ++ ("." _)) qb:hint_qb()? {?
             Ok(Node::new(Kind::HintRelation,vec![Node::relation(names)?,Node::optional(qb)]))
         }
@@ -570,14 +579,43 @@ peg::parser! {
         rule hint_join_item() -> Node
             = "(" _ tables:(hint_relation() ++ (("," _)?)) ")" _ { Node::new(Kind::HintTables,tables) }
             / hint_relation()
+        rule distribute_method() -> Node = kind:(kw("all") { Kind::DistributeAll }
+                / kw("none") { Kind::DistributeNone }
+                / kw("partition") { Kind::DistributePartition }
+                / kw("random") { Kind::DistributeRandom }
+                / kw("hash") { Kind::DistributeHash }
+                / kw("broadcast") { Kind::DistributeBroadcast }
+                / kw("local") { Kind::DistributeLocal }
+                / kw("bc2host") { Kind::DistributeBc2Host }
+                / kw("range") { Kind::DistributeRange }
+                / kw("list") { Kind::DistributeList }
+                / kw("basic") { Kind::DistributeBasic }
+                / kw("hash_local") { Kind::DistributeHashLocal }) { Node::new(kind,vec![]) }
         rule hint_option() -> Node
             = kw("leading") "(" _ qb:hint_qb()? tables:hint_leading(0) ")" _ { Node::new(Kind::Leading,vec![Node::optional(qb),tables]) }
+            / kind:(kw("begin_outline_data") { Kind::BeginOutline } / kw("end_outline_data") { Kind::EndOutline }) { Node::new(kind,vec![]) }
+            / kw("pq_distribute") "(" _ qb:hint_qb()? tables:hint_join_item()
+                methods:(("," _)? outer:distribute_method() ("," _)? inner:distribute_method() { (outer,inner) })? ")" _ {
+                    let (outer,inner)=methods.unwrap_or_else(|| (Node::missing(),Node::missing()));
+                    Node::new(Kind::PqDistribute,vec![Node::optional(qb),tables,outer,inner])
+                }
+            / kw("pq_map") "(" _ qb:hint_qb()? tables:hint_join_item() ")" _ { Node::new(Kind::PqMap,vec![Node::optional(qb),tables]) }
+            / kind:(kw("pq_gby") { Kind::PqGroupBy } / kw("pq_distinct") { Kind::PqDistinct }) "(" _ qb:hint_qb()?
+                method:distribute_method() sort:(enabled(kind==Kind::PqGroupBy) ("," _)? value:type_size() { value })? ")" _ {
+                    Node::new(kind,vec![Node::optional(qb),method,Node::optional(sort)])
+                }
+            / kind:(kw("gby_pushdown") { Kind::GroupByPushdown } / kw("no_gby_pushdown") { Kind::NoGroupByPushdown }
+                / kw("use_hash_distinct") { Kind::HashDistinct } / kw("no_use_hash_distinct") { Kind::NoHashDistinct }
+                / kw("distinct_pushdown") { Kind::DistinctPushdown } / kw("no_distinct_pushdown") { Kind::NoDistinctPushdown }
+                / kw("use_hash_set") { Kind::HashSet } / kw("no_use_hash_set") { Kind::NoHashSet })
+                qb:("(" _ qb:hint_qb()? ")" _ { qb })? { Node::new(kind,vec![Node::optional(qb.flatten())]) }
             / kw("dbms_stats") { Node::new(Kind::DbmsStats,vec![]) }
             / kind:(kw("enable_parallel_dml") { Kind::EnableParallelDml } / kw("disable_parallel_dml") { Kind::DisableParallelDml }
                 / kw("gather_optimizer_statistics") { Kind::GatherStatistics } / kw("no_gather_optimizer_statistics") { Kind::NoGatherStatistics }
                 / kw("no_parallel") { Kind::NoParallel }) { Node::new(kind,vec![]) }
             / kw("dml_parallel") "(" _ value:type_size() ")" _ { Node::new(Kind::DmlParallel,vec![value]) }
             / kw("query_timeout") "(" _ value:type_size() ")" _ { Node::new(Kind::QueryTimeout,vec![value]) }
+            / kw("topk") "(" _ minimum:type_size() precision:type_size() ")" _ { Node::new(Kind::TopK,vec![minimum,precision]) }
             / kw("read_consistency") "(" _ level:(kw("weak") { 3 } / kw("strong") { 4 } / kw("frozen") { 2 }) ")" _ { Node::new(Kind::ReadConsistency,vec![]).value(level) }
             / kw("dynamic_sampling") "(" _ value:(value:type_size() { Node::new(Kind::DynamicSampling,vec![value]) }
                 / qb:hint_qb()? table:hint_relation() ("," _)? level:type_size() blocks:(("," _)? value:type_size() { value })? {
@@ -587,7 +625,8 @@ peg::parser! {
                 / kw("manual") { Node::new(Kind::Parallel,vec![]).value(1) }
                 / kw("auto") { Node::new(Kind::Parallel,vec![]).value(2) }
                 / qb:hint_qb()? table:hint_relation() ("," _)? value:type_size() { Node::new(Kind::TableParallel,vec![Node::optional(qb),table,value]) }) ")" _ { value }
-            / kw("full") "(" _ qb:hint_qb()? table:hint_relation() ")" _ { Node::new(Kind::FullScan,vec![Node::optional(qb),table]) }
+            / kind:(kw("full") { Kind::FullScan } / kw("use_das") { Kind::UseDas } / kw("no_use_das") { Kind::NoUseDas })
+                "(" _ qb:hint_qb()? table:hint_relation() ")" _ { Node::new(kind,vec![Node::optional(qb),table]) }
             / kind:(kw("index") { Kind::IndexScan } / kw("index_asc") { Kind::IndexAsc } / kw("index_desc") { Kind::IndexDesc })
                 "(" _ qb:hint_qb()? table:hint_relation() ("," _)? index:hint_name()
                 prefix:(negative:("-" _)? value:type_size() {
@@ -601,10 +640,83 @@ peg::parser! {
                     Node::new(kind,vec![Node::optional(qb),Node::new(Kind::JoinHintTables,tables)])
                 }
             / kw("use_plan_cache") "(" _ policy:(kw("none") { 1 } / kw("default") { 2 }) ")" _ { Node::new(Kind::UsePlanCache,vec![]).value(policy) }
-            / kw("no_rewrite") qb:("(" _ qb:hint_qb()? ")" _ { qb })? { Node::new(Kind::NoRewrite,vec![Node::optional(qb.flatten())]) }
+            / kind:(kw("merge") { Kind::MergeView } / kw("no_merge") { Kind::NoMergeView })
+                args:("(" _ qb:hint_qb()? target:(enabled(kind==Kind::MergeView) direction:("<" _ { 1 } / ">" _ { 0 }) name:hint_qb_name() { (direction,name) })? ")" _ { (qb,target) })? {
+                    let (qb,target)=args.unwrap_or_default();
+                    let (direction,target)=target.unwrap_or_else(|| (0,Node::missing()));
+                    Node::new(kind,vec![Node::optional(qb),target]).value(direction)
+                }
+            / kw("semi_to_inner") args:("(" _ qb:hint_qb()? tables:(hint_join_item() ++ (("," _)?))? ")" _ { (qb,tables) })? {
+                    let (qb,tables)=args.unwrap_or_default();
+                    let mut children=vec![Node::optional(qb)];
+                    if let Some(tables)=tables { children.push(Node::new(Kind::JoinHintTables,tables)); }
+                    Node::new(Kind::SemiToInner,children)
+                }
+            / kind:(kw("eliminate_join") { Kind::EliminateJoin } / kw("no_eliminate_join") { Kind::NoEliminateJoin }
+                / kw("left_to_anti") { Kind::LeftToAnti } / kw("no_left_to_anti") { Kind::NoLeftToAnti }
+                / kw("place_group_by") { Kind::PlaceGroupBy } / kw("no_place_group_by") { Kind::NoPlaceGroupBy }
+                / kw("win_magic") { Kind::WindowMagic } / kw("no_win_magic") { Kind::NoWindowMagic })
+                args:("(" _ qb:hint_qb()? tables:(enabled(matches!(kind,Kind::EliminateJoin|Kind::LeftToAnti|Kind::PlaceGroupBy|Kind::WindowMagic))
+                    tables:(hint_join_item() ++ (("," _)?)) { tables })? ")" _ { (qb,tables) })? {
+                    let (qb,tables)=args.unwrap_or_default();
+                    Node::new(kind,vec![Node::optional(qb),Node::list(Kind::JoinHintTables,tables.unwrap_or_default())])
+                }
+            / kind:(kw("materialize") { Kind::Materialize } / kw("coalesce_sq") { Kind::CoalesceSubqueries })
+                args:("(" _ qb:hint_qb()? groups:hint_qb_names()* ")" _ { (qb,groups) })? {
+                    let (qb,groups)=args.unwrap_or_default();
+                    let mut children=vec![Node::optional(qb)];
+                    if let Some(groups)=groups.into_iter().reduce(|left,right| Node::new(Kind::Link,vec![left,right])) { children.push(groups); }
+                    Node::new(kind,children)
+                }
+            / kind:(kw("no_rewrite") { Kind::NoRewrite }
+                / kw("outer_to_inner") { Kind::OuterToInner } / kw("no_outer_to_inner") { Kind::NoOuterToInner }
+                / kw("unnest") { Kind::Unnest } / kw("no_unnest") { Kind::NoUnnest }
+                / kw("simplify_group_by") { Kind::SimplifyGroupBy } / kw("no_simplify_group_by") { Kind::NoSimplifyGroupBy }
+                / kw("pred_deduce") { Kind::PredicateDeduce } / kw("no_pred_deduce") { Kind::NoPredicateDeduce }
+                / kw("project_prune") { Kind::ProjectPrune } / kw("no_project_prune") { Kind::NoProjectPrune }
+                / kw("no_semi_to_inner") { Kind::NoSemiToInner }
+                / kw("no_coalesce_sq") { Kind::NoCoalesceSubqueries }
+                / kw("push_pred_cte") { Kind::PushPredCte }
+                / kw("no_push_pred_cte") { Kind::NoPushPredCte }
+                / kw("replace_const") { Kind::ReplaceConst }
+                / kw("no_replace_const") { Kind::NoReplaceConst }
+                / kw("simplify_order_by") { Kind::SimplifyOrderBy }
+                / kw("no_simplify_order_by") { Kind::NoSimplifyOrderBy }
+                / kw("simplify_distinct") { Kind::SimplifyDistinct }
+                / kw("no_simplify_distinct") { Kind::NoSimplifyDistinct }
+                / kw("simplify_winfunc") { Kind::SimplifyWinfunc }
+                / kw("no_simplify_winfunc") { Kind::NoSimplifyWinfunc }
+                / kw("simplify_expr") { Kind::SimplifyExpr }
+                / kw("no_simplify_expr") { Kind::NoSimplifyExpr }
+                / kw("simplify_limit") { Kind::SimplifyLimit }
+                / kw("no_simplify_limit") { Kind::NoSimplifyLimit }
+                / kw("simplify_subquery") { Kind::SimplifySubquery }
+                / kw("no_simplify_subquery") { Kind::NoSimplifySubquery }
+                / kw("fast_minmax") { Kind::FastMinmax }
+                / kw("no_fast_minmax") { Kind::NoFastMinmax }
+                / kw("simplify_set") { Kind::SimplifySet }
+                / kw("no_simplify_set") { Kind::NoSimplifySet }
+                / kw("push_limit") { Kind::PushLimit }
+                / kw("no_push_limit") { Kind::NoPushLimit }
+                / kw("pullup_expr") { Kind::PullupExpr }
+                / kw("no_pullup_expr") { Kind::NoPullupExpr }
+                / kw("aggr_first_unnest") { Kind::AggrFirstUnnest }
+                / kw("no_aggr_first_unnest") { Kind::NoAggrFirstUnnest }
+                / kw("join_first_unnest") { Kind::JoinFirstUnnest }
+                / kw("no_join_first_unnest") { Kind::NoJoinFirstUnnest }
+                / kw("decorrelate") { Kind::Decorrelate }
+                / kw("no_decorrelate") { Kind::NoDecorrelate }
+                / kw("use_late_materialization") { Kind::UseLateMaterialization }
+                / kw("no_use_late_materialization") { Kind::NoUseLateMaterialization }
+                / kw("transform_distinct_agg") { Kind::TransformDistinctAgg }
+                / kw("no_transform_distinct_agg") { Kind::NoTransformDistinctAgg }
+                / kw("push_subq") { Kind::PushSubq }
+                / kw("no_push_subq") { Kind::NoPushSubq }
+                / kw("inline") { Kind::Inline })
+                qb:("(" _ qb:hint_qb()? ")" _ { qb })? { Node::new(kind,vec![Node::optional(qb.flatten())]) }
             / kind:(kw("use_hash_aggregation") { Kind::HashAggregate } / kw("no_use_hash_aggregation") { Kind::NoHashAggregate })
                 qb:("(" _ qb:hint_qb()? ")" _ { qb })? { Node::new(kind,vec![Node::optional(qb.flatten())]).value(u64::MAX) }
-            / kw("qb_name") "(" _ name:hint_name() ")" _ { Node::new(Kind::QbName,vec![Node::name(name)]) }
+            / kw("qb_name") "(" _ name:hint_qb_name() ")" _ { Node::new(Kind::QbName,vec![name]) }
             / kw("opt_param") "(" _ name:string() ("," _)? value:(string() / number()) ")" _ { Node::new(Kind::OptParam,vec![name,value]) }
         rule ignored_hint_arguments(level: usize) = depth(level) "(" _
             (ignored_hint_arguments(level+1) / string() / hint_name() / !['('|')'|'\''|'"'|'`'] !"*/" [_])* ")" _
@@ -630,13 +742,18 @@ peg::parser! {
         rule select_into() -> Node = kw("into") variables:((user_variable() / name:ident() { Node::name(name) }) ++ ("," _)) {
             Node::new(Kind::IntoVariables,vec![Node::new(Kind::IntoVariableList,variables)])
         }
-        rule select_query(level: usize) -> Select = depth(level) kw("select") hints:hints()? distinct:(kw("distinct") { true } / kw("all") { false })? projection:(item(level) ++ ("," _)) into:select_into()?
+        rule select_option() -> Node
+            = kind:((kw("distinct") / kw("unique")) { Kind::Distinct } / kw("all") { Kind::All }
+                / kw("sql_calc_found_rows") { Kind::FoundRows } / kw("straight_join") { Kind::StraightJoin }) { Node::new(kind,vec![]) }
+            / (kw("sql_no_cache") / kw("sql_cache") / kw("high_priority") / kw("sql_small_result")
+                / kw("sql_big_result") / kw("sql_buffer_result")) { Node::missing() }
+        rule select_query(level: usize) -> Select = depth(level) kw("select") hints:hints()? options:select_option()* projection:(item(level) ++ ("," _)) into:select_into()?
             from:(kw("from") tables:(kw("dual") { vec![] } / tables:(table(level) ++ ("," _)) { tables }) { tables })?
             filter:(kw("where") value:expr(level) { value })?
             group_by:(kw("group") kw("by") values:expr_list(level) { values })?
             having:(kw("having") value:expr(level) { value })?
             windows:(kw("window") values:(named_window(level) ++ ("," _)) { values })? {
-                Select { distinct:distinct.unwrap_or(false),projection,into,from:from.unwrap_or_default(),filter,group_by:group_by.unwrap_or_default(),having,hints:hints.unwrap_or_default(),windows:windows.unwrap_or_default(),..Select::default() }
+                Select { options:options.into_iter().filter(|value| value.kind!=Kind::Missing).collect(),projection,into,from:from.unwrap_or_default(),filter,group_by:group_by.unwrap_or_default(),having,hints:hints.unwrap_or_default(),windows:windows.unwrap_or_default(),..Select::default() }
             }
         rule values_query(level: usize) -> Select = depth(level) kw("values") rows:((kw("row") value:row() { value }) ++ ("," _)) {
                 let values=Node::new(Kind::Values,vec![Node::new(Kind::ValuesRows,rows)]);
@@ -813,37 +930,70 @@ peg::parser! {
         rule index_options() -> Node = values:index_option()* {
             Node::list(Kind::TableOptions,values.into_iter().filter(|value| value.kind!=Kind::Missing).collect())
         }
-        rule partition_option() -> Node = kw("partition") kw("by") key:(kw("key") { true } / kw("hash") { false })
-            "(" _ start:position!() expressions:(enabled(key) names:(ident() ** ("," _)) { names.into_iter().map(Node::name).collect() }
-                / enabled(!key) value:expr(0) { vec![value] }) end:position!() ")" _ count:(kw("partitions") value:type_size() { value })? {
-                let function=Node::new(if key { Kind::PartitionKeyFunction } else { Kind::PartitionHashFunction },vec![Node::new(Kind::Ident,vec![]).text(if key { "partition_key" } else { "partition_hash" }.into()),Node::list(Kind::ExprList,expressions)]);
-                let partition=Node::new(if key { Kind::KeyPartition } else { Kind::HashPartition },vec![function,Node::optional(count),Node::missing(),Node::missing(),Node::missing(),Node::missing()]).at(start,end);
-                Node::new(Kind::PartitionOption,vec![partition])
+        rule partition_header(sub: bool) -> Node = kind:(kw("key") { Kind::KeyPartition } / kw("hash") { Kind::HashPartition }
+                / kw("range") columns:kw("columns")? { if columns.is_some() { Kind::RangeColumnsPartition } else { Kind::RangePartition } }
+                / kw("list") columns:kw("columns")? { if columns.is_some() { Kind::ListColumnsPartition } else { Kind::ListPartition } })
+            "(" _ start:position!() expressions:(enabled(kind==Kind::KeyPartition) names:(ident() ** ("," _)) { names.into_iter().map(Node::name).collect() }
+                / enabled(matches!(kind,Kind::RangeColumnsPartition|Kind::ListColumnsPartition)) names:(ident() ++ ("," _)) { names.into_iter().map(Node::name).collect() }
+                / enabled(matches!(kind,Kind::HashPartition|Kind::RangePartition|Kind::ListPartition)) value:expr(0) { vec![value] }) end:position!() ")" _ {?
+                if sub && kind==Kind::KeyPartition && expressions.is_empty() { return Err("subpartition key columns"); }
+                let hash=matches!(kind,Kind::KeyPartition|Kind::HashPartition);
+                let expression=if hash {
+                    Node::new(if kind==Kind::KeyPartition { Kind::PartitionKeyFunction } else { Kind::PartitionHashFunction },
+                        vec![Node::new(Kind::Ident,vec![]).text(if kind==Kind::KeyPartition { "partition_key" } else { "partition_hash" }.into()),Node::list(Kind::ExprList,expressions)])
+                } else { Node::new(Kind::ExprList,expressions) };
+                let mut children=vec![expression,Node::missing(),Node::missing(),Node::missing(),Node::missing()];
+                if hash || !sub && matches!(kind,Kind::RangePartition|Kind::RangeColumnsPartition) { children.push(Node::missing()); }
+                Ok(Node::new(kind,children).at(start,end))
             }
-            / kw("partition") kw("by") range:(kw("range") { true } / kw("list") { false }) columns:kw("columns")? "(" _ start:position!()
-                expressions:(enabled(columns.is_some()) names:(ident() ++ ("," _)) { names.into_iter().map(Node::name).collect() }
-                    / enabled(columns.is_none()) value:expr(0) { vec![value] }) end:position!() ")" _
-                count:(kw("partitions") value:type_size() { value })?
-                elements:("(" _ values:((enabled(range) value:range_partition_element() { value }
-                    / enabled(!range) value:list_partition_element() { value }) ++ ("," _)) ")" _ { values })? {?
-                    if !range && elements.is_none() { return Err("list partitions"); }
-                    let kind=match (range,columns.is_some()) {
-                        (true,true) => Kind::RangeColumnsPartition,(true,false) => Kind::RangePartition,
-                        (false,true) => Kind::ListColumnsPartition,(false,false) => Kind::ListPartition,
-                    };
-                    let mut children=vec![Node::new(Kind::ExprList,expressions),Node::list(Kind::Partitions,elements.unwrap_or_default()),Node::missing(),Node::optional(count),Node::missing()];
-                    if range { children.push(Node::missing()); }
-                    let partition=Node::new(kind,children).at(start,end);
-                    Ok(Node::new(Kind::PartitionOption,vec![partition]))
+        rule partition_count() -> Node = kw("partitions") value:type_size() { value }
+        rule partition_options() -> (Option<Node>,Option<Node>)
+            = count:partition_count() sub:subpartition_option()? { (Some(count),sub) }
+            / sub:subpartition_option() count:partition_count()? { (count,Some(sub)) }
+            / { (None,None) }
+        rule partition_option() -> Node = kw("partition") kw("by") header:partition_header(false) options:partition_options()
+            elements:partition_elements(header.kind,options.1.as_ref().map_or(Kind::Missing,|sub| sub.kind))? {?
+                if matches!(header.kind,Kind::ListPartition|Kind::ListColumnsPartition) && elements.is_none() { return Err("list partitions"); }
+                let mut partition=header;let hash=matches!(partition.kind,Kind::KeyPartition|Kind::HashPartition);
+                partition.children[if hash { 1 } else { 3 }]=Node::optional(options.0);
+                partition.children[if hash { 3 } else { 2 }]=Node::optional(options.1);
+                partition.children[if hash { 2 } else { 1 }]=Node::optional(elements);
+                Ok(Node::new(Kind::PartitionOption,vec![partition]))
+            }
+        rule subpartition_option() -> Node = kw("subpartition") kw("by") header:partition_header(true)
+            template:(kw("subpartition") kw("template") elements:subpartition_elements(header.kind) { elements })?
+            count:(enabled(template.is_none() && matches!(header.kind,Kind::KeyPartition|Kind::HashPartition)) kw("subpartitions") value:type_size() { value })? {
+                let mut partition=header;let hash=matches!(partition.kind,Kind::KeyPartition|Kind::HashPartition);
+                if let Some(elements)=template {
+                    partition.children[if hash { 2 } else { 1 }]=elements;
+                    partition.children[4]=Node::new(Kind::Ident,vec![]).text("template_mark".into());
                 }
-        rule range_partition_element() -> Node = kw("partition") name:name() kw("values") kw("less") kw("than")
-            values:("(" _ values:((kw("maxvalue") { Node::new(Kind::MaxValue,vec![]) } / expr(0)) ++ ("," _)) ")" _ { values }
-                / kw("maxvalue") { vec![Node::new(Kind::MaxValue,vec![])] }) {?
-                    Ok(Node::new(Kind::RangePartitionElement,vec![Node::relation(name)?,Node::new(Kind::ExprList,values),Node::missing(),Node::missing()]))
-                }
-        rule list_partition_element() -> Node = kw("partition") name:name() kw("values") kw("in") "(" _
-            values:(kw("default") { Node::new(Kind::Default,vec![]) } / values:expr_list(0) { Node::new(Kind::ExprList,values) }) ")" _ {?
-                Ok(Node::new(Kind::ListPartitionElement,vec![Node::relation(name)?,values,Node::missing(),Node::missing()]))
+                if let Some(count)=count { partition.children[1]=count; }
+                partition
+            }
+        rule partition_elements(kind: Kind,subkind: Kind) -> Node = "(" _
+            elements:((kw("partition") value:partition_element(kind,subkind) { value }) ++ ("," _)) ")" _ {
+                Node::new(Kind::Partitions,elements)
+            }
+        rule subpartition_elements(kind: Kind) -> Node = "(" _
+            elements:((kw("subpartition") value:partition_element(kind,Kind::Missing) { value }) ++ ("," _)) ")" _ {
+                let list=match kind {
+                    Kind::KeyPartition|Kind::HashPartition => Kind::HashSubpartitions,
+                    Kind::RangePartition|Kind::RangeColumnsPartition => Kind::RangeSubpartitions,
+                    _ => Kind::ListSubpartitions,
+                };
+                Node::new(list,elements)
+            }
+        rule partition_element(kind: Kind,subkind: Kind) -> Node = name:name()
+            bound:(enabled(matches!(kind,Kind::RangePartition|Kind::RangeColumnsPartition)) kw("values") kw("less") kw("than")
+                    values:("(" _ values:((kw("maxvalue") { Node::new(Kind::MaxValue,vec![]) } / expr(0)) ++ ("," _)) ")" _ { values }
+                        / kw("maxvalue") { vec![Node::new(Kind::MaxValue,vec![])] }) { (Kind::RangePartitionElement,Node::new(Kind::ExprList,values)) }
+                / enabled(matches!(kind,Kind::ListPartition|Kind::ListColumnsPartition)) kw("values") kw("in") "(" _
+                    value:(kw("default") { Node::new(Kind::Default,vec![]) } / values:expr_list(0) { Node::new(Kind::ExprList,values) }) ")" _ { (Kind::ListPartitionElement,value) }
+                / enabled(matches!(kind,Kind::KeyPartition|Kind::HashPartition)) { (Kind::HashPartitionElement,Node::missing()) })
+            engine:(kw("engine") "=" _ value:collation_name() {? if value.text.eq_ignore_ascii_case("innodb") { Ok(()) } else { Err("InnoDB engine") } })?
+            elements:(enabled(subkind!=Kind::Missing) values:subpartition_elements(subkind) { values })? {?
+                Ok(Node::new(bound.0,vec![Node::relation(name)?,bound.1,Node::missing(),Node::optional(elements)]))
             }
         rule rename_table() -> Node = from:name() kw("to") to:name() {?
             Ok(Node::new(Kind::RenameTableAction,vec![Node::relation(from)?,Node::relation(to)?]))
