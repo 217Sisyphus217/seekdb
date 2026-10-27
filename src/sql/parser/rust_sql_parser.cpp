@@ -82,6 +82,10 @@ ObItemType node_type(const peg::Node &node)
     case Kind::TopFreHist: return T_FUN_TOP_FRE_HIST;
     case Kind::HybridHist: return T_FUN_HYBRID_HIST;
     case Kind::Select: return T_SELECT;
+    case Kind::Union: return T_SET_UNION;
+    case Kind::UnionAll: return T_SET_UNION_ALL;
+    case Kind::Intersect: return T_SET_INTERSECT;
+    case Kind::Except: return T_SET_EXCEPT;
     case Kind::ProjectList: return T_PROJECT_LIST;
     case Kind::Projection: return T_PROJECT_STRING;
     case Kind::Alias:
@@ -492,7 +496,7 @@ int build_node(const common::ObString &sql, const peg::Node &source, size_t para
   if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   const int select_slots[] = {PARSE_SELECT_DISTINCT, PARSE_SELECT_SELECT, PARSE_SELECT_INTO, PARSE_SELECT_FROM,
                              PARSE_SELECT_WHERE, PARSE_SELECT_DYNAMIC_GROUP, PARSE_SELECT_DYNAMIC_HAVING,
-                             PARSE_SELECT_NAMED_WINDOWS, PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT,
+                             PARSE_SELECT_NAMED_WINDOWS, PARSE_SELECT_SET, PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT,
                              PARSE_SELECT_FOR_UPD, PARSE_SELECT_HINTS, PARSE_SELECT_INTO_EXTRA};
   for (size_t child = 0; child < source.children.size(); ++child) {
     const size_t slot = type == T_SELECT ? select_slots[child] : child;
@@ -694,7 +698,13 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
     result.end_col_ = parsed.error_offset + 1;
     int line = 1;
     for (size_t i = 0; i < parsed.error_offset; ++i) line += sql.ptr()[i] == '\n';
-    LOG_USER_ERROR(OB_ERR_PARSE_SQL, error, 0, "", line);
+    size_t length = std::min<size_t>(80, sql.length() - parsed.error_offset);
+    while (length > 0 && parsed.error_offset + length < sql.length()
+           && (static_cast<unsigned char>(sql.ptr()[parsed.error_offset + length]) & 0xc0) == 0x80) {
+      --length;
+    }
+    LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
+                   static_cast<int>(length), sql.ptr() + parsed.error_offset, line);
     return common::OB_ERR_PARSE_SQL;
   }
   return build_tree(sql, parsed, result, routine_body);

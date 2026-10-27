@@ -26,6 +26,8 @@ pub(crate) struct Name {
 
 #[derive(Default)]
 pub(crate) struct Select {
+    pub parenthesized: bool,
+    pub set: Option<Node>,
     pub distinct: bool,
     pub projection: Vec<Node>,
     pub into: Option<Node>,
@@ -39,6 +41,54 @@ pub(crate) struct Select {
     pub lock: Option<Node>,
     pub hints: Vec<Node>,
     pub windows: Vec<Node>,
+}
+
+impl Select {
+    pub fn combine(self, kind: Kind, right: Self) -> Result<Self, &'static str> {
+        let right = Node::select(right)?;
+        let flatten = matches!(kind, Kind::Union | Kind::UnionAll)
+            && !self.parenthesized
+            && self.order_by.is_empty()
+            && self.limit.is_none()
+            && self.set.as_ref().is_some_and(|set| set.kind == kind);
+        let children = if flatten {
+            let mut children = self.set.unwrap().children;
+            children.push(right);
+            children
+        } else {
+            vec![Node::select(self)?, right]
+        };
+        Ok(Self {
+            set: Some(Node::new(kind, children)),
+            ..Self::default()
+        })
+    }
+
+    pub fn finish(
+        mut self,
+        order: Vec<Node>,
+        limit: Option<Node>,
+        lock: Option<Node>,
+        into: Option<Node>,
+    ) -> Result<Self, &'static str> {
+        if self.parenthesized && (!order.is_empty() || limit.is_some()) {
+            self = Self {
+                projection: vec![Node::new(
+                    Kind::Projection,
+                    vec![Node::new(Kind::Star, vec![])],
+                )],
+                from: vec![Node::table(Node::select(self)?, None)?],
+                ..Self::default()
+            };
+        }
+        if !order.is_empty() {
+            self.order_by = order;
+        }
+        self.limit = limit.or(self.limit);
+        self.lock = lock.or(self.lock);
+        self.into_end = into.or(self.into_end);
+        Ok(self)
+    }
 }
 
 impl Node {
@@ -573,7 +623,7 @@ impl Node {
         } else {
             Self::missing()
         };
-        let projection = Self::new(Kind::ProjectList, query.projection);
+        let projection = Self::list(Kind::ProjectList, query.projection);
         let from = if query.from.is_empty() {
             Self::missing()
         } else {
@@ -614,6 +664,7 @@ impl Node {
                 group,
                 having,
                 Self::list(Kind::NamedWindows, query.windows),
+                Self::optional(query.set),
                 order,
                 query.limit.unwrap_or_else(Self::missing),
                 query.lock.unwrap_or_else(Self::missing),

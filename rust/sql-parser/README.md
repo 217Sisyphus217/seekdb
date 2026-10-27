@@ -29,11 +29,12 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持参数、变量、条件、循环、游标、异常处理、GET DIAGNOSTICS、SELECT INTO、限定名称函数调用和 JSON_TABLE。
 内部 SQL 的命名参数保留首次出现顺序，重复引用共用参数编号。
 支持 ANALYZE TABLE、统计采集的近似去重和直方图聚合，以及全表扫描和索引 hint。
+支持 UNION／UNION ALL、INTERSECT、EXCEPT／MINUS，以及括号内外各自的排序和 LIMIT。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
-其他聚合函数和特殊函数语法、UNION、CTE、其他窗口函数、其他 DDL、完整 hint 语法、
+其他聚合函数和特殊函数语法、CTE、其他窗口函数、其他 DDL、完整 hint 语法、
 版本注释和其余 PL 语法尚未迁移。系统包和 mysqltest 初始化已通过，全量用例尚未通过；
-回收站删表所用的内部 EXCEPT 查询仍不支持。当前不是默认解析器的全量替换。
+当前不是默认解析器的全量替换。
 
 ## 跨语言接口
 

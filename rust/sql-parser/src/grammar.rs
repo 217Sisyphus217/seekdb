@@ -52,6 +52,9 @@ fn reserved(word: &str) -> bool {
         "div",
         "mod",
         "union",
+        "intersect",
+        "except",
+        "minus",
         "insert",
         "replace",
         "update",
@@ -141,7 +144,11 @@ peg::parser! {
         rule cont() = ['a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '$' | '\u{80}'..='\u{10ffff}']
         rule word() = ['a'..='z' | 'A'..='Z' | '_' | '$' | '\u{80}'..='\u{10ffff}'] cont()*
         rule kw(word: &'static str) -> ()
-            = text:$([_] *<{word.len()}>) !cont() _ {? if text.eq_ignore_ascii_case(word) { Ok(()) } else { Err(word) } }
+            = #{|input: &str, pos| {
+                if input.get(pos..pos+word.len()).is_some_and(|text| text.eq_ignore_ascii_case(word)) {
+                    peg::RuleResult::Matched(pos+word.len(), ())
+                } else { peg::RuleResult::Failed }
+            }} !cont() _
         rule depth(level: usize)
             = {? if level < MAX_DEPTH { Ok(()) } else { Err("SQL nesting below 128 levels") } }
         rule enabled(value: bool) = {? if value { Ok(()) } else { Err("SQL mode") } }
@@ -435,24 +442,36 @@ peg::parser! {
             / kw("qb_name") "(" _ name:hint_name() ")" _ { Node::new(Kind::QbName,vec![Node::name(name)]) }
             / kw("opt_param") "(" _ name:string() ("," _)? value:(string() / number()) ")" _ { Node::new(Kind::OptParam,vec![name,value]) }
         rule hints() -> Vec<Node> = "/*+" _ options:(hint_option() ** (("," _)?)) "*/" _ { options }
-        rule select(level: usize) -> Node = select_query(level) / values_query(level)
+        rule select(level: usize) -> Node = value:query_expression(level) {? Node::select(value) }
+        rule set_operator() -> Kind
+            = kw("union") modifier:(kw("all") { Kind::UnionAll } / (kw("distinct") / kw("unique")) { Kind::Union })? { modifier.unwrap_or(Kind::Union) }
+            / kw("intersect") { Kind::Intersect }
+            / (kw("except") / kw("minus")) { Kind::Except }
+        rule query_expression(level: usize) -> Select = depth(level) first:query_term(level)
+            rest:((kind:set_operator() right:query_term(level) { (kind,right) })*)
+            order:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })?
+            limit:limit()? lock:lock()? into:select_into()? {?
+                let value=rest.into_iter().try_fold(first,|left,(kind,right)| left.combine(kind,right))?;
+                value.finish(order.unwrap_or_default(),limit,lock,into)
+            }
+        rule query_term(level: usize) -> Select
+            = "(" _ value:query_expression(level+1) ")" _ { Select { parenthesized:true,..value } }
+            / select_query(level) / values_query(level)
         rule select_into() -> Node = kw("into") variables:((user_variable() / name:ident() { Node::name(name) }) ++ ("," _)) {
             Node::new(Kind::IntoVariables,vec![Node::new(Kind::IntoVariableList,variables)])
         }
-        rule select_query(level: usize) -> Node = depth(level) kw("select") hints:hints()? distinct:kw("distinct")? projection:(item(level) ++ ("," _)) into:select_into()?
+        rule select_query(level: usize) -> Select = depth(level) kw("select") hints:hints()? distinct:kw("distinct")? projection:(item(level) ++ ("," _)) into:select_into()?
             from:(kw("from") tables:(table(level) ++ ("," _)) { tables })?
             filter:(kw("where") value:expr(level) { value })?
             group_by:(kw("group") kw("by") values:expr_list(level) { values })?
             having:(kw("having") value:expr(level) { value })?
-            windows:(kw("window") values:(named_window(level) ++ ("," _)) { values })?
-            order_by:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })?
-            limit:limit()? lock:lock()? into_end:select_into()? {? Node::select(Select { distinct: distinct.is_some(), projection, into, into_end, from: from.unwrap_or_default(), filter, group_by: group_by.unwrap_or_default(), having, order_by: order_by.unwrap_or_default(), limit, lock, hints:hints.unwrap_or_default(),windows:windows.unwrap_or_default() }) }
-        rule values_query(level: usize) -> Node = depth(level) kw("values") rows:((kw("row") value:row() { value }) ++ ("," _))
-            order:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })? limit:limit()? {?
+            windows:(kw("window") values:(named_window(level) ++ ("," _)) { values })? {
+                Select { distinct:distinct.is_some(),projection,into,from:from.unwrap_or_default(),filter,group_by:group_by.unwrap_or_default(),having,hints:hints.unwrap_or_default(),windows:windows.unwrap_or_default(),..Select::default() }
+            }
+        rule values_query(level: usize) -> Select = depth(level) kw("values") rows:((kw("row") value:row() { value }) ++ ("," _)) {
                 let values=Node::new(Kind::Values,vec![Node::new(Kind::ValuesRows,rows)]);
                 let projection=Node::new(Kind::Projection,vec![Node::new(Kind::Star,vec![])]);
-                Node::select(Select { projection:vec![projection],from:vec![Node::new(Kind::Alias,vec![values,Node::missing()])],
-                    order_by:order.unwrap_or_default(),limit,..Select::default() })
+                Select { projection:vec![projection],from:vec![Node::new(Kind::Alias,vec![values,Node::missing()])],..Select::default() }
             }
         rule column() -> Node = start:position!() names:name() {? let end = names.last().unwrap().end; Node::column(names, false, start, end) }
         rule expr_or_default() -> Node = kw("default") { Node::new(Kind::Default, vec![]) } / expr(0)
