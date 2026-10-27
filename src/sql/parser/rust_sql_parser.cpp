@@ -309,6 +309,17 @@ ObItemType node_type(const peg::Node &node)
     case Kind::AutoIncrement: return T_CONSTR_AUTO_INCREMENT;
     case Kind::ColumnDefault: return T_CONSTR_DEFAULT;
     case Kind::OnUpdate: return T_ON_UPDATE;
+    case Kind::ForeignKey: return T_FOREIGN_KEY;
+    case Kind::ForeignKeyDrop: return T_FOREIGN_KEY_DROP;
+    case Kind::AlterForeignKey: return T_ALTER_FOREIGN_KEY_OPTION;
+    case Kind::DropConstraint: return T_DROP_CONSTRAINT;
+    case Kind::ReferenceOptions: return T_REFERENCE_OPTION_LIST;
+    case Kind::ReferenceOption: return T_REFERENCE_OPTION;
+    case Kind::Restrict: return T_RESTRICT;
+    case Kind::Cascade: return T_CASCADE;
+    case Kind::SetNull: return T_SET_NULL;
+    case Kind::NoAction: return T_NO_ACTION;
+    case Kind::SetDefault: return T_SET_DEFAULT;
     case Kind::ColumnComment: return T_COMMENT;
     case Kind::GeneratedColumn: return T_GENERATED_COLUMN;
     case Kind::Always: return T_CONSTR_ALWAYS;
@@ -654,6 +665,8 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   else if (name == "varchar" || name == "varbinary") type = T_VARCHAR;
   else if (name == "char" || name == "binary") type = T_CHAR;
   else if (name == "text" || name == "blob") type = T_TEXT;
+  else if (name == "tinytext" || name == "tinyblob") type = T_TINYTEXT;
+  else if (name == "mediumtext" || name == "mediumblob" || name == "string") type = T_MEDIUMTEXT;
   else if (name == "longtext" || name == "longblob") type = T_LONGTEXT;
   else if (name == "datetime") type = T_DATETIME;
   else if (name == "timestamp") type = T_TIMESTAMP;
@@ -664,8 +677,8 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
   const bool integer = type == T_TINYINT || type == T_SMALLINT || type == T_MEDIUMINT
       || type == T_INT32 || type == T_INT;
-  const bool string = type == T_CHAR || type == T_VARCHAR || type == T_TEXT || type == T_LONGTEXT;
-  const bool binary = name == "binary" || name == "varbinary" || name == "blob" || name == "longblob";
+  const bool string = type == T_CHAR || type == T_VARCHAR || type == T_TINYTEXT || type == T_TEXT || type == T_MEDIUMTEXT || type == T_LONGTEXT;
+  const bool binary = name == "binary" || name == "varbinary" || name == "tinyblob" || name == "blob" || name == "mediumblob" || name == "longblob";
   if (source.value != 0) {
     if (integer) type = static_cast<ObItemType>(type + T_UTINYINT - T_TINYINT);
     else if (type == T_FLOAT || type == T_DOUBLE) type = static_cast<ObItemType>(type + T_UFLOAT - T_FLOAT);
@@ -703,7 +716,7 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
     }
   } else if (string) {
     node->int32_values_[0] = size == 0 && type == T_CHAR ? 1 : precision;
-    node->int32_values_[1] = binary;
+    node->int32_values_[1] = name == "string" ? 2 : binary;
   } else if (integer) {
     node->int16_values_[0] = size == 0 ? -1 : short_precision;
     if (name == "bool" || name == "boolean") {
@@ -777,6 +790,11 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     if (child->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   }
   if (type != T_FUN_SYS || source.kind == Kind::Cast) node->value_ = type == T_SELECT ? parameters : source.value;
+  if (type == T_REFERENCE_OPTION) {
+    node->int32_values_[0] = source.value ? T_DELETE : T_UPDATE;
+    node->int32_values_[1] = node->children_[0]->type_;
+    node->num_child_ = 0;
+  }
   node->sql_str_off_ = source.start;
   node->raw_sql_offset_ = source.start;
   node->stmt_loc_.first_column_ = source.start + 1;

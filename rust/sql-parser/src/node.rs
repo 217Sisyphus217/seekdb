@@ -221,6 +221,16 @@ impl Node {
             || (name == "double" && parameters.len() == 1)
             || (matches!(name, "varchar" | "varbinary") && parameters.is_empty())
             || (matches!(name, "bool" | "boolean" | "date" | "json") && !parameters.is_empty())
+            || (matches!(
+                name,
+                "tinytext"
+                    | "tinyblob"
+                    | "mediumtext"
+                    | "mediumblob"
+                    | "longtext"
+                    | "longblob"
+                    | "string"
+            ) && !parameters.is_empty())
             || (!numeric && (unsigned || zerofill))
         {
             return Err("invalid data type parameters");

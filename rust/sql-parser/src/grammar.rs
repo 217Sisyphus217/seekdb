@@ -97,6 +97,7 @@ fn reserved(word: &str) -> bool {
         "key",
         "unique",
         "constraint",
+        "foreign",
         "references",
         "commit",
         "rollback",
@@ -883,6 +884,8 @@ peg::parser! {
             / kw("boolean") { "boolean" } / kw("bool") { "bool" }
             / kw("varchar") { "varchar" } / (kw("char") / kw("character")) { "char" }
             / kw("text") { "text" } / kw("blob") { "blob" }
+            / kw("tinytext") { "tinytext" } / kw("tinyblob") { "tinyblob" }
+            / kw("mediumtext") { "mediumtext" } / kw("mediumblob") { "mediumblob" } / kw("string") { "string" }
             / kw("longtext") { "longtext" } / kw("longblob") { "longblob" }
             / kw("varbinary") { "varbinary" } / kw("binary") { "binary" }
             / kw("datetime") { "datetime" } / kw("timestamp") { "timestamp" }
@@ -915,7 +918,7 @@ peg::parser! {
             unsigned:kw("unsigned")? zerofill:kw("zerofill")? charset:(charset_keyword() value:collation_name() { Node { kind:Kind::Charset,..value } })? end:position!() {?
                 let mut value=Node::data_type(name, parameters.unwrap_or_default(), unsigned.is_some(), zerofill.is_some(), start, end)?;
                 if let Some(charset)=charset {
-                    if !matches!(name,"char"|"varchar"|"text"|"longtext") { return Err("character type"); }
+                    if !matches!(name,"char"|"varchar"|"tinytext"|"text"|"mediumtext"|"longtext"|"string") { return Err("character type"); }
                     value.children.push(charset);
                 }
                 Ok(value)
@@ -937,13 +940,31 @@ peg::parser! {
             / kw("collate") value:collation_name() { Node { kind:Kind::Collation,..value } }
         rule table_element() -> Node
             = check_constraint()
+            / foreign_key()
             / kw("primary") kw("key") ident()? method:index_method()? "(" _ names:(ident() ++ ("," _)) ")" _
                 method_end:index_method()? comment:(kw("comment") value:string() { value })? {
                 Node::new(Kind::PrimaryKey, vec![Node::new(Kind::ColumnList, names.into_iter().map(Node::name).collect()), Node::optional(method_end.or(method)), Node::optional(comment)])
             }
             / index_definition()
             / column_definition()
-        rule check_constraint() -> Node = name:(kw("constraint") name:ident()? { Node::new(Kind::CheckConstraint,vec![name.map(Node::name).unwrap_or_else(Node::missing)]) })?
+        rule constraint_name() -> Node = kw("constraint") name:ident()? {
+            Node::new(Kind::CheckConstraint,vec![name.map(Node::name).unwrap_or_else(Node::missing)])
+        }
+        rule reference_option() -> Node = kw("on") delete:(kw("update") { false } / kw("delete") { true })
+            action:(kw("restrict") { Kind::Restrict } / kw("cascade") { Kind::Cascade }
+                / kw("set") kw("null") { Kind::SetNull } / kw("no") kw("action") { Kind::NoAction }
+                / kw("set") kw("default") { Kind::SetDefault }) {
+                Node::new(Kind::ReferenceOption,vec![Node::new(action,vec![])]).value(u64::from(delete))
+            }
+        rule foreign_key() -> Node = constraint:constraint_name()? kw("foreign") kw("key") index:ident()?
+            "(" _ columns:(ident() ++ ("," _)) ")" _ kw("references") table:name()
+            "(" _ parent:(ident() ++ ("," _)) ")" _ (kw("match") (kw("simple") / kw("full") / kw("partial")))?
+            options:reference_option()* {?
+                Ok(Node::new(Kind::ForeignKey,vec![Node::new(Kind::ColumnList,columns.into_iter().map(Node::name).collect()),Node::relation(table)?,
+                    Node::new(Kind::ColumnList,parent.into_iter().map(Node::name).collect()),Node::list(Kind::ReferenceOptions,options),
+                    Node::optional(constraint),index.map(Node::name).unwrap_or_else(Node::missing),Node::missing()]))
+            }
+        rule check_constraint() -> Node = name:constraint_name()?
             kw("check") "(" _ start:position!() value:expr(0) end:position!() ")" _
             state:(kw("not") kw("enforced") { Kind::NotEnforced } / kw("enforced") { Kind::Enforced })? {
                 Node::new(Kind::CheckConstraint,vec![Node::optional(name),value.at(start,end),Node::new(state.unwrap_or(Kind::Enforced),vec![])]).value(1)
@@ -1084,7 +1105,12 @@ peg::parser! {
             / kw("drop") kw("primary") kw("key") { Node::new(Kind::PrimaryKeyDrop,vec![]) }
             / kw("rename") (kw("index") / kw("key")) from:ident() kw("to") to:ident() { Node::new(Kind::IndexRename,vec![Node::name(from),Node::name(to)]) }
         rule alter_action() -> Node
-            = value:alter_index() { Node::new(Kind::AlterIndexOption,vec![value]) }
+            = value:(kw("add") value:foreign_key() { value }
+                / kw("drop") kw("foreign") kw("key") name:ident() { Node::new(Kind::ForeignKeyDrop,vec![Node::name(name)]) }) {
+                Node::new(Kind::AlterForeignKey,vec![value])
+            }
+            / kw("drop") kw("constraint") name:ident() { Node::new(Kind::DropConstraint,vec![Node::name(name)]) }
+            / value:alter_index() { Node::new(Kind::AlterIndexOption,vec![value]) }
             / value:alter_column() { Node::new(Kind::AlterColumnOption,vec![value]) }
             / kw("convert") kw("to") (kw("character") / kw("char")) kw("set") !kw("default")
                 charset:charset_name() collation:(kw("collate") value:collation_name() { value })? {
