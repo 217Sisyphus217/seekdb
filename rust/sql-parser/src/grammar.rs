@@ -73,13 +73,7 @@ peg::parser! {
             / ("--" &(space() / ![_]) / "#") (!"\n" [_])*)*}
         rule cont() = ['a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '$' | '\u{80}'..='\u{10ffff}']
         rule kw(word: &'static str) -> ()
-            = (text:#{|input: &str, pos| {
-                let end = pos + word.len();
-                match input.get(pos..end) {
-                    Some(text) => peg::RuleResult::Matched(end, text),
-                    None => peg::RuleResult::Failed,
-                }
-            }} {? if text.eq_ignore_ascii_case(word) { Ok(()) } else { Err(word) } }) !cont() _
+            = text:$([_] *<{word.len()}>) !cont() _ {? if text.eq_ignore_ascii_case(word) { Ok(()) } else { Err(word) } }
         rule depth(level: usize)
             = {? if level < MAX_DEPTH { Ok(()) } else { Err("SQL nesting below 128 levels") } }
         rule enabled(value: bool) = {? if value { Ok(()) } else { Err("SQL mode") } }
