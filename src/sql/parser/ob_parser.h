@@ -58,15 +58,11 @@ public:
   /// @param queries Note that all three members of ObString is valid, size() is the length
   ///                of the single statement, length() is the length of remainer statements
   bool is_single_stmt(const common::ObString &stmt);
-  int split_start_with_pl(const common::ObString &stmt,
-                          common::ObIArray<common::ObString> &queries,
-                          ObMPParseStat &parse_fail);
   int split_multiple_stmt(const common::ObString &stmt,
                           common::ObIArray<common::ObString> &queries,
                           ObMPParseStat &parse_fail,
                           bool is_ret_first_stmt=false,
                           bool is_prepare = false);
-  void get_single_sql(const common::ObString &stmt, int64_t offset, int64_t remain, int64_t &str_len);
 
   int check_is_insert(common::ObIArray<common::ObString> &queries, bool &is_ins);
 

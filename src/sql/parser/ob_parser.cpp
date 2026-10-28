@@ -22,8 +22,7 @@
 #include "parse_malloc.h"
 #include "parse_node.h"
 #include "ob_sql_parser.h"
-#include "sql/pl/parser/ob_pl_parser.h"
-using namespace oceanbase::pl;
+#include "rust/sql_parser.h"
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 
@@ -522,97 +521,6 @@ bool ObParser::is_single_stmt(const ObString &stmt)
   return (0 == count || (1 == count && stmt[end_trim_offset - 1] == ';'));
 }
 
-int ObParser::split_start_with_pl(const ObString &stmt,
-                                  ObIArray<ObString> &queries,
-                                  ObMPParseStat &parse_stat)
-{
-  int ret = OB_SUCCESS;
-  int tmp_ret = OB_SUCCESS;
-  int64_t remain = stmt.length();
-  ParseResult parse_result;
-  ParseMode parse_mode = MULTI_MODE;
-  parse_stat.reset();
-  // Bypass parser's unfriendly handling of empty queries: remove trailing spaces ourselves
-  while (remain > 0 && ISSPACE(stmt[remain - 1])) {
-    --remain;
-  }
-  // Remove the last '\0', for compatibility with mysql
-  if (remain > 0 && '\0' == stmt[remain - 1]) {
-    --remain;
-  }
-  // Remove trailing spaces
-  while (remain > 0 && (ISSPACE(stmt[remain - 1]))) {
-    --remain;
-  }
-  // For special handling of empty statements
-  if (OB_UNLIKELY(0 >= remain)) {
-    ObString part; // empty string
-    ret = queries.push_back(part);
-  }
-
-  if (remain > 0 && OB_SUCC(ret) && !parse_stat.parse_fail_) {
-    ObArenaAllocator allocator(CURRENT_CONTEXT->get_malloc_allocator());
-    allocator.set_label("PLSplitStmt");
-    ObIAllocator *bak_allocator = allocator_;
-    allocator_ = &allocator;
-    ObString part(remain, stmt.ptr());
-
-    if (OB_FAIL(tmp_ret = parse(part, parse_result, parse_mode, false, true))) {
-      if(parse_result.result_tree_ != NULL && parse_result.result_tree_->num_child_ > 0) {
-        ret = OB_SUCCESS;
-        for (int64_t i = 0; OB_SUCC(ret) && i < parse_result.result_tree_->num_child_; ++i) {
-          int64_t str_len = parse_result.result_tree_->children_[i]->str_len_;
-          int64_t offset = parse_result.result_tree_->children_[i]->pos_;
-          ObString query(str_len, stmt.ptr() + offset);
-          OZ(queries.push_back(query));
-        }
-        int64_t success_len = 0;
-        OX(success_len = parse_result.result_tree_->children_[parse_result.result_tree_->num_child_ - 1]->str_len_ +
-          parse_result.result_tree_->children_[parse_result.result_tree_->num_child_ - 1]->pos_);
-        if(OB_SUCC(ret)) {
-          if (';' == stmt[success_len]) {
-            success_len++;
-          } else {
-            ret = OB_ERR_PARSE_SQL;
-          }
-        }
-        CK(success_len < remain);
-        ObString error_part(remain - success_len, stmt.ptr() + success_len);
-        OZ(queries.push_back(error_part));
-      } else {
-        ret = queries.push_back(part);
-      }
-      if (OB_SUCCESS == ret) {
-        parse_stat.parse_fail_ = true;
-        parse_stat.fail_query_idx_ = queries.count() - 1;
-        parse_stat.fail_ret_ = tmp_ret;
-      }
-      LOG_WARN("fail parse multi part", K(part), K(stmt), K(tmp_ret));
-    } else {
-      CK(remain == parse_result.end_col_);
-      CK(nullptr != bak_allocator);
-      CK(nullptr != parse_result.result_tree_);
-      for (int64_t i = 0; OB_SUCC(ret) && i < parse_result.result_tree_->num_child_; ++i) {
-        int64_t str_len = parse_result.result_tree_->children_[i]->str_len_;
-        int64_t offset = parse_result.result_tree_->children_[i]->pos_;
-        ObString query(str_len, stmt.ptr() + offset);
-        OZ(queries.push_back(query));
-      }
-    }
-    allocator_ = bak_allocator;
-  }
-  return ret;
-}
-
-// In multi-stmt mode(delimiter #) eg: create t1; create t2; create t3
-// in the case of is_ret_first_stmt(false), queries will return the following stmts:
-//      queries[0]: create t1;
-//      queries[1]: create t2;
-//      queries[2]: create t3;
-// in the case of is_ret_first_stmt(true) and it will return one element
-//      queries[0]: create t1;
-// Actually, sql executor only executes the first stmt(create t1) and ignore the others
-// even though try to execute stmts like 'create t1; create t2; create t3;'
 int ObParser::split_multiple_stmt(const ObString &stmt,
                                   ObIArray<ObString> &queries,
                                   ObMPParseStat &parse_stat,
@@ -620,104 +528,39 @@ int ObParser::split_multiple_stmt(const ObString &stmt,
                                   bool is_prepare)
 {
   int ret = OB_SUCCESS;
-  // For single SQL statement scenarios, first check is_single_stmt, then check is_pl_stmt, to avoid the overhead of string comparison for is_pl_stmt
+  parse_stat.reset();
   if (is_single_stmt(stmt)) {
-    ObString query(stmt.length(), stmt.ptr());
-    ret = queries.push_back(query);
-  } else if (is_pl_stmt(stmt)) {
-    ret = split_start_with_pl(stmt, queries, parse_stat);
+    ret = queries.push_back(stmt);
   } else {
-    ParseResult parse_result;
-    ParseMode parse_mode = MULTI_MODE;
-    int64_t offset = 0;
-    int64_t remain = stmt.length();
-    int64_t semicolon_offset = INT64_MIN;
-
-    parse_stat.reset();
-    // Bypass parser's unfriendly handling of empty queries: remove trailing spaces ourselves
-    while (remain > 0 && ISSPACE(stmt[remain - 1])) {
-      --remain;
+    int64_t length = stmt.length();
+    while (length > 0 && ISSPACE(stmt[length - 1])) --length;
+    if (length > 0 && stmt[length - 1] == '\0') --length;
+    int64_t last_semicolon = -1;
+    while (length > 0 && (ISSPACE(stmt[length - 1]) || stmt[length - 1] == ';')) {
+      if (stmt[length - 1] == ';') last_semicolon = length - 1;
+      --length;
     }
-    // Remove the last '\0', for compatibility with mysql
-    if (remain > 0 && '\0' == stmt[remain - 1]) {
-      --remain;
-    }
-    // Remove trailing spaces and semicolons
-    while (remain > 0 && ((ISSPACE(stmt[remain - 1])) ||
-           (stmt[remain - 1] == ';'))) {
-      if (stmt[remain - 1] == ';') {
-        semicolon_offset = remain - 1;
+    length = std::max(length, last_semicolon + 1);
+    if (length == 0) {
+      ret = queries.push_back(ObString());
+    } else {
+      auto split = peg::split_sql(
+          rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(stmt.ptr()), length),
+          sql_mode_ & SMO_ANSI_QUOTES, sql_mode_ & SMO_NO_BACKSLASH_ESCAPES,
+          sql_mode_ & SMO_PIPES_AS_CONCAT, sql_mode_ & SMO_HIGH_NOT_PRECEDENCE,
+          is_ret_first_stmt);
+      size_t offset = 0;
+      for (size_t end : split.ends) {
+        if (OB_FAIL(queries.push_back(ObString(end - offset, stmt.ptr() + offset)))) break;
+        offset = end;
       }
-      --remain;
-    }
-    // Leave at most one semicolon
-    remain = max(remain, semicolon_offset + 1);
-    // For special handling of empty statements
-    if (OB_UNLIKELY(0 >= remain)) {
-      ObString part; // empty string
-      ret = queries.push_back(part);
-    }
-
-    int tmp_ret = OB_SUCCESS;
-    bool need_continue = true;
-    while (remain > 0 && OB_SUCC(ret) && !parse_stat.parse_fail_ && need_continue) {
-      ObArenaAllocator allocator(CURRENT_CONTEXT->get_malloc_allocator());
-      allocator.set_label("SplitMultiStmt");
-      ObIAllocator *bak_allocator = allocator_;
-      allocator_ = &allocator;
-      int64_t str_len = 0;
-
-      //for save memory allocate in parser, we need try find the single stmt length in advance
-
-      //calc the end position of a single sql.
-      get_single_sql(stmt, offset, remain, str_len);
-
-      str_len = str_len == remain ? str_len : str_len + 1;
-      ObString part(str_len, stmt.ptr() + offset);
-      ObString remain_part(remain, stmt.ptr() + offset);
-      //first try parse part str, because it's have less length and need less memory
-      if (OB_FAIL(tmp_ret = parse(part, parse_result, parse_mode, false, true))) {
-        //if parser part str failed, then try parse all remain part, avoid parse many times
-        //bug: 
-        tmp_ret = OB_SUCCESS;
-        tmp_ret = parse(remain_part, parse_result, parse_mode);
+      if (OB_SUCC(ret) && split.failed) {
+        parse_stat.parse_fail_ = true;
+        parse_stat.fail_query_idx_ = queries.count() - 1;
+        parse_stat.fail_ret_ = OB_ERR_PARSE_SQL;
       }
-      if (OB_SUCC(tmp_ret)) {
-        int32_t single_stmt_length = parse_result.end_col_;
-        if (is_ret_first_stmt) {
-          ObString first_query(single_stmt_length, stmt.ptr());
-          ret = queries.push_back(first_query);
-          need_continue = false; // only return the first stmt, so ignore the remaining stmts
-        } else {
-          if (is_pl_stmt(part)) {
-            ObString query(remain, stmt.ptr() + offset);
-            allocator_ = bak_allocator;
-            ret = split_start_with_pl(query, queries, parse_stat);
-            need_continue = false;
-          } else {
-            ObString query(single_stmt_length,stmt.ptr() + offset);
-            ret = queries.push_back(query);
-          }
-        }
-        remain -= parse_result.end_col_;
-        offset += parse_result.end_col_;
-        if (remain < 0 || offset > stmt.length()) {
-          LOG_ERROR("split_multiple_stmt data error",
-                    K(remain), K(offset), K(stmt.length()), K(ret));
-        }
-      } else {
-        ObString query(static_cast<int32_t>(remain), stmt.ptr() + offset);
-        ret = queries.push_back(query);
-        if (OB_SUCCESS == ret) {
-          parse_stat.parse_fail_ = true;
-          parse_stat.fail_query_idx_ = queries.count() - 1;
-          parse_stat.fail_ret_ = tmp_ret;
-        }
-      }
-      allocator_ = bak_allocator;
     }
   }
-
   return ret;
 }
 
@@ -765,77 +608,6 @@ int32_t ObParser::get_well_formed_errlen(const ObCharsetInfo *charset_info,
   }
   return res_len;
 }
-// avoid separating sql by semicolons in quotes or comment.
-void ObParser::get_single_sql(const common::ObString &stmt, int64_t offset, int64_t remain, int64_t &str_len) {
-  /* following two flags are used to mark wether we are in comment, if in comment, ';' can't be used to split sql*/
-  // in -- comment
-  bool comment_flag = false;
-  // in /*! comment */ or /* comment */
-  bool c_comment_flag = false;
-  /* following three flags are used to mark wether we are in quotes.*/
-  // in '', single quotes
-  bool sq_flag = false;
-  // in "", double quotes
-  bool dq_flag = false;
-  // in ``, backticks.
-  bool bt_flag = false;
-  bool is_escape = false;
-
-  bool in_comment = false;
-  bool in_string  = false;
-  while (str_len < remain && (in_comment || (stmt[str_len + offset] != ';'))) {
-    if (!in_comment && !in_string) {
-      if (str_len + 1 >= remain) {
-      } else if ((stmt[str_len + offset] == '-' && stmt[str_len + offset + 1] == '-') || stmt[str_len + offset + 1] == '#') {
-        comment_flag = true;
-      } else if (stmt[str_len + offset] == '/' && stmt[str_len + offset + 1] == '*') {
-        c_comment_flag = true;
-      } else if (stmt[str_len + offset] == '\'') {
-        sq_flag = true;
-      } else if (stmt[str_len + offset] == '"') {
-        dq_flag = true;
-      } else if (stmt[str_len + offset] == '`') {
-        bt_flag = true;
-      }
-    } else if (in_comment) {
-      if (comment_flag) {
-        if (stmt[str_len + offset] == '\r' || stmt[str_len + offset] == '\n') {
-          comment_flag = false;
-        }
-      } else if (c_comment_flag) {
-        if (str_len + 1 >= remain) {
-
-        } else if (stmt[str_len + offset] == '*' && (str_len + 1 < remain) && stmt[str_len + offset + 1] == '/') {
-          c_comment_flag = false;
-        }
-      }
-    } else if (in_string) {
-      if (str_len + 1 >= remain) {
-      } else if (!bt_flag && stmt[str_len + offset] == '\\') {
-        // in mysql mode, handle the escape char in '' and ""
-        ++ str_len;
-      } else if (sq_flag) {
-        if (stmt[str_len + offset] == '\'') {
-          sq_flag = false;
-        }
-      } else if (dq_flag) {
-        if (stmt[str_len + offset] == '"') {
-          dq_flag = false;
-        }
-      } else if (bt_flag) {
-        if (stmt[str_len + offset] == '`') {
-          bt_flag = false;
-        }
-      }
-    }
-    ++ str_len;
-
-    // update states.
-    in_comment = comment_flag || c_comment_flag;
-    in_string = sq_flag || bt_flag || dq_flag;
-  }
-}
-
 int ObParser::parse_sql(const ObString &stmt,
                         ParseResult &parse_result,
                         const bool no_throw_parser_error)
@@ -1038,18 +810,10 @@ int ObParser::parse_(const ObString &query,
         }
       }
     } else {
-      ObPLParser pl_parser(*(ObIAllocator*)(parse_result.malloc_pool_), charsets4parser_, sql_mode_);
-      if (OB_FAIL(pl_parser.parse(stmt, stmt, parse_result, is_pl_inner_parse))) {
-        // may create ddl func, try it.
-        if ((OB_ERR_PARSE_SQL == ret
-            && is_create_func
-            && is_single_stmt(stmt)) ||
-            (OB_ERR_PARSE_SQL == ret && is_mysql_comment)) {
-          if (OB_FAIL(parse_sql(stmt, parse_result, no_throw_parser_error))) {
-            if (!no_throw_parser_error) {
-            }
-          }
-        }
+      if (OB_SUCC(ret = parse_rust_sql(stmt, parse_result, is_pl_inner_parse))) {
+        parse_result.no_param_sql_ = const_cast<char *>(stmt.ptr());
+        parse_result.no_param_sql_len_ = stmt.length();
+        parse_result.end_col_ = stmt.length();
       }
     }
   }

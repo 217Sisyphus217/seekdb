@@ -12,8 +12,8 @@
 普通 SQL 和内部 SQL 的完整解析阶段默认使用 Rust，解析失败直接报错。
 统计采集的 `METHOD_OPT`（`FOR ALL COLUMNS SIZE AUTO` 等）也由 Rust 解析。
 全文检索布尔表达式由 `src/fts.rs` 解析，通过同一个 CXX 桥接接口供 C++ 检索模块使用。
-快速参数化、多语句切分和 PL SQL 预处理仍沿用旧实现。
-旧词法处理和 PL 预处理链路仍在迁移，全量验证尚未完成。
+多语句切分复用同一套 Rust 语法，存储过程和全文检索的 Bison/Flex 实现已删除。
+快速参数化和 PL 内部 SQL 的变量绑定仍沿用原有实现；旧 SQL 词法处理仍在迁移，最终全量验证尚未完成。
 
 已接入基本 SELECT、表和列别名、DISTINCT、表达式、WHERE、ORDER BY、LIMIT，
 以及 INNER／LEFT／RIGHT／FULL／CROSS JOIN、ON／USING、普通函数调用、
@@ -29,6 +29,7 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持基本账户创建／删除、改密、授权／撤销和 SHOW GRANTS，以及 SQL PREPARE／EXECUTE。
 支持角色创建／删除、授予／撤销、启用和默认角色设置，以及 KILL QUERY／CONNECTION。
 已接入存储过程／函数的创建、调用和执行时解析，以及系统包声明和包体解析。
+`SHOW CREATE PROCEDURE／FUNCTION／TRIGGER` 和过程元信息查询使用同一套解析器。
 支持参数、变量、条件、循环、游标、异常处理、GET DIAGNOSTICS、SELECT INTO、限定名称函数调用和 JSON_TABLE。
 内部 SQL 的命名参数保留首次出现顺序，重复引用共用参数编号。
 支持 ANALYZE TABLE、统计采集的近似去重和直方图聚合，以及全表扫描和索引 hint。

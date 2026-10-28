@@ -47,7 +47,6 @@ _OBSERVER_NATIVE_DEPS = [
     "//src/objit:objit_api_interface",
     "//src/pl:pl_interface",
     "//src/pl:pl_internal_headers",
-    "//src/pl:_generated_pl_parser_headers",
     "//src/query:ai_endpoint_admin",
     "//src/query:ai_endpoint_resolver",
     "//src/query:change_stream_service",

@@ -1473,8 +1473,9 @@ peg::parser! {
             / scope:scope()? kw("variables") condition:show_condition()? {
                 Node::new(Kind::ShowVariables,vec![Node::new(Kind::Int,vec![]).value(scope.unwrap_or(0)),Node::optional(condition)])
             }
-            / kw("create") kw("table") table:name() {? Ok(Node::new(Kind::ShowCreateTable,vec![Node::relation(table)?])) }
-            / kw("create") kw("view") table:name() {? Ok(Node::new(Kind::ShowCreateView,vec![Node::relation(table)?])) }
+            / kw("create") kind:(kw("table") { Kind::ShowCreateTable } / kw("view") { Kind::ShowCreateView }
+                / kw("procedure") { Kind::ShowCreateProcedure } / kw("function") { Kind::ShowCreateFunction }
+                / kw("trigger") { Kind::ShowCreateTrigger }) name:name() {? Ok(Node::new(kind,vec![Node::relation(name)?])) }
             / kw("create") (kw("database") / kw("schema")) absent:if_not_exists()? name:ident() { Node::new(Kind::ShowCreateDatabase,vec![Node::optional(absent),Node::name(name)]) }
             / kind:(kw("warnings") { Kind::ShowWarnings } / kw("errors") { Kind::ShowErrors }) limit:show_limit()? { Node::new(kind,vec![Node::optional(limit)]) }
         rule show() -> Node
@@ -1883,7 +1884,10 @@ peg::parser! {
                 Node::new(Kind::Explain,vec![format.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),display.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),Node::optional(into),Node::optional(statement_id),value])
         }
         rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / role_statement() / setting() / explain() / show() / alter_system() / prepared_statement() / diagnostics() / analyze() / kill() / purge()
-        pub rule query() -> Node = _ value:(package_statement() / routine_statement() / pl_call() / sql_statement()) (";" _)* { value }
+        rule statement() -> Node = _ value:(package_statement() / routine_statement() / pl_call() / sql_statement()) { value }
+        #[no_eof]
+        pub rule statement_end() -> usize = (statement() / _) (";" / ![_]) end:position!() { end }
+        pub rule query() -> Node = value:statement() (";" _)* { value }
             / text:$(_ (";" _)*) { Node::new(Kind::EmptyQuery,vec![]).value(u64::from(text.chars().any(|ch| !ch.is_ascii_whitespace() && ch!=';'))) }
     }
 }

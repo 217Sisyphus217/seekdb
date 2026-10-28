@@ -419,6 +419,9 @@ ObItemType node_type(const peg::Node &node)
     case Kind::ShowProcesslist: return T_SHOW_PROCESSLIST;
     case Kind::ShowCreateTable: return T_SHOW_CREATE_TABLE;
     case Kind::ShowCreateDatabase: return T_SHOW_CREATE_DATABASE;
+    case Kind::ShowCreateProcedure: return T_SHOW_CREATE_PROCEDURE;
+    case Kind::ShowCreateFunction: return T_SHOW_CREATE_FUNCTION;
+    case Kind::ShowCreateTrigger: return T_SHOW_CREATE_TRIGGER;
     case Kind::ShowWarnings: return T_SHOW_WARNINGS;
     case Kind::ShowErrors: return T_SHOW_ERRORS;
     case Kind::ShowLimit: return T_SHOW_LIMIT;
@@ -933,7 +936,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     node->stmt_loc_.first_column_ = source.start;
     node->stmt_loc_.last_column_ = source.end == 0 ? 0 : source.end - 1;
   }
-  const char *raw = sql.ptr() + source.start;
+  const char *raw = (pl ? expression_sql : sql).ptr() + source.start;
   const size_t raw_length = source.end - source.start;
   const bool temporal = type == T_DATE || type == T_TIME || type == T_TIMESTAMP;
   if (temporal) node->is_copy_raw_text_ = true;
@@ -1056,7 +1059,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
   }
   if (type == T_PACKAGE_BLOCK || type == T_PACKAGE_BODY_BLOCK) {
     const size_t start = source.children[type == T_PACKAGE_BLOCK ? 2 : 1].start;
-    node->str_value_ = parse_strndup(sql.ptr() + start, source.end - start, pool);
+    node->str_value_ = parse_strndup(expression_sql.ptr() + start, source.end - start, pool);
     if (node->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     node->str_len_ = source.end - start;
     node->pl_str_off_ = start;
@@ -1064,7 +1067,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
   if (type == T_PACKAGE_CREATE || type == T_PACKAGE_CREATE_BODY) {
     const auto &body_source = source.children[0];
     ParseNode *body = node->children_[0];
-    body->str_value_ = parse_strndup(sql.ptr() + body_source.start, body_source.end - body_source.start, pool);
+    body->str_value_ = parse_strndup(expression_sql.ptr() + body_source.start, body_source.end - body_source.start, pool);
     if (body->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     body->str_len_ = body_source.end - body_source.start;
     body->pl_str_off_ = body_source.start;
@@ -1084,7 +1087,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     const size_t length = body_source.end - body_source.start;
     char *text = static_cast<char *>(parse_malloc(length + 3, pool));
     if (text == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
-    MEMCPY(text, sql.ptr() + body_source.start, length);
+    MEMCPY(text, expression_sql.ptr() + body_source.start, length);
     MEMCPY(text + length, ";\n", 3);
     body->str_value_ = text;
     body->str_len_ = length + 2;

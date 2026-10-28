@@ -463,9 +463,9 @@ int ObPLBuilder::compile(
   if (OB_SUCC(ret)) {
     ObString body = routine.get_routine_body();
     ObDataTypeCastParams dtc_params = session_info_.get_dtc_params();
-    ObPLParser parser(allocator_, session_info_.get_charsets4parser(), session_info_.get_sql_mode());
+    ObPLParser parser(allocator_, session_info_.get_sql_mode());
     OZ (ObSQLUtils::convert_sql_text_from_schema_for_resolve(allocator_, dtc_params, body), K(body));
-    OZ (parser.parse_routine_body(body, parse_tree, session_info_.is_for_trigger_package()), K(body));
+    OZ (parser.parse(body, parse_tree), K(body));
   }
 
   int64_t parse_end = ObTimeUtility::current_time();
@@ -671,7 +671,7 @@ int ObPLBuilder::analyze_package(const ObString &source,
   CK (!source.empty());
   CK (package_ast.is_inited());
   if (OB_SUCC(ret)) {
-    ObPLParser parser(allocator_, session_info_.get_charsets4parser(), session_info_.get_sql_mode());
+    ObPLParser parser(allocator_, session_info_.get_sql_mode());
     ObStmtNodeTree *parse_tree = NULL;
     ObPLResolver resolver(allocator_,
                           session_info_,
@@ -686,21 +686,7 @@ int ObPLBuilder::analyze_package(const ObString &source,
                           package_ast.get_expr_factory(),
                           parent_ns,
                           false);
-    const ObTriggerInfo *trg_info = NULL;
-    if (PL_PACKAGE_BODY == package_ast.get_package_type() && is_for_trigger) {
-      uint64_t trg_id = ObTriggerInfo::get_package_trigger_id(package_ast.get_id());
-      OZ (schema_guard_.get_trigger_info( trg_id, trg_info));
-      CK (OB_NOT_NULL(trg_info));
-    }
-    if (OB_SUCC(ret) && is_for_trigger && PL_PACKAGE_SPEC == package_ast.get_package_type()) {
-      const uint64_t trg_id = ObTriggerInfo::get_package_trigger_id(package_ast.get_id());
-      const ObTriggerInfo *trg_info = NULL;
-      
-      OZ (schema_guard_.get_trigger_info( trg_id, trg_info));
-      OV (OB_NOT_NULL(trg_info), OB_ERR_UNEXPECTED, trg_id);
-    }
-    OZ (parser.parse_package(source, parse_tree, session_info_.get_dtc_params(), 
-                             &schema_guard_, is_for_trigger, trg_info));
+    OZ (parser.parse(source, parse_tree));
     OZ (resolver.init(package_ast));
     OZ (resolver.resolve(parse_tree, package_ast));
     if (OB_SUCC(ret) && PL_PACKAGE_SPEC == package_ast.get_package_type()) {

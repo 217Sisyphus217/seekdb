@@ -383,7 +383,7 @@ int ObTriggerResolver::resolve_trigger_body(const ParseNode &parse_node,
       session_info_->get_dtc_params()));
   if (OB_SUCC(ret)) {
     ObString procedure_source;
-    pl::ObPLParser parser(*allocator_, session_info_->get_charsets4parser(), session_info_->get_sql_mode());
+    pl::ObPLParser parser(*allocator_, session_info_->get_sql_mode());
     ObStmtNodeTree *parse_tree = NULL;
     OZ (ObTriggerSourceBuilder::build_procedure_source(
         trigger_info,
@@ -393,7 +393,7 @@ int ObTriggerResolver::resolve_trigger_body(const ParseNode &parse_node,
         parse_node,
         session_info_->get_dtc_params(),
         procedure_source));
-    OZ (parser.parse_package(procedure_source, parse_tree, session_info_->get_dtc_params(), NULL, true));
+    OZ (parser.parse(procedure_source, parse_tree));
     if (OB_SUCC(ret)) {
       params_.tg_timing_event_ = static_cast<int64_t>(trigger_info.get_timing_event());
       HEAP_VAR(ObCreateProcedureResolver, resolver, params_) {

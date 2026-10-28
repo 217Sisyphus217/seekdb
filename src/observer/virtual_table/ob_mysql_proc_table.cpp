@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "sql/parser/ob_parser.h"
 #include "observer/virtual_table/ob_mysql_proc_table.h"
 
 #include "sql/printer/ob_schema_printer.h"
@@ -395,7 +396,7 @@ int ObMySQLProcTable::extract_create_node_from_routine_info(ObIAllocator &alloc,
   ParseResult parse_result;
   ObString routine_stmt;
   ObSQLMode sql_mode = exec_env.get_sql_mode();
-  pl::ObPLParser parser(alloc, sql::ObCharsets4Parser(), sql_mode);
+  sql::ObParser parser(alloc, sql_mode);
   const ObString &routine_body = routine_info.get_routine_body();
   const char prefix[] = "CREATE\n";
   int64_t prefix_len = STRLEN(prefix);
@@ -413,7 +414,7 @@ int ObMySQLProcTable::extract_create_node_from_routine_info(ObIAllocator &alloc,
 
   if (OB_FAIL(ret)) {
     // do nothing
-  } else if (OB_FAIL(parser.parse(routine_stmt, routine_stmt, parse_result, true))) {
+  } else if (OB_FAIL(parser.parse(routine_stmt, parse_result))) {
   }
 
   if OB_SUCC(ret) {

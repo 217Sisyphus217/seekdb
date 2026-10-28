@@ -360,6 +360,9 @@ pub(crate) mod ffi {
         ShowProcesslist,
         ShowCreateTable,
         ShowCreateDatabase,
+        ShowCreateProcedure,
+        ShowCreateFunction,
+        ShowCreateTrigger,
         ShowWarnings,
         ShowErrors,
         ShowLimit,
@@ -692,6 +695,11 @@ pub(crate) mod ffi {
         error_offset: usize,
     }
 
+    struct StatementSplits {
+        ends: Vec<usize>,
+        failed: bool,
+    }
+
     enum ParseMode {
         Sql,
         Routine,
@@ -719,6 +727,14 @@ pub(crate) mod ffi {
     }
 
     extern "Rust" {
+        fn split_sql(
+            sql: &[u8],
+            ansi_quotes: bool,
+            no_backslash_escapes: bool,
+            pipes_as_concat: bool,
+            high_not_precedence: bool,
+            first_only: bool,
+        ) -> StatementSplits;
         fn parse_search_query(input: &[u8]) -> SearchTree;
         fn parse_sql(
             sql: &[u8],
@@ -732,6 +748,62 @@ pub(crate) mod ffi {
 }
 
 use crate::fts::parse_search_query;
+
+fn split_sql(
+    input: &[u8],
+    ansi_quotes: bool,
+    no_backslash_escapes: bool,
+    pipes_as_concat: bool,
+    high_not_precedence: bool,
+    first_only: bool,
+) -> ffi::StatementSplits {
+    let mut result = ffi::StatementSplits {
+        ends: vec![],
+        failed: false,
+    };
+    let mode = SqlMode {
+        ansi_quotes,
+        no_backslash_escapes,
+        pipes_as_concat,
+        high_not_precedence,
+    };
+    let sql = std::str::from_utf8(input).ok().and_then(|sql| {
+        grammar::executable_sql(sql, mode, true)
+            .ok()
+            .map(|expanded| (sql, expanded))
+    });
+    let Some((original, sql)) = sql else {
+        result.ends.push(input.len());
+        result.failed = true;
+        return result;
+    };
+    let mut offset = 0;
+    while offset < sql.len() {
+        let end = grammar::sql::statement_end(&sql[offset..], mode).or_else(|error| {
+            if matches!(sql, std::borrow::Cow::Owned(_)) {
+                let ignored = grammar::executable_sql(&original[offset..], mode, false)?;
+                grammar::sql::statement_end(&ignored, mode)
+            } else {
+                Err(error)
+            }
+        });
+        match end {
+            Ok(length) => {
+                offset += length;
+                result.ends.push(offset);
+            }
+            Err(_) => {
+                result.ends.push(sql.len());
+                result.failed = true;
+                break;
+            }
+        }
+        if first_only {
+            break;
+        }
+    }
+    result
+}
 
 fn number_parameters(
     node: &mut Node,

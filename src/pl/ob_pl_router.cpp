@@ -188,10 +188,10 @@ int ObPLRouter::simple_resolve(ObPLFunctionAST &func_ast)
   ObStmtNodeTree *parse_tree = NULL;
   if (OB_SUCC(ret)) {
     ObString body = routine_info_.get_routine_body(); // get body string
-    ObPLParser parser(inner_allocator_, session_info_.get_charsets4parser(), session_info_.get_sql_mode());
+    ObPLParser parser(inner_allocator_, session_info_.get_sql_mode());
     if (OB_FAIL(ObSQLUtils::convert_sql_text_from_schema_for_resolve(
                   inner_allocator_, session_info_.get_dtc_params(), body))) {
-    } else if (OB_FAIL(parser.parse_routine_body(body, parse_tree, session_info_.is_for_trigger_package()))) {
+    } else if (OB_FAIL(parser.parse(body, parse_tree))) {
     }
   }
 

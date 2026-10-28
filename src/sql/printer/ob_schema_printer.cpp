@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
+#include "sql/parser/ob_parser.h"
 #include "sql/printer/ob_schema_printer.h"
 #include "share/ob_autoincrement_service.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
@@ -2303,7 +2304,7 @@ int ObSchemaPrinter::print_package_definition(uint64_t package_id,
   const ObDatabaseSchema *database_schema = NULL;
   ObString actully_package_body;
   ObArenaAllocator allocator;
-  pl::ObPLParser parser(allocator, ObCharsets4Parser());
+  pl::ObPLParser parser(allocator);
   ObStmtNodeTree *package_stmt = NULL;
   const ObStmtNodeTree *real_package_stmt = NULL;
   OZ (schema_guard_.get_package_info( package_id, package_info));
@@ -2325,12 +2326,7 @@ int ObSchemaPrinter::print_package_definition(uint64_t package_id,
                       package_info->get_package_name().length(),
                       package_info->get_package_name().ptr()));
   CK (!package_info->get_source().empty());
-  OZ (parser.parse_package(package_info->get_source(),
-                           package_stmt,
-                           ObDataTypeCastParams(),
-                           NULL,
-                           false,
-                           nullptr));
+  OZ (parser.parse(package_info->get_source(), package_stmt));
   CK (OB_NOT_NULL(package_stmt));
   CK (T_STMT_LIST == package_stmt->type_);
   CK (1 == package_stmt->num_child_);
@@ -2635,8 +2631,8 @@ int ObSchemaPrinter::print_routine_definition(const uint64_t routine_id,
       CK(!routine_stmt.empty());
 
       if (OB_SUCC(ret)) {
-        pl::ObPLParser parser(allocator, ObCharsets4Parser(), sql_mode);
-        OZ (parser.parse(routine_stmt, routine_stmt, parse_result, true));
+        sql::ObParser parser(allocator, sql_mode);
+        OZ (parser.parse(routine_stmt, parse_result));
       }
     }
 

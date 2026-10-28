@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
+#include "sql/parser/ob_parser.h"
 #include "sql/engine/expr/ob_expr_mysql_proc_info.h"
 #include "sql/engine/expr/ob_expr_util.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
@@ -84,7 +85,7 @@ int ObExprMysqlProcInfo::extract_create_node_from_routine_info(ObIAllocator &all
   ParseResult parse_result;
   ObString routine_stmt;
   ObSQLMode sql_mode = exec_env.get_sql_mode();
-  pl::ObPLParser parser(alloc, sql::ObCharsets4Parser(), sql_mode);
+  sql::ObParser parser(alloc, sql_mode);
   const ObString &routine_body = routine_info.get_routine_body();
   const char prefix[] = "CREATE\n";
   int64_t prefix_len = STRLEN(prefix);
@@ -102,7 +103,7 @@ int ObExprMysqlProcInfo::extract_create_node_from_routine_info(ObIAllocator &all
 
   if (OB_FAIL(ret)) {
     // do nothing
-  } else if (OB_FAIL(parser.parse(routine_stmt, routine_stmt, parse_result, true))) {
+  } else if (OB_FAIL(parser.parse(routine_stmt, parse_result))) {
   }
 
   if OB_SUCC(ret) {
@@ -127,7 +128,7 @@ int ObExprMysqlProcInfo::extract_create_node_from_routine_info(ObIAllocator &all
   ParseResult parse_result;
   ObString routine_stmt;
   ObSQLMode sql_mode = exec_env.get_sql_mode();
-  pl::ObPLParser parser(alloc, sql::ObCharsets4Parser(), sql_mode);
+  sql::ObParser parser(alloc, sql_mode);
   const char prefix[] = "CREATE\n";
   int64_t prefix_len = STRLEN(prefix);
   int64_t buf_sz = prefix_len + routine_body.length();
@@ -144,7 +145,7 @@ int ObExprMysqlProcInfo::extract_create_node_from_routine_info(ObIAllocator &all
 
   if (OB_FAIL(ret)) {
     // do nothing
-  } else if (OB_FAIL(parser.parse(routine_stmt, routine_stmt, parse_result, true))) {
+  } else if (OB_FAIL(parser.parse(routine_stmt, parse_result))) {
   }
 
   if OB_SUCC(ret) {

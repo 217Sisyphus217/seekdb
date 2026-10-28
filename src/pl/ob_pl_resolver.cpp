@@ -7581,12 +7581,12 @@ int ObPLResolver::resolve_package_accessible_by(
 {
   int ret = OB_SUCCESS;
   ObArenaAllocator allocator;
-  ObPLParser parser(allocator, ObCharsets4Parser(), resolve_ctx_.session_info_.get_sql_mode());
+  ObPLParser parser(allocator, resolve_ctx_.session_info_.get_sql_mode());
   ObStmtNodeTree *parse_tree = NULL;
   const ObStmtNodeTree *package_node = NULL;
   const ObStmtNodeTree *clause_node = NULL;
   CK (false);
-  OZ (parser.parse_package(source, parse_tree, resolve_ctx_.session_info_.get_dtc_params(), NULL, false));
+  OZ (parser.parse(source, parse_tree));
   CK (OB_NOT_NULL(parse_tree));
   CK (T_STMT_LIST == parse_tree->type_);
   CK (1 == parse_tree->num_child_);
@@ -7615,12 +7615,12 @@ int ObPLResolver::resolve_routine_accessible_by(
 {
   int ret = OB_SUCCESS;
   ObArenaAllocator allocator;
-  ObPLParser parser(allocator, ObCharsets4Parser(), resolve_ctx_.session_info_.get_sql_mode());
+  ObPLParser parser(allocator, resolve_ctx_.session_info_.get_sql_mode());
   ObStmtNodeTree *parse_tree = NULL;
   const ObStmtNodeTree *routine_node = NULL;
   const ObStmtNodeTree *clause_node = NULL;
   CK (false);
-  OZ (parser.parse_routine_body(source, parse_tree, false), source);
+  OZ (parser.parse(source, parse_tree), source);
   CK (OB_NOT_NULL(parse_tree->children_));
   CK (1 == parse_tree->num_child_);
   CK (OB_NOT_NULL(parse_tree->children_[0]));

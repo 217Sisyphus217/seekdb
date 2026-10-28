@@ -400,7 +400,6 @@ extern ParseNode *new_non_terminal_node(void *malloc_pool, ObItemType node_tag, 
 extern ParseNode *new_terminal_node(void *malloc_pool, ObItemType type);
 extern ParseNode *new_list_node(void *malloc_pool, ObItemType node_tag, int capacity, int num, ...);
 
-extern int obpl_parser_check_stack_overflow();
 extern int check_mem_status();
 extern int try_check_mem_status(int64_t check_try_times);
 
