@@ -1271,8 +1271,25 @@ peg::parser! {
             / kw("drop") (kw("index") / kw("key")) name:ident() { Node::new(Kind::IndexDrop,vec![Node::name(name)]) }
             / kw("drop") kw("primary") kw("key") { Node::new(Kind::PrimaryKeyDrop,vec![]) }
             / kw("rename") (kw("index") / kw("key")) from:ident() kw("to") to:ident() { Node::new(Kind::IndexRename,vec![Node::name(from),Node::name(to)]) }
+        rule partition_names() -> Node = names:(ident() ++ ("," _)) { Node::new(Kind::Names,names.into_iter().map(Node::name).collect()) }
+        rule alter_partition() -> Node
+            = value:partition_option() { Node::new(Kind::Repartition,value.children) }
+            / kw("add") kw("partition") start:position!()
+                values:(value:partition_elements(Kind::RangePartition,Kind::Missing) { Node { kind:Kind::RangePartitions,..value } }
+                    / partition_elements(Kind::ListPartition,Kind::Missing)) end:position!() {
+                Node::new(Kind::PartitionAdd,vec![Node::new(Kind::Partitions,vec![values])]).at(start,end)
+            }
+            / truncate:(kw("truncate") { true } / kw("drop") { false })
+                sub:(kw("subpartition") { true } / kw("partition") { false })
+                names:(partition_names() / enabled(!truncate) "(" _ names:partition_names() ")" _ { names }) {
+                let kind=match (sub,truncate) {
+                    (false,false)=>Kind::PartitionDrop,(false,true)=>Kind::PartitionTruncate,
+                    (true,false)=>Kind::SubpartitionDrop,(true,true)=>Kind::SubpartitionTruncate,
+                };
+                Node::new(kind,vec![names,Node::missing()])
+            }
         rule alter_action() -> Node
-            = value:partition_option() { Node::new(Kind::AlterPartition,vec![Node::new(Kind::Repartition,value.children)]) }
+            = value:alter_partition() { Node::new(Kind::AlterPartition,vec![value]) }
             / kw("add") value:check_constraint() { Node::new(Kind::AlterCheckConstraint,vec![value]) }
             / kw("drop") kw("check") name:ident() { Node::new(Kind::AlterCheckConstraint,vec![Node::new(Kind::CheckConstraint,vec![Node::name(name)])]) }
             / value:(kw("add") value:foreign_key() { value }
@@ -1340,6 +1357,9 @@ peg::parser! {
                 Ok(Node::new(Kind::DropTable, vec![Node::missing(), Node::optional(exists), Node::new(Kind::TableList, tables)]))
             }
             / kw("truncate") kw("table")? name:name() {? Ok(Node::new(Kind::TruncateTable,vec![Node::relation(name)?])) }
+            / kw("optimize") kw("table") names:(name() ++ ("," _)) {?
+                Ok(Node::new(Kind::OptimizeTable,vec![Node::new(Kind::TableList,names.into_iter().map(Node::relation).collect::<Result<Vec<_>,_>>()?)]))
+            }
             / kw("rename") kw("table") values:(rename_table() ++ ("," _)) { Node::new(Kind::RenameTables,values) }
             / kw("alter") hints:hints()? kw("table") name:name() actions:(alter_action() ++ ("," _)) {?
                 Ok(Node::new(Kind::AlterTable,vec![Node::relation(name)?,Node::list(Kind::AlterTableActions,actions.into_iter().filter(|value| value.kind!=Kind::Missing).collect()),Node::missing(),Node::list(Kind::Hints,hints.unwrap_or_default())]))

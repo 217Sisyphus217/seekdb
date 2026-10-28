@@ -322,6 +322,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Charset: return T_CHARSET;
     case Kind::DropTable: return T_DROP_TABLE;
     case Kind::TruncateTable: return T_TRUNCATE_TABLE;
+    case Kind::OptimizeTable: return T_OPTIMIZE_TABLE;
     case Kind::PurgeRecyclebin: return T_PURGE_RECYCLEBIN;
     case Kind::PurgeTable: return T_PURGE_TABLE;
     case Kind::PurgeIndex: return T_PURGE_INDEX;
@@ -332,6 +333,12 @@ ObItemType node_type(const peg::Node &node)
     case Kind::AlterCheckConstraint: return T_ALTER_CHECK_CONSTRAINT_OPTION;
     case Kind::AlterPartition: return T_ALTER_PARTITION_OPTION;
     case Kind::Repartition: return T_ALTER_PARTITION_PARTITIONED;
+    case Kind::PartitionAdd: return T_ALTER_PARTITION_ADD;
+    case Kind::PartitionDrop: return T_ALTER_PARTITION_DROP;
+    case Kind::PartitionTruncate: return T_ALTER_PARTITION_TRUNCATE;
+    case Kind::SubpartitionDrop: return T_ALTER_SUBPARTITION_DROP;
+    case Kind::SubpartitionTruncate: return T_ALTER_SUBPARTITION_TRUNCATE;
+    case Kind::RangePartitions: return T_RANGE_PARTITION_LIST;
     case Kind::AlterTableActions: return T_ALTER_TABLE_ACTION_LIST;
     case Kind::AlterTableOption: return T_ALTER_TABLE_OPTION;
     case Kind::TableRename: return T_TABLE_RENAME;
@@ -910,7 +917,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
       || source.kind == Kind::ObjectAccess || source.kind == Kind::KeyPartition || source.kind == Kind::HashPartition
       || source.kind == Kind::ListPartition || source.kind == Kind::ListColumnsPartition
       || source.kind == Kind::RangePartition || source.kind == Kind::RangeColumnsPartition
-      || source.kind == Kind::VectorParameters
+      || source.kind == Kind::VectorParameters || source.kind == Kind::PartitionAdd
       || (source.kind == Kind::DateUnit && raw_length != 0)) {
     text = raw;
     length = raw_length;
