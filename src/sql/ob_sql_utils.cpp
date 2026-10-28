@@ -1449,6 +1449,7 @@ int ObSQLUtils::get_outline_key(ObIAllocator &allocator,
     ParamStore params( (ObWrapperAllocator(allocator)) );
     ObSEArray<ObPCParam *, OB_PC_RAW_PARAM_COUNT> raw_params;
     SqlInfo sql_info;
+    ParameterBindings bindings;
     char *buf = NULL;
     char *buf2 = NULL;
     int32_t pos = 0;
@@ -1476,6 +1477,7 @@ int ObSQLUtils::get_outline_key(ObIAllocator &allocator,
                                                                     parse_result.result_tree_,
                                                                     sql_info,
                                                                     params,
+                                                                    bindings,
                                                                     NULL,
                                                                     is_transform_outline))) {
       if (OB_NOT_SUPPORTED != ret) {

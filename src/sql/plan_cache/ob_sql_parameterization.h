@@ -134,6 +134,7 @@ public:
                                    ParseNode *tree,
                                    SqlInfo &sql_info,
                                    ParamStore &params,
+                                   ParameterBindings &bindings,
                                    SelectItemParamInfoMap *select_item_param_infos,
                                    bool is_transform_outline,
                                    SQL_EXECUTION_MODE execution_mode = INVALID_MODE,
@@ -236,6 +237,7 @@ private:
   static int get_select_item_param_info(const common::ObIArray<ObPCParam *> &raw_params,
                                         const ParseNode *tree,
                                         bool string_literal,
+                                        const ParameterBindings &bindings,
                                         SelectItemParamInfoMap &select_item_param_infos);
   static int parameterize_fields(SelectItemTraverseCtx &ctx);
 

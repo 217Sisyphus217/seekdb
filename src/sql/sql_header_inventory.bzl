@@ -397,6 +397,7 @@ SQL_INTERFACE_CLOSURE_HEADERS = [
     "resolver/ob_column_ref.h",
     "resolver/ob_resolver_define.h",
     "resolver/ob_stmt.h",
+    "resolver/parameter_bindings.h",
     "resolver/prepare/ob_deallocate_stmt.h",
     "resolver/prepare/ob_execute_stmt.h",
     "resolver/tcl/ob_end_trans_stmt.h",

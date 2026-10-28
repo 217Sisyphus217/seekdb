@@ -16,6 +16,7 @@
 
 #ifndef OCEANBASE_SQL_RESOLVER_EXPR_RAW_EXPR_
 #define OCEANBASE_SQL_RESOLVER_EXPR_RAW_EXPR_
+#include "sql/resolver/parameter_bindings.h"
 #include "share/ob_define.h"
 #include "lib/container/ob_bit_set.h"
 #include "lib/string/ob_string.h"
@@ -1617,6 +1618,7 @@ struct ObResolveContext
     inlist_infos_(NULL),
     is_extract_param_type_(true),
     param_list_(NULL),
+    parameter_bindings_(nullptr),
     prepare_param_count_(0),
     external_param_info_(NULL),
     current_scope_(T_NONE_SCOPE),
@@ -1664,6 +1666,7 @@ struct ObResolveContext
   // If no parameter list is specified, then the expr resolver will ignore the filling of parameter types
   bool is_extract_param_type_;
   const ParamStore *param_list_;
+  const ParameterBindings *parameter_bindings_;
   int64_t prepare_param_count_;
   ExternalParams *external_param_info_;//for anonymous + ps
   ObStmtScope current_scope_;

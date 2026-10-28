@@ -2463,6 +2463,7 @@ int ObResolverUtils::resolve_const_expr(ObResolverParams &params,
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params.param_list_;
+    ctx.parameter_bindings_ = params.parameter_bindings_;
     ctx.is_extract_param_type_ = !params.is_prepare_protocol_; //when prepare do not extract
     ctx.schema_checker_ = params.schema_checker_;
     ctx.session_info_ = params.session_info_;
@@ -3131,6 +3132,7 @@ int ObResolverUtils::resolve_partition_range_value_expr(ObResolverParams &params
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = ObCharset::charset_type_by_coll(part_func_expr.get_collation_type());
     ctx.param_list_ = params.param_list_;
+    ctx.parameter_bindings_ = params.parameter_bindings_;
     ctx.session_info_ = params.session_info_;
     ctx.query_ctx_ = params.query_ctx_;
     ObRawExprResolverImpl expr_resolver(ctx);
@@ -3274,6 +3276,7 @@ int ObResolverUtils::resolve_partition_range_value_expr(ObResolverParams &params
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params.param_list_;
+    ctx.parameter_bindings_ = params.parameter_bindings_;
     ctx.session_info_ = params.session_info_;
     ctx.query_ctx_ = params.query_ctx_;
     ObRawExprResolverImpl expr_resolver(ctx);
@@ -3431,6 +3434,7 @@ int ObResolverUtils::resolve_partition_expr(ObResolverParams &params,
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params.param_list_;
+    ctx.parameter_bindings_ = params.parameter_bindings_;
     ctx.session_info_ = params.session_info_;
     ctx.query_ctx_ = params.query_ctx_;
     ObRawExprResolverImpl expr_resolver(ctx);
@@ -6872,6 +6876,7 @@ int ObResolverUtils::resolver_param(ObPlanCacheCtx &pc_ctx,
 
 /* If ParseNode is a const param, fast know obj_type、collation_type、collation level */
 int ObResolverUtils::fast_get_param_type(const ParseNode &node,
+                                         const ParameterBinding *binding,
                                          const ParamStore *param_store,
                                          const ObCollationType connect_collation,
                                          const ObCollationType nchar_collation,
@@ -6883,14 +6888,15 @@ int ObResolverUtils::fast_get_param_type(const ParseNode &node,
                                          ObCollationLevel &coll_level)
 {
   int ret = OB_SUCCESS;
-  if (T_QUESTIONMARK == node.type_) {
+  if (binding != nullptr || T_QUESTIONMARK == node.type_) {
+    const int64_t parameter_index = binding != nullptr ? binding->parameter_index : node.value_;
     if (OB_ISNULL(param_store) ||
-        OB_UNLIKELY(node.value_ < 0 || node.value_ >= param_store->count())) {
+        OB_UNLIKELY(parameter_index < 0 || parameter_index >= param_store->count())) {
       ret = OB_ERR_UNEXPECTED;
     } else {
-      obj_type = param_store->at(node.value_).get_param_meta().get_type();
-      coll_type = param_store->at(node.value_).get_param_meta().get_collation_type();
-      coll_level = param_store->at(node.value_).get_param_meta().get_collation_level();
+      obj_type = param_store->at(parameter_index).get_param_meta().get_type();
+      coll_type = param_store->at(parameter_index).get_param_meta().get_collation_type();
+      coll_level = param_store->at(parameter_index).get_param_meta().get_collation_level();
     }
   } else if (IS_DATATYPE_OP(node.type_)) {
     if (T_VARCHAR == node.type_ || T_CHAR == node.type_ ||  T_NCHAR == node.type_) {

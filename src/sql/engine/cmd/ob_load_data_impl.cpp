@@ -72,6 +72,7 @@ int ObLoadDataBase::make_parameterize_stmt(ObExecContext &ctx,
     ParseResult parse_result;
 
     SqlInfo not_param_info;
+    ParameterBindings bindings;
     bool is_transform_outline = false;
     if (OB_FAIL(parser.parse(insertsql.string(), parse_result))) {
     } else if (OB_FAIL(ObSqlParameterization::transform_syntax_tree(ctx.get_allocator(),
@@ -80,6 +81,7 @@ int ObLoadDataBase::make_parameterize_stmt(ObExecContext &ctx,
                                                                     parse_result.result_tree_,
                                                                     not_param_info,
                                                                     param_store,
+                                                                    bindings,
                                                                     NULL,
                                                                     is_transform_outline))) {
     } else {
@@ -90,6 +92,7 @@ int ObLoadDataBase::make_parameterize_stmt(ObExecContext &ctx,
         resolver_ctx.schema_checker_ = &schema_checker;
         resolver_ctx.session_info_ = session;
         resolver_ctx.param_list_ = &param_store;
+        resolver_ctx.parameter_bindings_ = &bindings;
         resolver_ctx.database_id_ = session->get_database_id();
         resolver_ctx.disable_privilege_check_ = PRIV_CHECK_FLAG_DISABLE;
         resolver_ctx.expr_factory_ = ctx.get_expr_factory();

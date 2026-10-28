@@ -80,7 +80,7 @@ int deep_copy_parse_node_base(void *malloc_pool, const ParseNode *src_node, Pars
     dst_node->value_ = src_node->value_;
     dst_node->pos_ = src_node->pos_;
     dst_node->stmt_loc_ = src_node->stmt_loc_;
-    dst_node->raw_param_idx_ = src_node->raw_param_idx_;
+    dst_node->raw_sql_offset_ = src_node->raw_sql_offset_;
     if (src_node->str_len_ > 0 && src_node->str_value_ != NULL) {
       char *buf = NULL;
       if (OB_UNLIKELY(NULL == (buf = (char *)parser_alloc(malloc_pool, src_node->str_len_ + 1)))) {

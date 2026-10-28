@@ -1021,7 +1021,6 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     node->value_ = source.text == "plan" ? CACHE_TYPE_PLAN : source.text == "pl" ? CACHE_TYPE_PL_OBJ
         : source.text == "ps" ? CACHE_TYPE_PS_OBJ : CACHE_TYPE_LIB_CACHE;
   }
-  if (type == T_BOOL) node->is_literal_bool_ = true;
   if (type == T_SFU_INT && source.start == source.end) node->is_hidden_const_ = true;
   if (type == T_SORT_ASC || type == T_SORT_DESC) node->value_ = 2;
   if (type == T_IDENT) {

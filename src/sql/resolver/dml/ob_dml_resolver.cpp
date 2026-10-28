@@ -985,6 +985,7 @@ int ObDMLResolver::resolve_sql_expr(const ParseNode &node, ObRawExpr *&expr,
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params_.param_list_;
+    ctx.parameter_bindings_ = params_.parameter_bindings_;
     ctx.is_extract_param_type_ = !params_.is_prepare_protocol_; //when prepare do not extract
     ctx.external_param_info_ = params_.external_param_info_.need_clear_ ? nullptr : &params_.external_param_info_;
     ctx.current_scope_ = current_scope_;
@@ -4709,6 +4710,7 @@ int ObDMLResolver::resolve_partition_expr(const ParseNode &part_expr_node, ObRaw
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params_.param_list_;
+    ctx.parameter_bindings_ = params_.parameter_bindings_;
     ctx.stmt_ = static_cast<ObStmt*>(get_stmt());
     ctx.session_info_ = params_.session_info_;
     ctx.query_ctx_ = params_.query_ctx_;
@@ -5013,6 +5015,7 @@ int ObDMLResolver::resolve_and_split_sql_expr(const ParseNode &node, ObIArray<Ob
                              session_info_->get_timezone_info(),
                              OB_NAME_CASE_INVALID);
     ctx.param_list_ = params_.param_list_;
+    ctx.parameter_bindings_ = params_.parameter_bindings_;
     ctx.current_scope_ = current_scope_;
     ctx.stmt_ = static_cast<ObStmt*>(get_stmt());
     ctx.session_info_ = session_info_;
@@ -5347,6 +5350,15 @@ int ObDMLResolver::resolve_limit_clause(const ParseNode *node, bool disable_offs
       limit_node = node->children_[1];
       offset_node = node->children_[0];
     }
+    const auto parameter_index = [this](const ParseNode *value) -> int64_t {
+      if (value == nullptr) return -1;
+      const auto *binding = params_.parameter_bindings_ != nullptr
+          ? params_.parameter_bindings_->find(value) : nullptr;
+      return binding != nullptr ? binding->parameter_index
+          : value->type_ == T_QUESTIONMARK ? value->value_ : -1;
+    };
+    const int64_t limit_index = parameter_index(limit_node);
+    const int64_t offset_index = parameter_index(offset_node);
     ObRawExpr* limit_count = NULL;
     ObRawExpr* limit_offset = NULL;
     if (disable_offset && OB_NOT_NULL(offset_node)) {
@@ -5357,14 +5369,13 @@ int ObDMLResolver::resolve_limit_clause(const ParseNode *node, bool disable_offs
       LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
                     str_len, offset_node->raw_text_, line_no);
     // resolve the question mark with less value first
-    } else if (limit_node != NULL && limit_node->type_ == T_QUESTIONMARK && offset_node != NULL
-        && offset_node->type_ == T_QUESTIONMARK && limit_node->value_ > offset_node->value_) {
+    } else if (limit_index >= 0 && offset_index >= 0 && limit_index > offset_index) {
       if (OB_FAIL(ObResolverUtils::resolve_const_expr(params_, *offset_node, limit_offset, NULL))
           || OB_FAIL(ObResolverUtils::resolve_const_expr(params_, *limit_node, limit_count, NULL))) {
       }
     } else {
       if (limit_node != NULL) {
-        if (limit_node->type_ != T_INT && limit_node->type_ != T_UINT64
+        if (limit_index < 0 && limit_node->type_ != T_INT && limit_node->type_ != T_UINT64
             && limit_node->type_ != T_QUESTIONMARK && limit_node->type_ != T_COLUMN_REF) {
           ret = OB_ERR_RESOLVE_SQL;
           LOG_WARN("Wrong type of limit value");
@@ -5374,7 +5385,7 @@ int ObDMLResolver::resolve_limit_clause(const ParseNode *node, bool disable_offs
         }
       }
       if (ret == OB_SUCCESS && offset_node != NULL) {
-        if (offset_node->type_ != T_INT && offset_node->type_ != T_UINT64
+        if (offset_index < 0 && offset_node->type_ != T_INT && offset_node->type_ != T_UINT64
             && offset_node->type_ != T_QUESTIONMARK && offset_node->type_ != T_COLUMN_REF) {
           ret = OB_ERR_RESOLVE_SQL;
         } else if (OB_FAIL(ObResolverUtils::resolve_const_expr(params_, *offset_node, limit_offset, NULL))) {

@@ -752,6 +752,7 @@ public:
                             bool &is_param,
                             const bool enable_decimal_int);
   static int fast_get_param_type(const ParseNode &parse_node,
+                                 const ParameterBinding *binding,
                                  const ParamStore *param_store,
                                  const ObCollationType connect_collation,
                                  const ObCollationType nchar_collation,

@@ -1341,7 +1341,9 @@ int ObSelectResolver::resolve_field_list(const ParseNode &node)
     // EXECUTE STMT USING @I1, @I1, @I1;
     // col_name1 is ":1", col_name2 is ":2", col_name3 is ":3"
     if (OB_FAIL(prepare_get_child_at(node.children_[i], 0))) {
-    } else if (node.children_[i]->children_[0]->type_ == T_NULL) {
+    } else if (node.children_[i]->children_[0]->type_ == T_NULL
+               && (params_.parameter_bindings_ == nullptr
+                   || params_.parameter_bindings_->find(node.children_[i]->children_[0]) == nullptr)) {
       // MySQL sets the alias of standalone null value("\N","null"...) to "NULL" during projection.
       // Note: when null value is in a composite expression, its alias is not modified.
       ObString alias_name = ObString::make_string("NULL");
@@ -4540,6 +4542,7 @@ int ObSelectResolver::check_union_leaf_to_values_table_valid(const ParseNode &pa
       for (int64_t i = 0; OB_SUCC(ret) && is_valid && i < project_list->num_child_; i++) {
         const ParseNode *param_node = NULL;
         ObObjType param_type;
+        const ParameterBinding *binding = nullptr;
         ObCollationType dummy_collation_type;
         ObCollationLevel dummy_collation_level;
         if (OB_ISNULL(project_list->children_[i]) ||
@@ -4549,9 +4552,11 @@ int ObSelectResolver::check_union_leaf_to_values_table_valid(const ParseNode &pa
         } else if (T_ALIAS == param_node->type_ &&
                    OB_ISNULL(param_node = param_node->children_[0])) {
           ret = OB_ERR_UNEXPECTED;
-        } else if (!IS_DATATYPE_OR_QUESTIONMARK_OP(param_node->type_)) {
+        } else if (FALSE_IT(binding = params_.parameter_bindings_ != nullptr
+            ? params_.parameter_bindings_->find(param_node) : nullptr)) {
+        } else if (binding == nullptr && !IS_DATATYPE_OR_QUESTIONMARK_OP(param_node->type_)) {
           is_valid = false;
-        } else if (OB_FAIL(ObResolverUtils::fast_get_param_type(*param_node, param_store,
+        } else if (OB_FAIL(ObResolverUtils::fast_get_param_type(*param_node, binding, param_store,
                                                     connect_collation, nchar_collation,
                                                     static_cast<ObCollationType>(server_collation),
                                                     enable_decimal_int, *allocator_, param_type,

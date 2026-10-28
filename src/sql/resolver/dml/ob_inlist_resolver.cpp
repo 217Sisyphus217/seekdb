@@ -18,6 +18,7 @@
 
 #include "sql/resolver/dml/ob_inlist_resolver.h"
 #include "sql/resolver/dml/ob_dml_resolver.h"
+#include "sql/resolver/parameter_bindings.h"
 #include "sql/engine/expr/ob_expr_version.h"
 #include "sql/rewrite/ob_transform_pre_process.h"
 
@@ -212,27 +213,31 @@ int ObInListResolver::get_inlist_rewrite_info(const ParseNode &in_list,
         bool is_const_type = false;
         const ParseNode *node = column_cnt == 1 ? in_list.children_[i] 
                                                 : in_list.children_[i]->children_[col_idx];
+        const ParameterBinding *binding = helper.parameter_bindings_ == nullptr
+            ? nullptr : helper.parameter_bindings_->find(node);
         if (OB_ISNULL(node)) {
           ret = OB_ERR_UNEXPECTED;
-        } else if (FALSE_IT(rewrite_info.is_question_mark_ = T_QUESTIONMARK == node->type_)) {
+        } else if (FALSE_IT(rewrite_info.is_question_mark_ = binding != nullptr || T_QUESTIONMARK == node->type_)) {
         } else if (rewrite_info.is_question_mark_) {
+          const int64_t parameter_index = binding != nullptr ? binding->parameter_index : node->value_;
           // check if param indexes are continuous for values table
           if (-1 == rewrite_info.start_param_idx_ 
-              && FALSE_IT(rewrite_info.start_param_idx_ = node->value_)) {
-          } else if (FALSE_IT(rewrite_info.end_param_idx_ = node->value_)) {
-          } else if (OB_UNLIKELY(node->value_ != rewrite_info.start_param_idx_ + col_idx + i * column_cnt
-                                 || node->value_ < 0)) {
+              && FALSE_IT(rewrite_info.start_param_idx_ = parameter_index)) {
+          } else if (FALSE_IT(rewrite_info.end_param_idx_ = parameter_index)) {
+          } else if (OB_UNLIKELY(parameter_index != rewrite_info.start_param_idx_ + col_idx + i * column_cnt
+                                 || parameter_index < 0)) {
             rewrite_info.is_valid_as_values_table_ = false;
           }
         } else { /*do nothing*/ }
         if (OB_FAIL(ret) || !rewrite_info.is_valid_as_values_table_) {
         } else if (helper.is_prepare_stmt_ && rewrite_info.is_question_mark_) {
           // skip getting types for question marks in prepare stmt, because they have no type
-        } else if (!(T_QUESTIONMARK == node->type_ && rewrite_info.is_question_mark_) &&
+        } else if (!((binding != nullptr || T_QUESTIONMARK == node->type_) && rewrite_info.is_question_mark_) &&
                    !(IS_DATATYPE_OP(node->type_) && !rewrite_info.is_question_mark_)) {
           // not const type
           rewrite_info.is_valid_as_values_table_ = false;
         } else if (OB_FAIL(ObResolverUtils::fast_get_param_type(*node,
+                                                                binding,
                                                                 helper.param_store_, 
                                                                 helper.connect_collation_,
                                                                 helper.nchar_collation_, 
@@ -272,6 +277,7 @@ int ObInListResolver::check_inlist_rewrite_enable(const ParseNode &in_list,
                                                   const bool is_in_pl_prepare,
                                                   const ObSQLSessionInfo *session_info,
                                                   const ParamStore *param_store,
+                                                  const ParameterBindings *parameter_bindings,
                                                   const ObStmt *stmt,
                                                   ObIAllocator &alloc,
                                                   bool &is_question_mark,
@@ -331,6 +337,7 @@ int ObInListResolver::check_inlist_rewrite_enable(const ParseNode &in_list,
     } else {
       ObInListsResolverHelper helper(alloc,
                                      param_store,
+                                     parameter_bindings,
                                      connect_collation,
                                      nchar_collation,
                                      static_cast<ObCollationType>(server_collation),
@@ -366,6 +373,7 @@ int ObInListResolver::resolve_access_param_values_table(const ParseNode &in_list
 {
   int ret = OB_SUCCESS;
   const ParseNode *row_node = NULL;
+  const ParameterBindings *parameter_bindings = cur_resolver_->params_.parameter_bindings_;
   ObCollationType coll_type = CS_TYPE_INVALID;
   ObLengthSemantics length_semantics = LS_DEFAULT;
   if (OB_ISNULL(allocator) || OB_ISNULL(session_info) || OB_ISNULL(param_store)) {
@@ -380,7 +388,10 @@ int ObInListResolver::resolve_access_param_values_table(const ParseNode &in_list
     }
     for (int64_t j = 0; OB_SUCC(ret) && j < column_cnt; j++) {
       const ParseNode *element = column_cnt == 1 ? row_node : row_node->children_[j];
-      const ObObjParam &obj_param = param_store->at(element->value_);
+      const ParameterBinding *binding = parameter_bindings == nullptr
+          ? nullptr : parameter_bindings->find(element);
+      const int64_t parameter_index = binding != nullptr ? binding->parameter_index : element->value_;
+      const ObObjParam &obj_param = param_store->at(parameter_index);
       ObRawExprResType res_type;
       res_type.set_meta(obj_param.get_param_meta());
       res_type.set_accuracy(obj_param.get_accuracy());
@@ -407,10 +418,15 @@ int ObInListResolver::resolve_access_param_values_table(const ParseNode &in_list
     }
   }
   if (OB_SUCC(ret)) {
-    table_def.start_param_idx_ = column_cnt == 1 ? in_list.children_[0]->value_ :
-                                                   in_list.children_[0]->children_[0]->value_;
-    table_def.end_param_idx_ = column_cnt == 1 ? in_list.children_[row_cnt - 1]->value_ :
-                                  in_list.children_[row_cnt - 1]->children_[column_cnt - 1]->value_;
+    const ParseNode *first = column_cnt == 1 ? in_list.children_[0] : in_list.children_[0]->children_[0];
+    const ParseNode *last = column_cnt == 1 ? in_list.children_[row_cnt - 1] :
+        in_list.children_[row_cnt - 1]->children_[column_cnt - 1];
+    const ParameterBinding *first_binding = parameter_bindings == nullptr
+        ? nullptr : parameter_bindings->find(first);
+    const ParameterBinding *last_binding = parameter_bindings == nullptr
+        ? nullptr : parameter_bindings->find(last);
+    table_def.start_param_idx_ = first_binding != nullptr ? first_binding->parameter_index : first->value_;
+    table_def.end_param_idx_ = last_binding != nullptr ? last_binding->parameter_index : last->value_;
   }
   return ret;
 }
@@ -783,6 +799,7 @@ int ObInListResolver::try_merge_inlists(ObExprResolveContext &resolve_ctx,
   } else {
     ObInListsResolverHelper helper(alloc,
                                    resolve_ctx.param_list_,
+                                   resolve_ctx.parameter_bindings_,
                                    connect_collation,
                                    nchar_collation,
                                    static_cast<ObCollationType>(server_collation),

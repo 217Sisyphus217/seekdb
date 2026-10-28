@@ -2072,6 +2072,7 @@ int ObSql::generate_stmt(ParseResult &parse_result,
     resolver_ctx.outline_parse_result_ = outline_parse_result;
     resolver_ctx.is_execute_call_stmt_ = context.is_execute_call_stmt_;
     if (NULL != pc_ctx) {
+      resolver_ctx.parameter_bindings_ = &pc_ctx->parameter_bindings_;
       resolver_ctx.select_item_param_infos_ = &pc_ctx->select_item_param_infos_;
     }
     plan_ctx = result.get_exec_context().get_physical_plan_ctx();

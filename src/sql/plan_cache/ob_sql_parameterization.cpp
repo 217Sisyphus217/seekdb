@@ -48,6 +48,7 @@ struct TransformTreeCtx
   const ObTimeZoneInfo *tz_info_;
   int64_t question_num_;
   ParamStore *params_;
+  ParameterBindings *bindings_;
   bool not_param_; // indicates that this node and its child nodes cannot be parameterized even when they are constants
   bool is_fast_parse_const_; // indicates whether the current node is a constant recognizable by fp
   bool enable_contain_param_;//Indicates whether the constants in this node and its sub-nodes are fp-recognizable parameters.
@@ -79,6 +80,7 @@ struct SelectItemTraverseCtx
   const int64_t buf_len_;
   int64_t &expr_pos_;
   SelectItemParamInfo &param_info_;
+  const ParameterBindings &bindings_;
 
   SelectItemTraverseCtx(const common::ObIArray<ObPCParam *> &raw_params,
                         const ParseNode *tree,
@@ -86,9 +88,10 @@ struct SelectItemTraverseCtx
                         const int64_t expr_start_pos,
                         const int64_t buf_len,
                         int64_t &expr_pos,
-                        SelectItemParamInfo &param_info)
+                        SelectItemParamInfo &param_info,
+                        const ParameterBindings &bindings)
     : raw_params_(raw_params), tree_(tree), org_expr_name_(org_expr_name),
-      expr_start_pos_(expr_start_pos), buf_len_(buf_len), expr_pos_(expr_pos), param_info_(param_info) {}
+      expr_start_pos_(expr_start_pos), buf_len_(buf_len), expr_pos_(expr_pos), param_info_(param_info), bindings_(bindings) {}
 };
 
 struct TraverseStackFrame
@@ -114,6 +117,7 @@ TransformTreeCtx::TransformTreeCtx() :
  tz_info_(NULL),
  question_num_(0),
  params_(NULL),
+ bindings_(nullptr),
  not_param_(false),
  is_fast_parse_const_(false),
  enable_contain_param_(true),
@@ -139,12 +143,14 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
                                                  ParseNode *tree,
                                                  SqlInfo &sql_info,
                                                  ParamStore &params,
+                                                 ParameterBindings &bindings,
                                                  SelectItemParamInfoMap *select_item_param_infos,
                                                  bool is_transform_outline,
                                                  SQL_EXECUTION_MODE execution_mode,
                                                  bool is_from_pl)
 {
   int ret = OB_SUCCESS;
+  bindings.reset();
   ObCollationType collation_connection = CS_TYPE_INVALID;
   ParseNode *children_node = tree->children_[0];
   if (OB_ISNULL(tree)) {
@@ -168,6 +174,7 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
     ctx.value_father_level_ = NO_VALUES;
     ctx.question_num_ = 0;
     ctx.params_ = &params;
+    ctx.bindings_ = &bindings;
     ctx.not_param_ = false;
     ctx.is_fast_parse_const_ = false;
     ctx.enable_contain_param_ = true;
@@ -213,6 +220,7 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
                      && OB_FAIL(get_select_item_param_info(*raw_params,
                                                            tmp_root,
                                                            projection.string_literal_,
+                                                           bindings,
                                                            *select_item_param_infos))) {
             SQL_PC_LOG(WARN, "failed to get select item param info", K(ret));
           } else {
@@ -580,8 +588,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
               if (OB_FAIL(ctx.sql_info_->fixed_param_idx_.push_back(ctx.question_num_))) {
               }
             }
-            ctx.tree_->is_literal_bool_ = (T_BOOL == ctx.tree_->type_);
-            value.set_is_boolean(value.is_boolean() || ctx.tree_->is_literal_bool_);
+            value.set_is_boolean(value.is_boolean() || T_BOOL == ctx.tree_->type_);
             if (T_QUESTIONMARK != ctx.tree_->type_ && ctx.is_project_list_scope_) {
               ctx.sql_info_->ps_need_parameterized_ = false;
             }
@@ -590,24 +597,23 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
             // for hard parsing. In this case, the param store has been constructed in advance
             // so the constant cannot be resolved as a question mark, and there is no need to
             // add it to the param store.
-            ObItemType node_type;
-            if (!is_execute_mode(ctx.mode_)) {
-              node_type = ctx.tree_->type_;
-              ctx.tree_->type_ = T_QUESTIONMARK;
-              ctx.tree_->raw_param_idx_ = ctx.sql_info_->total_;
-              ctx.tree_->value_ = ctx.question_num_;
+            const ObItemType node_type = ctx.tree_->type_;
+            const int64_t raw_token_index = is_execute_mode(ctx.mode_)
+                ? ctx.tree_->raw_sql_offset_ : ctx.sql_info_->total_;
+            if (OB_SUCC(ret) && !is_execute_mode(ctx.mode_)) {
+              ret = ctx.bindings_->bind(ctx.tree_, ctx.question_num_, raw_token_index);
             }
             ctx.question_num_++;
             ctx.sql_info_->total_++;
             if (1 == ctx.tree_->is_num_must_be_pos_ && OB_SUCC(ret)
-                && OB_FAIL(ctx.sql_info_->must_be_positive_index_.add_member(ctx.tree_->raw_param_idx_))) {
+                && OB_FAIL(ctx.sql_info_->must_be_positive_index_.add_member(raw_token_index))) {
             }
             if (OB_NOT_NULL(ctx.tree_) &&
                 OB_NOT_NULL(ctx.raw_params_) &&
-                ctx.tree_->raw_param_idx_ >= 0 &&
-                ctx.tree_->raw_param_idx_ < ctx.raw_params_->count() &&
-                OB_NOT_NULL(ctx.raw_params_->at(ctx.tree_->raw_param_idx_))) {
-              const ParseNode *node = ctx.raw_params_->at(ctx.tree_->raw_param_idx_)->node_;
+                raw_token_index >= 0 &&
+                raw_token_index < ctx.raw_params_->count() &&
+                OB_NOT_NULL(ctx.raw_params_->at(raw_token_index))) {
+              const ParseNode *node = ctx.raw_params_->at(raw_token_index)->node_;
               value.set_raw_text_info(static_cast<int32_t>(node->raw_sql_offset_),
                                       static_cast<int32_t>(node->text_len_));
               if (ctx.sql_info_->need_check_fp_) {
@@ -618,7 +624,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
                 if (ctx.tree_->sql_str_off_ == -1) {
                   ret = OB_NOT_SUPPORTED;
                   LOG_WARN("invalid str off", K(lbt()), K(ctx.tree_),
-                      K(ctx.tree_->raw_param_idx_), K(get_type_name(node_type)),
+                      K(raw_token_index), K(get_type_name(node_type)),
                       K(session_info.get_current_query_string()),
                       "result_tree_", SJ(ObParserResultPrintWrapper(*ctx.top_node_)));
                 }
@@ -645,7 +651,8 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
 
     // sql with charset need not ps parameterize
     if (OB_SUCC(ret)) {
-      if (T_QUESTIONMARK == ctx.tree_->type_ && OB_NOT_NULL(ctx.tree_->children_)
+      if ((T_QUESTIONMARK == ctx.tree_->type_ || ctx.bindings_->find(ctx.tree_) != nullptr)
+          && OB_NOT_NULL(ctx.tree_->children_)
           && OB_NOT_NULL(ctx.tree_->children_[0]) && ctx.tree_->children_[0]->type_ == T_CHARSET) {
         ctx.sql_info_->ps_need_parameterized_ = false;
       } else if (T_INTO_OUTFILE == ctx.tree_->type_) {
@@ -723,6 +730,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
     bool ignore_scale_check = ctx.ignore_scale_check_;
     for (int32_t i = 0;
          OB_SUCC(ret) && i < root->num_child_ && root->type_ != T_QUESTIONMARK
+         && ctx.bindings_->find(root) == nullptr
          && root->type_ != T_VARCHAR && root->type_ != T_CHAR && root->type_ != T_NCHAR;
          ++i) {
       // If not_param is already true, then there is no need to check further; because if a node is determined to be true, then the entire subtree of that node is true;
@@ -827,7 +835,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
                     if (root->sql_str_off_ == -1) {
                       ret = OB_NOT_SUPPORTED;
                       LOG_WARN("invalid str off", K(lbt()), K(ctx.tree_),
-                          K(root->raw_param_idx_), K(get_type_name(root->type_)),
+                          K(root->raw_sql_offset_), K(get_type_name(root->type_)),
                           K(session_info.get_current_query_string()),
                           "result_tree_", SJ(ObParserResultPrintWrapper(*ctx.top_node_)));
                     }
@@ -995,6 +1003,7 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
                                            tree,
                                            sql_info,
                                            params,
+                                           pc_ctx.parameter_bindings_,
                                            is_prepare_mode(mode) ? NULL : &pc_ctx.select_item_param_infos_,
                                            is_transform_outline,
                                            mode))) {
@@ -1055,8 +1064,9 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
       }
     }
   }
-  if (OB_FAIL(ret) && pc_ctx.select_item_param_infos_.created()) {
-    pc_ctx.select_item_param_infos_.clear();
+  if (OB_FAIL(ret)) {
+    pc_ctx.parameter_bindings_.reset();
+    if (pc_ctx.select_item_param_infos_.created()) pc_ctx.select_item_param_infos_.clear();
   }
 
   return ret;
@@ -1806,7 +1816,7 @@ int ObSqlParameterization::add_not_param_flag(const ParseNode *node, SqlInfo &sq
         if (node->sql_str_off_ == -1) {
           ret = OB_NOT_SUPPORTED;
           LOG_WARN("invalid str off", K(lbt()), K(node),
-              K(node->raw_param_idx_), K(get_type_name(node->type_)));
+              K(node->raw_sql_offset_), K(get_type_name(node->type_)));
         }
         if (OB_FAIL(ret)) {
 
@@ -1826,7 +1836,7 @@ int ObSqlParameterization::add_not_param_flag(const ParseNode *node, SqlInfo &sq
       if (node->sql_str_off_ == -1) {
         ret = OB_NOT_SUPPORTED;
         LOG_WARN("invalid str off", K(lbt()), K(node),
-            K(node->raw_param_idx_), K(get_type_name(node->type_)));
+            K(node->raw_sql_offset_), K(get_type_name(node->type_)));
       }
       if (OB_FAIL(ret)) {
 
@@ -2156,6 +2166,7 @@ int ObSqlParameterization::get_related_user_vars(const ParseNode *tree, common::
 int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObPCParam *> &raw_params,
                                                       const ParseNode *tree,
                                                       bool string_literal,
+                                                      const ParameterBindings &bindings,
                                                       SelectItemParamInfoMap &select_item_param_infos)
 {
   int ret = OB_SUCCESS;
@@ -2181,7 +2192,8 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
                               tree->raw_sql_offset_,
                               buf_len,
                               expr_pos,
-                              param_info);
+                              param_info,
+                              bindings);
     // Simulate function recursive operation, traverse subtree
     // Stack each element is {cur_node, next_child_idx}
     // Pop operation:
@@ -2196,9 +2208,9 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
       if (NULL == ctx.tree_) {
         ret = OB_INVALID_ARGUMENT;
       } else if (nullptr != select_item_param_infos.get(ctx.tree_)
-                 || T_QUESTIONMARK == ctx.tree_->type_
+                 || bindings.find(ctx.tree_) != nullptr
                  || stack_frames.at(frame_idx).next_child_idx_ >= ctx.tree_->num_child_) {
-        if (T_QUESTIONMARK == ctx.tree_->type_) {
+        if (bindings.find(ctx.tree_) != nullptr) {
           if (ctx.param_info_.name_len_ >= ctx.buf_len_) {
             // column length is already full, no need to continue constructing the template, directly break out
             break;
@@ -2245,7 +2257,7 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
         param_info.name_len_ += len;
       }
 
-      if (T_QUESTIONMARK == tree->children_[0]->type_
+      if (bindings.find(tree->children_[0]) != nullptr
           && string_literal) {
         param_info.esc_str_flag_ = true;
       }
@@ -2278,7 +2290,8 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
 int ObSqlParameterization::resolve_paramed_const(SelectItemTraverseCtx &ctx)
 {
   int ret = OB_SUCCESS;
-  int64_t idx = ctx.tree_->raw_param_idx_;
+  const auto *binding = ctx.bindings_.find(ctx.tree_);
+  const int64_t idx = binding->raw_token_index;
   if (idx >= ctx.raw_params_.count()) {
     ret = OB_INVALID_ARGUMENT;
     SQL_PC_LOG(WARN, "invalid argument", K(ret), K(idx), K(ctx.raw_params_.count()));

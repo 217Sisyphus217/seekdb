@@ -367,7 +367,8 @@ int ObRawExprResolverImpl::do_recursive_resolve(const ParseNode *node,
     ret = OB_SIZE_OVERFLOW;
   } else {
     LOG_DEBUG("resolve item", "item_type", get_type_name(node->type_));
-    if (IS_DATATYPE_OR_QUESTIONMARK_OP(node->type_)) {
+    if (IS_DATATYPE_OR_QUESTIONMARK_OP(node->type_)
+        || (ctx_.parameter_bindings_ != nullptr && ctx_.parameter_bindings_->find(node) != nullptr)) {
       if (OB_FAIL(process_datatype_or_questionmark(*node, expr))) {
       }
     } else {
@@ -1697,6 +1698,8 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
   ObConstRawExpr *c_expr = NULL;
   ObString literal_prefix;
   bool is_paramlize = false;
+  const ParameterBinding *binding = ctx_.parameter_bindings_ != nullptr
+      ? ctx_.parameter_bindings_->find(&node) : nullptr;
   const ObLengthSemantics default_length_semantics = (OB_NOT_NULL(ctx_.session_info_) ? ctx_.session_info_->get_actual_length_semantics() : LS_BYTE);
   const ObSQLSessionInfo *session_info = ctx_.session_info_;
   int64_t server_collation = CS_TYPE_INVALID;
@@ -1712,6 +1715,9 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
   }
 
   if (OB_FAIL(ret)) { // do nothing
+  } else if (binding != nullptr) {
+    val.set_unknown(binding->parameter_index);
+    val.set_param_meta(val.get_meta());
   } else if (OB_FAIL(ObResolverUtils::resolve_const(&node,
                                              session_info->get_stmt_type(),
                                              ctx_.expr_factory_.get_allocator(),
@@ -1728,8 +1734,11 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
                                              session_info->get_min_const_integer_precision(),
                                              nullptr != ctx_.secondary_namespace_,
                                              ctx_.formalize_const_int_prec_))) {
-  } else if (OB_FAIL(ctx_.expr_factory_.create_raw_expr(node.type_ == T_NCHAR ?
-                                                                              T_VARCHAR : node.type_, c_expr))) {
+  }
+  const ObItemType expr_type = binding != nullptr ? T_QUESTIONMARK
+      : node.type_ == T_NCHAR ? T_VARCHAR : node.type_;
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(ctx_.expr_factory_.create_raw_expr(expr_type, c_expr))) {
   } else if (OB_ISNULL(c_expr)) {
     ret = OB_ERR_UNEXPECTED;
   } else {
@@ -1741,7 +1750,7 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
     c_expr->set_expr_obj_meta(val.get_param_meta());
     c_expr->set_literal_prefix(literal_prefix);
     // for mysql mode distinguish tinyint and literal bool
-    if (T_BOOL == node.type_ || node.is_literal_bool_) {
+    if (T_BOOL == node.type_) {
       c_expr->set_is_literal_bool(true);
     }
     if (!val.is_unknown()) {
@@ -3175,6 +3184,7 @@ int ObRawExprResolverImpl::resolve_right_branch_of_in_op(const ParseNode *node,
             NULL != ctx_.secondary_namespace_,
             ctx_.session_info_,
             ctx_.param_list_,
+            ctx_.parameter_bindings_,
             ctx_.stmt_,
             ctx_.expr_factory_.get_allocator(),
             is_question_mark,
@@ -6468,27 +6478,31 @@ int ObRawExprResolverImpl::process_odbc_time_literals(const ObItemType dst_time_
   int ret = OB_SUCCESS;
   expr = NULL;
   bool is_valid_time_str = false;
+  const ParameterBinding *binding = ctx_.parameter_bindings_ != nullptr
+      ? ctx_.parameter_bindings_->find(expr_node) : nullptr;
+  const int64_t parameter_index = binding != nullptr ? binding->parameter_index
+      : expr_node != nullptr && expr_node->type_ == T_QUESTIONMARK ? expr_node->value_ : -1;
   if (OB_ISNULL(expr_node)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (T_VARCHAR != expr_node->type_ && T_QUESTIONMARK != expr_node->type_) {
     //do nothing
   } else {
     ObString time_str;
-    if (T_VARCHAR == expr_node->type_) {
+    if (T_VARCHAR == expr_node->type_ && binding == nullptr) {
       is_valid_time_str = true;
       time_str.assign_ptr(expr_node->str_value_, static_cast<int32_t>(expr_node->str_len_));
     } else if (OB_ISNULL(ctx_.param_list_)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (ctx_.param_list_->count() == 0) {
       //prepare phase of ps protocol, do nothing
-    } else if (OB_UNLIKELY(expr_node->value_ < 0 || expr_node->value_ >= ctx_.param_list_->count())) {
+    } else if (OB_UNLIKELY(parameter_index < 0 || parameter_index >= ctx_.param_list_->count())) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("index is out of range", K(expr_node->value_), K(ctx_.param_list_->count()));
-    } else if (!ctx_.param_list_->at(expr_node->value_).is_varchar()) {
+      LOG_WARN("index is out of range", K(parameter_index), K(ctx_.param_list_->count()));
+    } else if (!ctx_.param_list_->at(parameter_index).is_varchar()) {
       //do nothing
     } else {
       is_valid_time_str = true;
-      time_str = ctx_.param_list_->at(expr_node->value_).get_varchar();
+      time_str = ctx_.param_list_->at(parameter_index).get_varchar();
     }
     if (OB_SUCC(ret) && is_valid_time_str) {
       ParseNode tmp_node;
@@ -6503,12 +6517,12 @@ int ObRawExprResolverImpl::process_odbc_time_literals(const ObItemType dst_time_
           is_valid_time_str = false;
         } else {
         }
-      } else if (T_QUESTIONMARK == expr_node->type_) {//questionmark need add const constaint.
+      } else if (parameter_index >= 0) { // Bound temporal values constrain plan reuse.
         ObPCConstParamInfo const_param_info;
         if (OB_ISNULL(ctx_.query_ctx_)) {
           ret = OB_ERR_UNEXPECTED;
-        } else if (OB_FAIL(const_param_info.const_idx_.push_back(expr_node->value_))) {
-        } else if (OB_FAIL(const_param_info.const_params_.push_back(ctx_.param_list_->at(expr_node->value_)))) {
+        } else if (OB_FAIL(const_param_info.const_idx_.push_back(parameter_index))) {
+        } else if (OB_FAIL(const_param_info.const_params_.push_back(ctx_.param_list_->at(parameter_index)))) {
         } else if (OB_FAIL(ctx_.query_ctx_->all_plan_const_param_constraints_.push_back(const_param_info))) {
         } else {/* do nothing */}
       }
