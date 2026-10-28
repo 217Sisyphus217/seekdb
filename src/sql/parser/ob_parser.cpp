@@ -22,6 +22,7 @@
 #include "parse_malloc.h"
 #include "parse_node.h"
 #include "ob_sql_parser.h"
+#include "ob_fast_parser.h"
 #include "rust/sql_parser.h"
 #include "lib/container/ob_se_array.h"
 #include "lib/string/ob_sql_string.h"
@@ -615,65 +616,24 @@ int ObParser::parse_sql(const ObString &stmt,
                         ParseResult &parse_result,
                         const bool no_throw_parser_error)
 {
-  int ret = OB_SUCCESS;
-  ObSQLParser sql_parser(*(ObIAllocator*)(parse_result.malloc_pool_), sql_mode_);
-  ObString stmt_str = stmt;
-  if (OB_FAIL(sql_parser.parse(stmt.ptr(), stmt.length(), parse_result))) {
-    // if is multi_values_parser opt not need retry
-    if (!parse_result.is_multi_values_parser_) {
-      parse_result.enable_compatible_comment_ = false;
-      parse_result.mysql_compatible_comment_ = false;
-      if (OB_FAIL(sql_parser.parse(stmt.ptr(), stmt.length(), parse_result))) {
-        //do nothing.
-      }
-    }
-#ifdef NDEBUG
-    if (parse_result.may_contain_sensitive_data_) {
-      parse_result.contain_sensitive_data_ = true;
-      stmt_str = ObString(OB_MASKED_STR);
-    }
-#endif
-    if (!no_throw_parser_error) {
-      LOG_INFO("failed to parse stmt as sql", K(stmt_str), K(ret));
-    }
-  } else if (parse_result.is_dynamic_sql_) {
-    memmove(parse_result.no_param_sql_ + parse_result.no_param_sql_len_,
-            parse_result.input_sql_ + parse_result.pl_parse_info_.last_pl_symbol_pos_,
-            parse_result.input_sql_len_ - parse_result.pl_parse_info_.last_pl_symbol_pos_);
-    parse_result.no_param_sql_len_
-      += parse_result.input_sql_len_ - parse_result.pl_parse_info_.last_pl_symbol_pos_;
-  } else { /*do nothing*/ }
-#ifndef NDEBUG
-  parse_result.contain_sensitive_data_ = false;
-#endif
-  if (parse_result.is_fp_ || parse_result.is_multi_query_) {
-    if (OB_FAIL(ret) && !no_throw_parser_error) {
-    }
-  }
-  if (OB_SUCC(ret) &&
-      parse_result.enable_compatible_comment_ &&
-      parse_result.mysql_compatible_comment_) {
-    ret = OB_ERR_PARSE_SQL;
-  }
-  if (OB_FAIL(ret) && !no_throw_parser_error) {
-    auto err_charge_sql_mode = false;
-
-    int32_t error_offset = parse_result.start_col_ > 0 ? (parse_result.start_col_ - 1) : 0;
-    int32_t error_length = stmt.empty() ? 0 : get_well_formed_errlen(parse_result.charset_info_,
-                                                  stmt.ptr() + error_offset,
-                                                  stmt.length() - error_offset);
-
-
-
-    if (OB_ERR_PARSE_SQL == ret) {
-      LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
-                     error_length,
-                     stmt.empty() ? NULL : stmt.ptr() + error_offset,
-                     parse_result.line_ + 1);
-    } else {
-      // other errors handle outer side.
-    }
-  }
+  FPContext context(charsets4parser_);
+  context.sql_mode_ = sql_mode_;
+  context.enable_batched_multi_stmt_ = parse_result.is_batched_multi_enabled_split_;
+  context.parameterize_ = parse_result.need_parameterize_;
+  context.ignore_hint_ = parse_result.is_ignore_hint_;
+  ObFastParserResult fast;
+  int64_t parameters = 0;
+  int64_t sql_length = 0;
+  int ret = ObFastParser::parse(stmt, context, *allocator_, parse_result.no_param_sql_,
+                              sql_length, parse_result.param_nodes_, parameters,
+                              fast, fast.values_token_pos_);
+  parse_result.no_param_sql_len_ = sql_length;
+  parse_result.param_node_num_ = parameters;
+  parse_result.question_mark_ctx_ = fast.question_mark_ctx_;
+  parse_result.input_sql_ = stmt.ptr();
+  parse_result.input_sql_len_ = stmt.length();
+  parse_result.no_param_sql_buf_len_ = parse_result.no_param_sql_len_ + 1;
+  if (ret == OB_ERR_PARSER_SYNTAX) ret = OB_ERR_PARSE_SQL;
   return ret;
 }
 
@@ -748,8 +708,8 @@ int ObParser::parse_(const ObString &query,
     ret = OB_ERR_EMPTY_QUERY;
   }
 
-  if (OB_SUCC(ret) && (parse_result.is_fp_ || parse_result.is_dynamic_sql_)) {
-    int64_t new_length = parse_result.is_fp_ ? stmt.length() + 1 : stmt.length() * 2;
+  if (OB_SUCC(ret) && parse_result.is_dynamic_sql_) {
+    int64_t new_length = stmt.length() * 2;
     char *buf = (char *)parse_malloc(new_length, parse_result.malloc_pool_);
     if (OB_UNLIKELY(NULL == buf)) {
       ret = OB_ALLOCATE_MEMORY_FAILED;

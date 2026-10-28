@@ -49,6 +49,10 @@ int ObFastParser::parse(const common::ObString &stmt,
   if (OB_ISNULL(fp.param_node_list_)) {
     param_list = NULL;
   }
+  if (!fp_ctx.parameterize_) {
+    param_list = nullptr;
+    param_num = 0;
+  }
   return ret;
 }
 
@@ -74,6 +78,10 @@ int ObFastParser::parse(const common::ObString &stmt,
       }
     }
   }
+  if (!fp_ctx.parameterize_) {
+    param_list = nullptr;
+    param_num = 0;
+  }
   return ret;
 }
 
@@ -95,6 +103,8 @@ ObFastParserBase::ObFastParserBase(ObIAllocator &allocator, const FPContext fp_c
   charset_type_ = ObCharset::charset_type_by_coll(fp_ctx.charsets4parser_.string_collation_);
   charset_info_ = ObCharset::get_charset(fp_ctx.charsets4parser_.string_collation_);
   is_format_ = fp_ctx.is_format_;
+  parameterize_ = fp_ctx.parameterize_;
+  ignore_hint_ = fp_ctx.ignore_hint_;
   col_type_ = fp_ctx.charsets4parser_.string_collation_;
   alloc_len_ = 0;
 }
@@ -916,6 +926,10 @@ int ObFastParserBase::process_hint()
   if (IS_MULTI_SPACE(raw_sql_.cur_pos_, space_len) || '/' == ch) {
     int64_t hint_begin_pos = is_hint_begin(raw_sql_.cur_pos_);
     if (-1 != hint_begin_pos) {
+      int64_t comment_begin = raw_sql_.cur_pos_;
+      if (ignore_hint_) {
+        while (IS_MULTI_SPACE(comment_begin, space_len)) comment_begin += space_len;
+      }
       // all the contents in the hint remain unchanged
       raw_sql_.cur_pos_ = hint_begin_pos;
       char next_ch = raw_sql_.peek();
@@ -928,6 +942,11 @@ int ObFastParserBase::process_hint()
         cur_token_type_ = NORMAL_TOKEN;
         raw_sql_.scan(); // scan '\/'
         raw_sql_.scan(); // scan the first character of the new token
+        if (ignore_hint_) {
+          copy_end_pos_ = comment_begin;
+          append_no_param_sql();
+          copy_begin_pos_ = copy_end_pos_ = raw_sql_.cur_pos_;
+        }
       } else {
         ret = OB_ERR_PARSER_SYNTAX;
       }
@@ -1757,6 +1776,7 @@ inline int ObFastParserBase::try_check_status()
 
 inline void ObFastParserBase::process_token()
 {
+  if (!parameterize_ && cur_token_type_ == PARAM_TOKEN) cur_token_type_ = NORMAL_TOKEN;
   if (NORMAL_TOKEN == cur_token_type_) {
     copy_end_pos_ = raw_sql_.cur_pos_;
   } else {

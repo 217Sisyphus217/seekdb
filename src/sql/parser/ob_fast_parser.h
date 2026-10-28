@@ -36,6 +36,8 @@ public:
 	ObCharsets4Parser charsets4parser_;
 	ObSQLMode sql_mode_;
   bool is_format_;
+  bool parameterize_ = true;
+  bool ignore_hint_ = false;
 
 	FPContext()
 		: enable_batched_multi_stmt_(false),
@@ -620,6 +622,8 @@ public:
 	ParseNextTokenFunc parse_next_token_func_;
 	ProcessIdfFunc process_idf_func_;
   bool is_format_;
+  bool parameterize_;
+  bool ignore_hint_;
   bool need_caseup_;
   int alloc_len_;
 	common::ObCollationType col_type_;
