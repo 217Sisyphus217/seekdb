@@ -1399,7 +1399,8 @@ peg::parser! {
                 / kw("as") value:password() { (value,0) }) {
                 (password.0,Node::new(Kind::Bool,vec![]).value(password.1),Node::optional(plugin))
             }
-        rule user_spec() -> Node = name:account_name() host:user_variable()? auth:authentication()? {
+        rule user_spec(authenticated: bool) -> Node = name:account_name() host:user_variable()?
+            auth:(enabled(authenticated) value:authentication() { value })? {
             let (password,encrypted,plugin)=auth.unwrap_or_else(|| (Node::missing(),Node::new(Kind::Bool,vec![]),Node::missing()));
             Node::new(Kind::UserSpec,vec![name,password,encrypted,Node::optional(host),plugin])
         }
@@ -1456,8 +1457,38 @@ peg::parser! {
             Node::new(Kind::PrivilegeObject,vec![]).value(value)
         }
         rule accounts() -> Node = values:(account() ++ ("," _)) { Node::new(Kind::Users,values) }
+        rule roles() -> Vec<Node> = values:(user_spec(false) ++ ("," _)) { values }
+        rule granted_roles() -> Vec<Node> = values:((!privilege_name() value:user_spec(false) { value }) ++ ("," _)) { values }
+        rule role_selection(session: bool) -> Node
+            = kw("all") except:(enabled(session) kw("except") roles:granted_roles() { roles })? {
+                let mut children=vec![Node::new(Kind::HiddenInt,vec![]).value(if except.is_some() { 2 } else { 1 })];
+                if let Some(roles)=except { children.push(Node::new(Kind::Link,roles)); }
+                Node::new(Kind::DefaultRole,children)
+            }
+            / code:(kw("none") { 3 } / enabled(session) kw("default") { 4 }) {
+                Node::new(Kind::DefaultRole,vec![Node::new(Kind::HiddenInt,vec![]).value(code)])
+            }
+            / roles:roles() { Node::new(Kind::DefaultRole,vec![Node::new(Kind::HiddenInt,vec![]),Node::new(Kind::Link,roles)]) }
+        rule role_statement() -> Node
+            = kw("create") kw("role") absent:if_not_exists()? roles:roles() {
+                Node::new(Kind::CreateRole,vec![Node::new(Kind::Users,roles),Node::optional(absent)])
+            }
+            / kw("drop") kw("role") exists:if_exists()? roles:accounts() { Node::new(Kind::DropRole,vec![roles,Node::optional(exists)]) }
+            / kw("grant") roles:granted_roles() kw("to") users:roles() option:(kw("with") kw("admin") kw("option") { Node::new(Kind::WithAdminOption,vec![]) })? {
+                Node::new(Kind::GrantRole,vec![Node::new(Kind::Users,roles),Node::new(Kind::Users,vec![Node::new(Kind::Users,users)]),Node::optional(option)])
+            }
+            / kw("revoke") exists:if_exists()? roles:granted_roles() kw("from") users:roles()
+                ignore:(kw("ignore") kw("unknown") kw("user") { Node::new(Kind::IgnoreUnknownUser,vec![]) })? {
+                    Node::new(Kind::SystemRevoke,vec![Node::new(Kind::RevokeRole,vec![Node::new(Kind::Users,roles),Node::new(Kind::Users,vec![Node::new(Kind::Users,users)]),Node::optional(exists),Node::optional(ignore)])])
+                }
+            / kw("set") kw("role") selection:role_selection(true) { Node::new(Kind::SetRole,vec![selection]) }
+            / kw("set") kw("default") kw("role") selection:role_selection(false) kw("to") users:accounts() { Node::new(Kind::AlterUserDefaultRole,vec![users,selection]) }
+            / kw("alter") kw("user") user:account() kw("default") kw("role") selection:role_selection(false) { Node::new(Kind::AlterUserDefaultRole,vec![user,selection]) }
+        rule kill() -> Node = kw("kill") query:(kw("query") { true } / kw("connection") { false })? target:expr(0) {
+            Node::new(Kind::Kill,vec![Node::new(Kind::Bool,vec![]).value(u64::from(query.unwrap_or(false))),target])
+        }
         rule account_statement() -> Node
-            = kw("create") kw("user") absent:if_not_exists()? users:(user_spec() ++ ("," _)) {
+            = kw("create") kw("user") absent:if_not_exists()? users:(user_spec(true) ++ ("," _)) {
                 Node::new(Kind::CreateUser,vec![Node::optional(absent),Node::new(Kind::Users,users),Node::missing(),Node::missing()])
             }
             / kw("drop") kw("user") exists:if_exists()? users:accounts() { Node::new(Kind::DropUser,vec![users,Node::optional(exists)]) }
@@ -1469,7 +1500,7 @@ peg::parser! {
                     Node::new(Kind::SetPassword,vec![Node::optional(user),auth.0,Node::new(Kind::Bool,vec![]).value(auth.1),Node::missing(),Node::missing()])
                 }
             / kw("grant") privileges:privileges() kw("on") object:privilege_object()? level:privilege_level()
-                kw("to") users:(user_spec() ++ ("," _)) option:(kw("with") kw("grant") kw("option"))? {
+                kw("to") users:(user_spec(true) ++ ("," _)) option:(kw("with") kw("grant") kw("option"))? {
                     let mut privileges=privileges;
                     if option.is_some() { privileges.push(Node::new(Kind::Privilege,vec![]).text("grant option".into())); }
                     Node::new(Kind::Grant,vec![Node::new(Kind::Privileges,privileges),Node::optional(object),level,Node::new(Kind::Users,users)])
@@ -1675,7 +1706,7 @@ peg::parser! {
             value:(select(0) / insert() / update() / delete()) {
                 Node::new(Kind::Explain,vec![format.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),display.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),Node::missing(),Node::missing(),value])
         }
-        rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / setting() / explain() / show() / alter_system() / prepared_statement() / diagnostics() / analyze()
+        rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / role_statement() / setting() / explain() / show() / alter_system() / prepared_statement() / diagnostics() / analyze() / kill()
         pub rule query() -> Node = _ value:(package_statement() / routine_statement() / pl_call() / sql_statement()) (";" _)* { value }
             / text:$(_ (";" _)*) { Node::new(Kind::EmptyQuery,vec![]).value(u64::from(text.chars().any(|ch| !ch.is_ascii_whitespace() && ch!=';'))) }
     }

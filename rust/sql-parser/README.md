@@ -25,6 +25,7 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 已接入 CAST／CONVERT、二进制字面量、行锁、VALUES、LATERAL、排名和聚合窗口函数、
 命名窗口和数值窗口边界，以及启动和 schema 刷新使用的 ALTER SYSTEM 和基础 hint。
 支持基本账户创建／删除、改密、授权／撤销和 SHOW GRANTS，以及 SQL PREPARE／EXECUTE。
+支持角色创建／删除、授予／撤销、启用和默认角色设置，以及 KILL QUERY／CONNECTION。
 已接入存储过程／函数的创建、调用和执行时解析，以及系统包声明和包体解析。
 支持参数、变量、条件、循环、游标、异常处理、GET DIAGNOSTICS、SELECT INTO、限定名称函数调用和 JSON_TABLE。
 内部 SQL 的命名参数保留首次出现顺序，重复引用共用参数编号。

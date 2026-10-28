@@ -550,6 +550,17 @@ ObItemType node_type(const peg::Node &node)
     case Kind::NamedWindow: return T_WIN_NAMED_WINDOW;
     case Kind::CreateUser: return T_CREATE_USER;
     case Kind::DropUser: return T_DROP_USER;
+    case Kind::CreateRole: return T_CREATE_ROLE;
+    case Kind::DropRole: return T_DROP_ROLE;
+    case Kind::GrantRole: return T_GRANT_ROLE;
+    case Kind::RevokeRole: return T_REVOKE_ROLE;
+    case Kind::SystemRevoke: return T_SYSTEM_REVOKE;
+    case Kind::WithAdminOption: return T_WITH_ADMIN_OPTION;
+    case Kind::IgnoreUnknownUser: return T_IGNORE_UNKNOWN_USER;
+    case Kind::SetRole: return T_SET_ROLE;
+    case Kind::DefaultRole: return T_DEFAULT_ROLE;
+    case Kind::AlterUserDefaultRole: return T_ALTER_USER_DEFAULT_ROLE;
+    case Kind::Kill: return T_KILL;
     case Kind::Users: return T_USERS;
     case Kind::UserSpec: return T_CREATE_USER_SPEC;
     case Kind::UserHost: return T_USER_WITH_HOST_NAME;
