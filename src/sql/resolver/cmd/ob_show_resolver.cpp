@@ -16,7 +16,6 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/cmd/ob_show_resolver.h"
-#include "sql/resolver/dcl/ob_grant_resolver.h"
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/resolver/cmd/ob_show_table_status_sql.h"
 #include "sql/printer/ob_schema_printer.h"
@@ -729,7 +728,6 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             uint64_t show_user_id = OB_INVALID_ID;
             ObString show_user_name;
             ObString show_host_name;
-            ObSqlString role_list_str;
             show_resv_ctx.stmt_type_ = stmt::T_SHOW_GRANTS;
             if (NULL == parse_tree.children_[0]) {
               show_user_id = user_id;
@@ -758,51 +756,12 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                                                       show_user_id))) {
               }
             }
-            if (OB_SUCC(ret)
-                && OB_NOT_NULL(parse_tree.children_[1])
-                && parse_tree.children_[1]->num_child_ > 0) {
-              ParseNode *role_list = parse_tree.children_[1];
-              ObGrantResolver dcl_resolver(params_);
-              const ObUserInfo *user_info = NULL;
-              OZ (role_list_str.append_fmt("%lu", show_user_id));
-              OZ (schema_checker_->get_user_info(show_user_id, user_info));
-              for (int i = 0; OB_SUCC(ret) && i < role_list->num_child_; i++) {
-                ObString user_name;
-                ObString host_name;
-                uint64_t role_id = OB_INVALID_ID;
-                OZ (dcl_resolver.resolve_user_host(role_list->children_[i], user_name, host_name));
-                OZ (schema_checker_->get_user_id(user_name, host_name, role_id));
-                if (OB_USER_NOT_EXIST == ret) {
-                  ret = OB_ERR_NO_GRANT_DEFINED_FOR_USER;
-                  LOG_USER_ERROR(OB_ERR_NO_GRANT_DEFINED_FOR_USER,
-                                 user_name.length(), user_name.ptr(), host_name.length(), host_name.ptr());
-                }
-                if (OB_SUCC(ret) && !has_exist_in_array(user_info->get_role_id_array(), role_id)) {
-                  ret = OB_ERR_ROLE_NOT_GRANTED_TO;
-                  LOG_USER_ERROR(OB_ERR_ROLE_NOT_GRANTED_TO,
-                                 user_name.length(), user_name.ptr(),
-                                 host_name.length(), host_name.ptr(),
-                                 user_info->get_user_name_str().length(),
-                                 user_info->get_user_name_str().ptr(),
-                                 user_info->get_host_name_str().length(),
-                                 user_info->get_host_name_str().ptr());
-                }
-                OZ (role_list_str.append_fmt(",%lu", role_id));
-              }
-            }
             if (OB_SUCC(ret)) {
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_GRANTS, show_user_name.length(), show_user_name.ptr(), show_host_name.length(), show_host_name.ptr());
-              if (role_list_str.length() > 0) {
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_GRANTS_USING_ROLES,
-                               OB_SYS_DATABASE_NAME,
-                               OB_ALL_VIRTUAL_PRIVILEGE_GRANT_TNAME,
-                               role_list_str.string().length(), role_list_str.string().ptr());
-              } else {
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_GRANTS,
-                               OB_SYS_DATABASE_NAME,
-                               OB_ALL_VIRTUAL_PRIVILEGE_GRANT_TNAME,
-                               show_user_id);
-              }
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_GRANTS,
+                             OB_SYS_DATABASE_NAME,
+                             OB_ALL_VIRTUAL_PRIVILEGE_GRANT_TNAME,
+                             show_user_id);
             }
           }
         }();
@@ -2470,11 +2429,6 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_GRANTS,
                        "SELECT grants AS `Grants for %.*s@%.*s` ",
                        "SELECT grants FROM %s.%s WHERE user_id = %ld",
                        R"(SELECT "GRANTS" AS "GRANTS" FROM %s.%s WHERE USER_ID = %ld)",
-                       NULL);
-DEFINE_SHOW_CLAUSE_SET(SHOW_GRANTS_USING_ROLES,
-                       "SELECT grants AS `Grants for %.*s@%.*s` ",
-                       "SELECT grants FROM %s.%s WHERE user_id in (%.*s)",
-                       R"(SELECT "GRANTS" AS "GRANTS" FROM %s.%s WHERE USER_ID IN (%.*s))",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_PROCESSLIST,
                        NULL,

@@ -615,22 +615,38 @@ pub(crate) mod ffi {
         DropRole,
         GrantRole,
         RevokeRole,
-        SystemRevoke,
         WithAdminOption,
+        WithGrantOption,
         IgnoreUnknownUser,
         SetRole,
-        DefaultRole,
+        SetDefaultRole,
+        ListedRoles,
+        AllRoles,
+        AllExceptRoles,
+        NoRoles,
+        DefaultRoles,
         AlterUserDefaultRole,
         Kill,
         Users,
+        Roles,
         UserSpec,
         UserHost,
         Password,
+        PlaintextAuthentication,
+        EncodedAuthentication,
+        AuthenticationPlugin,
         SetPassword,
         Privilege,
         Privileges,
-        PrivilegeLevel,
-        PrivilegeObject,
+        GlobalPrivilegeTarget,
+        DatabasePrivilegeTarget,
+        ObjectPrivilegeTarget,
+        WildcardQualifiedObjectTarget,
+        TargetDatabase,
+        TargetObject,
+        TablePrivilegeObject,
+        ProcedurePrivilegeObject,
+        FunctionPrivilegeObject,
         Grant,
         Revoke,
         RevokeAll,
@@ -814,6 +830,58 @@ pub(crate) mod ffi {
         error: String,
     }
 
+    enum AccountKind {
+        Named,
+        Current,
+    }
+
+    enum AccountNameForm {
+        Identifier,
+        String,
+    }
+
+    enum AuthenticationKind {
+        Absent,
+        Plaintext,
+        Encoded,
+    }
+
+    enum RoleSelection {
+        Listed,
+        All,
+        AllExcept,
+        None,
+        Default,
+    }
+
+    enum PrivilegeScope {
+        Global,
+        Database,
+        Object,
+        WildcardQualifiedObject,
+    }
+
+    enum PrivilegeObject {
+        Unspecified,
+        Table,
+        Procedure,
+        Function,
+    }
+
+    struct AccessOptions {
+        if_exists: bool,
+        if_not_exists: bool,
+        grant_option: bool,
+        admin_option: bool,
+        ignore_unknown_user: bool,
+    }
+
+    struct PrivilegeTarget {
+        scope: PrivilegeScope,
+        object: PrivilegeObject,
+        explicit_database: bool,
+    }
+
     extern "Rust" {
         type Scanner<'a>;
         // The SQL buffer must remain valid and unchanged until the scanner is dropped.
@@ -830,6 +898,25 @@ pub(crate) mod ffi {
         fn transaction_options(node: &Node) -> TransactionOptions;
         fn prepared_source(node: &Node) -> &Node;
         fn execution_arguments(node: &Node) -> &[Node];
+        fn access_options(statement: &Node) -> AccessOptions;
+        fn access_accounts(statement: &Node) -> &[Node];
+        fn access_roles(statement: &Node) -> &[Node];
+        fn access_privileges(statement: &Node) -> &[Node];
+        fn access_role_selection(statement: &Node) -> RoleSelection;
+        fn account_kind(spec: &Node) -> AccountKind;
+        fn account_name_form(spec: &Node) -> AccountNameForm;
+        fn account_name(spec: &Node) -> &str;
+        fn account_has_host(spec: &Node) -> bool;
+        fn account_host(spec: &Node) -> &str;
+        fn account_authentication(spec: &Node) -> AuthenticationKind;
+        fn account_password(spec: &Node) -> &str;
+        fn account_has_plugin(spec: &Node) -> bool;
+        fn account_plugin(spec: &Node) -> &str;
+        fn privilege_name(privilege: &Node) -> &str;
+        fn privilege_columns(privilege: &Node) -> &[Node];
+        fn access_target(statement: &Node) -> PrivilegeTarget;
+        fn access_target_database(statement: &Node) -> &str;
+        fn access_target_object(statement: &Node) -> &str;
         fn parse_sql(
             sql: &[u8],
             mode: SqlMode,
@@ -838,6 +925,12 @@ pub(crate) mod ffi {
     }
 }
 
+use crate::access::{
+    access_accounts, access_options, access_privileges, access_role_selection, access_roles,
+    access_target, access_target_database, access_target_object, account_authentication,
+    account_has_host, account_has_plugin, account_host, account_kind, account_name,
+    account_name_form, account_password, account_plugin, privilege_columns, privilege_name,
+};
 use crate::fts::parse_search_query;
 use crate::inspect::inspect_expression;
 use crate::scan::{begin_scan, finish_scan, Scanner};

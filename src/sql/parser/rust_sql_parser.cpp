@@ -24,7 +24,6 @@
 #include "lib/ob_date_unit_type.h"
 #include "share/ob_errno.h"
 #include "share/cache/ob_cache_type.h"
-#include "share/schema/ob_priv_type.h"
 #include "lib/oblog/ob_log.h"
 #include <algorithm>
 
@@ -33,19 +32,39 @@ using common::OB_ERR_PARSE_SQL;
 namespace {
 using Kind = peg::NodeKind;
 
-bool uses_native_resolver(const peg::Node &node)
+struct NativeStatementTraits
 {
-  switch (node.kind) {
-    case Kind::Begin:
-    case Kind::Commit:
-    case Kind::Rollback:
-    case Kind::Savepoint:
-    case Kind::ReleaseSavepoint:
-    case Kind::RollbackSavepoint:
-    case Kind::Prepare:
-    case Kind::Execute:
-    case Kind::Deallocate: return true;
-    default: return false;
+  stmt::StmtType type;
+  bool readonly;
+  bool implicit_commit;
+};
+
+std::optional<NativeStatementTraits> native_statement_traits(Kind kind)
+{
+  switch (kind) {
+    case Kind::Begin: return NativeStatementTraits{stmt::T_START_TRANS, true, false};
+    case Kind::Commit: return NativeStatementTraits{stmt::T_END_TRANS, true, false};
+    case Kind::Rollback: return NativeStatementTraits{stmt::T_END_TRANS, true, false};
+    case Kind::Savepoint: return NativeStatementTraits{stmt::T_CREATE_SAVEPOINT, false, false};
+    case Kind::ReleaseSavepoint: return NativeStatementTraits{stmt::T_RELEASE_SAVEPOINT, false, false};
+    case Kind::RollbackSavepoint: return NativeStatementTraits{stmt::T_ROLLBACK_SAVEPOINT, false, false};
+    case Kind::Prepare: return NativeStatementTraits{stmt::T_PREPARE, false, false};
+    case Kind::Execute: return NativeStatementTraits{stmt::T_EXECUTE, false, false};
+    case Kind::Deallocate: return NativeStatementTraits{stmt::T_DEALLOCATE, false, false};
+    case Kind::CreateUser: return NativeStatementTraits{stmt::T_CREATE_USER, false, true};
+    case Kind::DropUser: return NativeStatementTraits{stmt::T_DROP_USER, false, true};
+    case Kind::SetPassword: return NativeStatementTraits{stmt::T_SET_PASSWORD, false, true};
+    case Kind::CreateRole: return NativeStatementTraits{stmt::T_CREATE_ROLE, false, false};
+    case Kind::DropRole: return NativeStatementTraits{stmt::T_DROP_ROLE, false, false};
+    case Kind::Grant: return NativeStatementTraits{stmt::T_GRANT, false, true};
+    case Kind::Revoke: return NativeStatementTraits{stmt::T_REVOKE, false, true};
+    case Kind::RevokeAll: return NativeStatementTraits{stmt::T_REVOKE, false, true};
+    case Kind::GrantRole: return NativeStatementTraits{stmt::T_GRANT_ROLE, false, false};
+    case Kind::RevokeRole: return NativeStatementTraits{stmt::T_REVOKE_ROLE, false, false};
+    case Kind::SetRole: return NativeStatementTraits{stmt::T_SET_ROLE, true, false};
+    case Kind::SetDefaultRole: return NativeStatementTraits{stmt::T_ALTER_USER_ROLE, false, false};
+    case Kind::AlterUserDefaultRole: return NativeStatementTraits{stmt::T_ALTER_USER_ROLE, false, false};
+    default: return std::nullopt;
   }
 }
 
@@ -621,31 +640,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::ReadConsistency: return T_READ_CONSISTENCY;
     case Kind::NamedWindows: return T_WIN_NAMED_WINDOWS;
     case Kind::NamedWindow: return T_WIN_NAMED_WINDOW;
-    case Kind::CreateUser: return T_CREATE_USER;
-    case Kind::DropUser: return T_DROP_USER;
-    case Kind::CreateRole: return T_CREATE_ROLE;
-    case Kind::DropRole: return T_DROP_ROLE;
-    case Kind::GrantRole: return T_GRANT_ROLE;
-    case Kind::RevokeRole: return T_REVOKE_ROLE;
-    case Kind::SystemRevoke: return T_SYSTEM_REVOKE;
-    case Kind::WithAdminOption: return T_WITH_ADMIN_OPTION;
-    case Kind::IgnoreUnknownUser: return T_IGNORE_UNKNOWN_USER;
-    case Kind::SetRole: return T_SET_ROLE;
-    case Kind::DefaultRole: return T_DEFAULT_ROLE;
-    case Kind::AlterUserDefaultRole: return T_ALTER_USER_DEFAULT_ROLE;
     case Kind::Kill: return T_KILL;
-    case Kind::Users: return T_USERS;
-    case Kind::UserSpec: return T_CREATE_USER_SPEC;
     case Kind::UserHost: return T_USER_WITH_HOST_NAME;
-    case Kind::Password: return T_VARCHAR;
-    case Kind::SetPassword: return T_SET_PASSWORD;
-    case Kind::Privilege: return T_PRIV_TYPE;
-    case Kind::Privileges: return T_PRIVILEGES;
-    case Kind::PrivilegeLevel: return T_PRIV_LEVEL;
-    case Kind::PrivilegeObject: return T_PRIV_OBJECT;
-    case Kind::Grant: return T_GRANT;
-    case Kind::Revoke: return T_REVOKE;
-    case Kind::RevokeAll: return T_REVOKE_ALL;
     case Kind::ShowGrants: return T_SHOW_GRANTS;
     case Kind::CreateProcedure: return T_SP_CREATE;
     case Kind::CreateTrigger: return T_TG_CREATE;
@@ -732,47 +728,6 @@ ObItemType node_type(const peg::Node &node)
   }
 }
 
-ObPrivType privilege_type(const peg::Node &node)
-{
-  if (node.text == "all") return OB_PRIV_ALL;
-  if (node.text == "alter") return OB_PRIV_ALTER;
-  if (node.text == "create") return OB_PRIV_CREATE;
-  if (node.text == "create user") return OB_PRIV_CREATE_USER;
-  if (node.text == "delete") return OB_PRIV_DELETE;
-  if (node.text == "drop") return OB_PRIV_DROP;
-  if (node.text == "grant option") return OB_PRIV_GRANT;
-  if (node.text == "insert") return OB_PRIV_INSERT;
-  if (node.text == "update") return OB_PRIV_UPDATE;
-  if (node.text == "select") return OB_PRIV_SELECT;
-  if (node.text == "index") return OB_PRIV_INDEX;
-  if (node.text == "create view") return OB_PRIV_CREATE_VIEW;
-  if (node.text == "show view") return OB_PRIV_SHOW_VIEW;
-  if (node.text == "show databases") return OB_PRIV_SHOW_DB;
-  if (node.text == "super") return OB_PRIV_SUPER;
-  if (node.text == "process") return OB_PRIV_PROCESS;
-  if (node.text == "file") return OB_PRIV_FILE;
-  if (node.text == "replication slave") return OB_PRIV_REPL_SLAVE;
-  if (node.text == "replication client") return OB_PRIV_REPL_CLIENT;
-  if (node.text == "alter system") return OB_PRIV_ALTER_SYSTEM;
-  if (node.text == "execute") return OB_PRIV_EXECUTE;
-  if (node.text == "alter routine") return OB_PRIV_ALTER_ROUTINE;
-  if (node.text == "create routine") return OB_PRIV_CREATE_ROUTINE;
-  if (node.text == "shutdown") return OB_PRIV_SHUTDOWN;
-  if (node.text == "reload") return OB_PRIV_RELOAD;
-  if (node.text == "lock tables") return OB_PRIV_LOCK_TABLE;
-  if (node.text == "references") return OB_PRIV_REFERENCES;
-  if (node.text == "create role") return OB_PRIV_CREATE_ROLE;
-  if (node.text == "drop role") return OB_PRIV_DROP_ROLE;
-  if (node.text == "trigger") return OB_PRIV_TRIGGER;
-  if (node.text == "read") return OB_PRIV_READ;
-  if (node.text == "write") return OB_PRIV_WRITE;
-  if (node.text == "create ai model") return OB_PRIV_CREATE_AI_MODEL;
-  if (node.text == "alter ai model") return OB_PRIV_ALTER_AI_MODEL;
-  if (node.text == "drop ai model") return OB_PRIV_DROP_AI_MODEL;
-  if (node.text == "access ai model") return OB_PRIV_ACCESS_AI_MODEL;
-  if (node.text == "usage") return OB_PRIV_SET_EMPTY;
-  return -1;
-}
 
 int build_type(const peg::Node &source, void *pool, ParseNode *&node)
 {
@@ -898,7 +853,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
       || type == T_PACKAGE_CREATE || type == T_PACKAGE_CREATE_BODY;
   if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
   const bool native_sql = source.kind == Kind::PlSql && source.children.size() == 1
-      && uses_native_resolver(source.children[0]);
+      && native_statement_traits(source.children[0].kind).has_value();
   const size_t child_count = native_sql ? 0 : source.children.size();
   node = new_node(pool, type, type == T_SELECT ? PARSE_SELECT_MAX_IDX : child_count);
   if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
@@ -1004,14 +959,6 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     node->str_value_ = query;
     node->str_len_ = length;
     node->pl_str_off_ = -1;
-  }
-  if (source.kind == Kind::Privilege) {
-    node->value_ = privilege_type(source);
-    if (node->value_ < 0) return common::OB_ERR_UNEXPECTED;
-  }
-  if (source.kind == Kind::Password) {
-    node->stmt_loc_.first_column_ = source.start;
-    node->stmt_loc_.last_column_ = source.end - 1;
   }
   if (source.kind == Kind::StringAlias) {
     node->param_num_ = 1;
@@ -1186,7 +1133,7 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
   }
   int ret = fill_parse_metadata(sql, parsed, result);
   if (ret != common::OB_SUCCESS) return ret;
-  if (uses_native_resolver(parsed.root)) {
+  if (native_statement_traits(parsed.root.kind).has_value()) {
     if (owner == nullptr) return common::OB_ERR_UNEXPECTED;
     owner->syntax_.emplace(std::move(parsed));
     return common::OB_SUCCESS;
@@ -1197,18 +1144,9 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
 int ParsedSql::statement_type(stmt::StmtType &type) const
 {
   if (!syntax_) return ObResolverUtils::resolve_stmt_type(legacy_, type);
-  switch (syntax_->root.kind) {
-    case peg::NodeKind::Prepare: type = stmt::T_PREPARE; break;
-    case peg::NodeKind::Execute: type = stmt::T_EXECUTE; break;
-    case peg::NodeKind::Deallocate: type = stmt::T_DEALLOCATE; break;
-    case peg::NodeKind::Begin: type = stmt::T_START_TRANS; break;
-    case peg::NodeKind::Commit:
-    case peg::NodeKind::Rollback: type = stmt::T_END_TRANS; break;
-    case peg::NodeKind::Savepoint: type = stmt::T_CREATE_SAVEPOINT; break;
-    case peg::NodeKind::RollbackSavepoint: type = stmt::T_ROLLBACK_SAVEPOINT; break;
-    case peg::NodeKind::ReleaseSavepoint: type = stmt::T_RELEASE_SAVEPOINT; break;
-    default: return common::OB_ERR_UNEXPECTED;
-  }
+  const auto traits = native_statement_traits(syntax_->root.kind);
+  if (!traits) return common::OB_ERR_UNEXPECTED;
+  type = traits->type;
   return common::OB_SUCCESS;
 }
 
@@ -1222,8 +1160,9 @@ void ParsedSql::sql_traits(ObSqlTraits &traits)
 {
   statement_type(traits.stmt_type_);
   if (syntax_) {
-    traits.is_readonly_stmt_ = syntax_->root.kind == peg::NodeKind::Begin || is_end_transaction();
-    traits.is_cause_implicit_commit_ = false;
+    const auto syntax_traits = *native_statement_traits(syntax_->root.kind);
+    traits.is_readonly_stmt_ = syntax_traits.readonly;
+    traits.is_cause_implicit_commit_ = syntax_traits.implicit_commit;
     traits.is_commit_stmt_ = syntax_->root.kind == peg::NodeKind::Commit;
     traits.allowed_on_standby_ = false;
   } else {

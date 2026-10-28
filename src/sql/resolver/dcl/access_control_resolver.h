@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 OceanBase.
+ * Copyright (c) 2026 OceanBase.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,26 +14,13 @@
  * limitations under the License.
  */
 
-#ifndef _OB_DROP_ROLE_RESOLVER_H
-#define _OB_DROP_ROLE_RESOLVER_H 1
+#pragma once
 
-#include "sql/resolver/ddl/ob_ddl_resolver.h"
-#include "sql/resolver/dcl/ob_dcl_resolver.h"
-namespace oceanbase
+namespace oceanbase::sql
 {
-namespace sql
-{
-class ObDropRoleResolver: public ObDCLResolver
-{
-public:
-  explicit ObDropRoleResolver(ObResolverParams &params);
-  virtual ~ObDropRoleResolver();
+namespace peg { struct Node; }
+struct ObResolverParams;
+class ObStmt;
 
-  virtual int resolve(const ParseNode &parse_tree);
-private:
-  // disallow copy
-  DISALLOW_COPY_AND_ASSIGN(ObDropRoleResolver);
-};
-}//namespace sql
-}//namespace oceanbase
-#endif
+int resolve_access_control(const peg::Node &node, ObResolverParams &params, ObStmt *&stmt);
+}

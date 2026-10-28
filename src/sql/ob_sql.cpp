@@ -3195,8 +3195,10 @@ int ObSql::parser_and_check(const ObString &outlined_stmt,
     } else {
       // parser returns an unknown error code, need to disconnect from the client
     }
+    if (OB_SUCC(ret) && ObStmt::is_ddl_stmt(stmt_type, true)) {
+      THIS_WORKER.set_timeout_ts(session->get_query_start_time() + config::_ob_ddl_timeout());
+    }
     if (OB_SUCC(ret) && parsed.statement() == nullptr) {
-      stmt::StmtType stmt_type = stmt::T_NONE;
       if (OB_ISNULL(parse_result.result_tree_)) {
         ret = OB_INVALID_ARGUMENT;
       } else if (OB_ISNULL(parse_result.result_tree_->children_)
@@ -3215,16 +3217,12 @@ int ObSql::parser_and_check(const ObString &outlined_stmt,
           int32_t str_len = static_cast<int32_t>(strlen(err_msg));
           int32_t line_no = 1;
           LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX), str_len, err_msg, line_no);
-        } else if (OB_FAIL(parsed.statement_type(stmt_type))) {
         } else {
           ObItemType type = children_node->type_;
           // If it is not a DML statement, then do not enter plan cache
           ObPlanCache *plan_cache = NULL;
           if (T_SHOW_VARIABLES == type) {
             is_show_variables = true;
-          }
-          if (ObStmt::is_ddl_stmt(stmt_type, true)) {
-            THIS_WORKER.set_timeout_ts(session->get_query_start_time() + config::_ob_ddl_timeout());
           }
           if (IS_DML_STMT(type) || is_show_variables) {
             if (OB_UNLIKELY(NULL == (plan_cache = plan_cache_))) {

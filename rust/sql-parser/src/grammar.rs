@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{lex::decode_string as decode, node::*, SqlMode};
+use crate::{access, lex::decode_string as decode, node::*, SqlMode};
 use std::borrow::Cow;
 
 const WEIGHT_STRING_PAD_WITH_SPACE: u64 = 0x40;
@@ -1507,16 +1507,21 @@ peg::parser! {
             Node::new(Kind::UserHost,vec![name,Node::optional(host)])
         }
         rule password() -> Node = value:string() { Node { kind:Kind::Password,..value } }
-        rule authentication() -> (Node,Node,Node) = kw("identified")
-            plugin:(kw("with") value:account_name() { value })?
-            password:(kw("by") encoded:kw("password")? value:password() { (value,u64::from(encoded.is_none())) }
-                / kw("as") value:password() { (value,0) }) {
-                (password.0,Node::new(Kind::Bool,vec![]).value(password.1),Node::optional(plugin))
+        rule authentication() -> Node = kw("identified")
+            plugin:(kw("with") value:account_name() { Node::new(Kind::AuthenticationPlugin,vec![value]) })?
+            password:(kw("by") encoded:kw("password")? value:password() {
+                    (if encoded.is_some() { Kind::EncodedAuthentication } else { Kind::PlaintextAuthentication },value)
+                }
+                / kw("as") value:password() { (Kind::EncodedAuthentication,value) }) {
+                let mut children=vec![password.1];
+                children.extend(plugin);
+                Node::new(password.0,children)
             }
-        rule user_spec(authenticated: bool) -> Node = name:account_name() host:user_variable()?
+        rule user_spec(authenticated: bool) -> Node = principal:account()
             auth:(enabled(authenticated) value:authentication() { value })? {
-            let (password,encrypted,plugin)=auth.unwrap_or_else(|| (Node::missing(),Node::new(Kind::Bool,vec![]),Node::missing()));
-            Node::new(Kind::UserSpec,vec![name,password,encrypted,Node::optional(host),plugin])
+            let mut children=vec![principal];
+            children.extend(auth);
+            Node::new(Kind::UserSpec,children)
         }
         rule privilege_name() -> &'static str
             = kw("create") kw("ai") kw("model") { "create ai model" }
@@ -1563,41 +1568,55 @@ peg::parser! {
             }
         rule privileges() -> Vec<Node> = kw("all") kw("privileges")? { vec![Node::new(Kind::Privilege,vec![]).text("all".into())] }
             / values:(privilege() ++ ("," _)) { values }
-        rule privilege_level() -> Node = first:("*" _ { Node::new(Kind::Star,vec![]) } / name:ident() { Node::name(name) })
+        rule privilege_target() -> Node = object:privilege_object()?
+            first:("*" _ { Node::new(Kind::Star,vec![]) } / name:ident() { Node::name(name) })
             second:("." _ value:("*" _ { Node::new(Kind::Star,vec![]) } / name:ident() { Node::name(name) }) { value })? {
-                match second { Some(second) => Node::new(Kind::PrivilegeLevel,vec![first,second]),None => first }
+                access::privilege_target(object,first,second)
             }
-        rule privilege_object() -> Node = value:(kw("table") { 1 } / kw("procedure") { 2 } / kw("function") { 3 }) {
-            Node::new(Kind::PrivilegeObject,vec![]).value(value)
+        rule privilege_object() -> Node = kind:(kw("table") { Kind::TablePrivilegeObject }
+            / kw("procedure") { Kind::ProcedurePrivilegeObject } / kw("function") { Kind::FunctionPrivilegeObject }) {
+            Node::new(kind,vec![])
         }
-        rule accounts() -> Node = values:(account() ++ ("," _)) { Node::new(Kind::Users,values) }
+        rule accounts() -> Node = values:(user_spec(false) ++ ("," _)) { Node::new(Kind::Users,values) }
         rule roles() -> Vec<Node> = values:(user_spec(false) ++ ("," _)) { values }
         rule granted_roles() -> Vec<Node> = values:((!privilege_name() value:user_spec(false) { value }) ++ ("," _)) { values }
         rule role_selection(session: bool) -> Node
             = kw("all") except:(enabled(session) kw("except") roles:granted_roles() { roles })? {
-                let mut children=vec![Node::new(Kind::HiddenInt,vec![]).value(if except.is_some() { 2 } else { 1 })];
-                if let Some(roles)=except { children.push(Node::new(Kind::Link,roles)); }
-                Node::new(Kind::DefaultRole,children)
+                match except {
+                    Some(roles) => Node::new(Kind::AllExceptRoles,vec![Node::new(Kind::Roles,roles)]),
+                    None => Node::new(Kind::AllRoles,vec![]),
+                }
             }
-            / code:(kw("none") { 3 } / enabled(session) kw("default") { 4 }) {
-                Node::new(Kind::DefaultRole,vec![Node::new(Kind::HiddenInt,vec![]).value(code)])
+            / kind:(kw("none") { Kind::NoRoles } / enabled(session) kw("default") { Kind::DefaultRoles }) {
+                Node::new(kind,vec![])
             }
-            / roles:roles() { Node::new(Kind::DefaultRole,vec![Node::new(Kind::HiddenInt,vec![]),Node::new(Kind::Link,roles)]) }
+            / roles:roles() { Node::new(Kind::ListedRoles,vec![Node::new(Kind::Roles,roles)]) }
         rule role_statement() -> Node
             = kw("create") kw("role") absent:if_not_exists()? roles:roles() {
-                Node::new(Kind::CreateRole,vec![Node::new(Kind::Users,roles),Node::optional(absent)])
+                let mut children=vec![Node::new(Kind::Users,roles)];
+                children.extend(absent);
+                Node::new(Kind::CreateRole,children)
             }
-            / kw("drop") kw("role") exists:if_exists()? roles:accounts() { Node::new(Kind::DropRole,vec![roles,Node::optional(exists)]) }
+            / kw("drop") kw("role") exists:if_exists()? roles:accounts() {
+                let mut children=vec![roles];
+                children.extend(exists);
+                Node::new(Kind::DropRole,children)
+            }
             / kw("grant") roles:granted_roles() kw("to") users:roles() option:(kw("with") kw("admin") kw("option") { Node::new(Kind::WithAdminOption,vec![]) })? {
-                Node::new(Kind::GrantRole,vec![Node::new(Kind::Users,roles),Node::new(Kind::Users,vec![Node::new(Kind::Users,users)]),Node::optional(option)])
+                let mut children=vec![Node::new(Kind::Roles,roles),Node::new(Kind::Users,users)];
+                children.extend(option);
+                Node::new(Kind::GrantRole,children)
             }
             / kw("revoke") exists:if_exists()? roles:granted_roles() kw("from") users:roles()
                 ignore:(kw("ignore") kw("unknown") kw("user") { Node::new(Kind::IgnoreUnknownUser,vec![]) })? {
-                    Node::new(Kind::SystemRevoke,vec![Node::new(Kind::RevokeRole,vec![Node::new(Kind::Users,roles),Node::new(Kind::Users,vec![Node::new(Kind::Users,users)]),Node::optional(exists),Node::optional(ignore)])])
+                    let mut children=vec![Node::new(Kind::Roles,roles),Node::new(Kind::Users,users)];
+                    children.extend(exists);
+                    children.extend(ignore);
+                    Node::new(Kind::RevokeRole,children)
                 }
             / kw("set") kw("role") selection:role_selection(true) { Node::new(Kind::SetRole,vec![selection]) }
-            / kw("set") kw("default") kw("role") selection:role_selection(false) kw("to") users:accounts() { Node::new(Kind::AlterUserDefaultRole,vec![users,selection]) }
-            / kw("alter") kw("user") user:account() kw("default") kw("role") selection:role_selection(false) { Node::new(Kind::AlterUserDefaultRole,vec![user,selection]) }
+            / kw("set") kw("default") kw("role") selection:role_selection(false) kw("to") users:accounts() { Node::new(Kind::SetDefaultRole,vec![users,selection]) }
+            / kw("alter") kw("user") user:user_spec(false) kw("default") kw("role") selection:role_selection(false) { Node::new(Kind::AlterUserDefaultRole,vec![Node::new(Kind::Users,vec![user]),selection]) }
         rule kill() -> Node = kw("kill") query:(kw("query") { true } / kw("connection") { false })? target:expr(0) {
             Node::new(Kind::Kill,vec![Node::new(Kind::Bool,vec![]).value(u64::from(query.unwrap_or(false))),target])
         }
@@ -1606,27 +1625,39 @@ peg::parser! {
             / (kw("database") / kw("schema")) name:ident() { Node::new(Kind::PurgeDatabase,vec![Node::name(name)]) }) { value }
         rule account_statement() -> Node
             = kw("create") kw("user") absent:if_not_exists()? users:(user_spec(true) ++ ("," _)) {
-                Node::new(Kind::CreateUser,vec![Node::optional(absent),Node::new(Kind::Users,users),Node::missing(),Node::missing()])
+                let mut children=vec![Node::new(Kind::Users,users)];
+                children.extend(absent);
+                Node::new(Kind::CreateUser,children)
             }
-            / kw("drop") kw("user") exists:if_exists()? users:accounts() { Node::new(Kind::DropUser,vec![users,Node::optional(exists)]) }
+            / kw("drop") kw("user") exists:if_exists()? users:accounts() {
+                let mut children=vec![users];
+                children.extend(exists);
+                Node::new(Kind::DropUser,children)
+            }
             / kw("alter") kw("user") user:account() auth:authentication() {
-                Node::new(Kind::SetPassword,vec![user,auth.0,auth.1,Node::missing(),auth.2])
+                Node::new(Kind::SetPassword,vec![Node::new(Kind::Users,vec![Node::new(Kind::UserSpec,vec![user,auth])])])
             }
             / kw("set") kw("password") user:(kw("for") user:account() { user })? "=" _
-                auth:(kw("password") "(" _ password:password() ")" _ { (password,1) } / password:password() { (password,0) }) {
-                    Node::new(Kind::SetPassword,vec![Node::optional(user),auth.0,Node::new(Kind::Bool,vec![]).value(auth.1),Node::missing(),Node::missing()])
+                auth:(kw("password") "(" _ password:password() ")" _ { Node::new(Kind::PlaintextAuthentication,vec![password]) }
+                    / password:password() { Node::new(Kind::EncodedAuthentication,vec![password]) }) {
+                    let user=user.unwrap_or_else(|| Node::new(Kind::CurrentUser,vec![]));
+                    Node::new(Kind::SetPassword,vec![Node::new(Kind::Users,vec![Node::new(Kind::UserSpec,vec![user,auth])])])
                 }
-            / kw("grant") privileges:privileges() kw("on") object:privilege_object()? level:privilege_level()
-                kw("to") users:(user_spec(true) ++ ("," _)) option:(kw("with") kw("grant") kw("option"))? {
-                    let mut privileges=privileges;
-                    if option.is_some() { privileges.push(Node::new(Kind::Privilege,vec![]).text("grant option".into())); }
-                    Node::new(Kind::Grant,vec![Node::new(Kind::Privileges,privileges),Node::optional(object),level,Node::new(Kind::Users,users)])
+            / kw("grant") privileges:privileges() kw("on") target:privilege_target()
+                kw("to") users:(user_spec(true) ++ ("," _)) option:(kw("with") kw("grant") kw("option") { Node::new(Kind::WithGrantOption,vec![]) })? {
+                    let mut children=vec![Node::new(Kind::Privileges,privileges),target,Node::new(Kind::Users,users)];
+                    children.extend(option);
+                    Node::new(Kind::Grant,children)
                 }
             / kw("revoke") exists:if_exists()? kw("all") kw("privileges")? "," _ kw("grant") kw("option") kw("from") users:accounts() {
-                Node::new(Kind::RevokeAll,vec![users,Node::optional(exists),Node::missing()])
+                let mut children=vec![users];
+                children.extend(exists);
+                Node::new(Kind::RevokeAll,children)
             }
-            / kw("revoke") exists:if_exists()? privileges:privileges() kw("on") object:privilege_object()? level:privilege_level() kw("from") users:accounts() {
-                Node::new(Kind::Revoke,vec![Node::new(Kind::Privileges,privileges),Node::optional(object),level,users,Node::optional(exists),Node::missing()])
+            / kw("revoke") exists:if_exists()? privileges:privileges() kw("on") target:privilege_target() kw("from") users:accounts() {
+                let mut children=vec![Node::new(Kind::Privileges,privileges),target,users];
+                children.extend(exists);
+                Node::new(Kind::Revoke,children)
             }
         rule package_routine() -> Node = start:position!() function:(kw("procedure") { false } / kw("function") { true }) name:ident() params:routine_parameters(false,true)
             result:(enabled(function) kw("return") value:data_type() { value })? end:position!() {?

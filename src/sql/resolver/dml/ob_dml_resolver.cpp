@@ -38,7 +38,6 @@
 #include "sql/das/ob_domain_id.h"
 #include "query/vector/ob_vector_index_util.h"
 #include "sql/engine/expr/ob_expr_regexp.h"
-#include "sql/resolver/dcl/ob_dcl_resolver.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
 

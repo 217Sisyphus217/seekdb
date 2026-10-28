@@ -1,0 +1,245 @@
+// Copyright (c) 2026 OceanBase.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::bridge::ffi::{
+    AccessOptions, AccountKind, AccountNameForm, AuthenticationKind, PrivilegeObject,
+    PrivilegeScope, PrivilegeTarget, RoleSelection,
+};
+use crate::node::{Kind, Node};
+
+fn child(node: &Node, kind: Kind) -> Option<&Node> {
+    node.children.iter().find(|child| child.kind == kind)
+}
+
+fn list(node: &Node, kind: Kind) -> &[Node] {
+    child(node, kind).map_or(&[], |list| list.children.as_slice())
+}
+
+fn role_selection(statement: &Node) -> Option<&Node> {
+    statement.children.iter().find(|child| {
+        matches!(
+            child.kind,
+            Kind::ListedRoles
+                | Kind::AllRoles
+                | Kind::AllExceptRoles
+                | Kind::NoRoles
+                | Kind::DefaultRoles
+        )
+    })
+}
+
+pub(crate) fn access_options(statement: &Node) -> AccessOptions {
+    AccessOptions {
+        if_exists: child(statement, Kind::IfExists).is_some(),
+        if_not_exists: child(statement, Kind::IfNotExists).is_some(),
+        grant_option: child(statement, Kind::WithGrantOption).is_some(),
+        admin_option: child(statement, Kind::WithAdminOption).is_some(),
+        ignore_unknown_user: child(statement, Kind::IgnoreUnknownUser).is_some(),
+    }
+}
+
+pub(crate) fn access_accounts(statement: &Node) -> &[Node] {
+    list(statement, Kind::Users)
+}
+
+pub(crate) fn access_roles(statement: &Node) -> &[Node] {
+    list(role_selection(statement).unwrap_or(statement), Kind::Roles)
+}
+
+pub(crate) fn access_privileges(statement: &Node) -> &[Node] {
+    list(statement, Kind::Privileges)
+}
+
+pub(crate) fn access_role_selection(statement: &Node) -> RoleSelection {
+    match role_selection(statement).unwrap().kind {
+        Kind::ListedRoles => RoleSelection::Listed,
+        Kind::AllRoles => RoleSelection::All,
+        Kind::AllExceptRoles => RoleSelection::AllExcept,
+        Kind::NoRoles => RoleSelection::None,
+        Kind::DefaultRoles => RoleSelection::Default,
+        _ => unreachable!(),
+    }
+}
+
+fn principal(spec: &Node) -> &Node {
+    spec.children
+        .iter()
+        .find(|child| matches!(child.kind, Kind::UserHost | Kind::CurrentUser))
+        .unwrap()
+}
+
+fn host(spec: &Node) -> Option<&Node> {
+    let principal = principal(spec);
+    if principal.kind == Kind::CurrentUser || principal.children[1].kind == Kind::Missing {
+        None
+    } else {
+        Some(&principal.children[1])
+    }
+}
+
+fn authentication(spec: &Node) -> Option<&Node> {
+    spec.children.iter().find(|child| {
+        matches!(
+            child.kind,
+            Kind::PlaintextAuthentication | Kind::EncodedAuthentication
+        )
+    })
+}
+
+fn plugin(spec: &Node) -> Option<&Node> {
+    authentication(spec).and_then(|auth| child(auth, Kind::AuthenticationPlugin))
+}
+
+pub(crate) fn account_kind(spec: &Node) -> AccountKind {
+    if principal(spec).kind == Kind::CurrentUser {
+        AccountKind::Current
+    } else {
+        AccountKind::Named
+    }
+}
+
+pub(crate) fn account_name_form(spec: &Node) -> AccountNameForm {
+    let principal = principal(spec);
+    if principal.kind == Kind::CurrentUser || principal.children[0].kind == Kind::Ident {
+        AccountNameForm::Identifier
+    } else {
+        AccountNameForm::String
+    }
+}
+
+pub(crate) fn account_name(spec: &Node) -> &str {
+    let principal = principal(spec);
+    if principal.kind == Kind::CurrentUser {
+        ""
+    } else {
+        &principal.children[0].text
+    }
+}
+
+pub(crate) fn account_has_host(spec: &Node) -> bool {
+    host(spec).is_some()
+}
+
+pub(crate) fn account_host(spec: &Node) -> &str {
+    host(spec).map_or("", |host| &host.text)
+}
+
+pub(crate) fn account_authentication(spec: &Node) -> AuthenticationKind {
+    match authentication(spec).map(|auth| auth.kind) {
+        None => AuthenticationKind::Absent,
+        Some(Kind::PlaintextAuthentication) => AuthenticationKind::Plaintext,
+        Some(Kind::EncodedAuthentication) => AuthenticationKind::Encoded,
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn account_password(spec: &Node) -> &str {
+    authentication(spec).map_or("", |auth| &child(auth, Kind::Password).unwrap().text)
+}
+
+pub(crate) fn account_has_plugin(spec: &Node) -> bool {
+    plugin(spec).is_some()
+}
+
+pub(crate) fn account_plugin(spec: &Node) -> &str {
+    plugin(spec).map_or("", |plugin| &plugin.children[0].text)
+}
+
+pub(crate) fn privilege_name(privilege: &Node) -> &str {
+    &privilege.text
+}
+
+pub(crate) fn privilege_columns(privilege: &Node) -> &[Node] {
+    list(privilege, Kind::ColumnList)
+}
+
+pub(crate) fn privilege_target(object: Option<Node>, first: Node, second: Option<Node>) -> Node {
+    let (kind, mut children) = if let Some(second) = second {
+        let kind = match (first.kind == Kind::Star, second.kind == Kind::Star) {
+            (true, true) => Kind::GlobalPrivilegeTarget,
+            (false, true) => Kind::DatabasePrivilegeTarget,
+            (false, false) => Kind::ObjectPrivilegeTarget,
+            (true, false) => Kind::WildcardQualifiedObjectTarget,
+        };
+        (
+            kind,
+            vec![
+                Node::new(Kind::TargetDatabase, vec![first]),
+                Node::new(Kind::TargetObject, vec![second]),
+            ],
+        )
+    } else {
+        let kind = if first.kind == Kind::Star {
+            Kind::DatabasePrivilegeTarget
+        } else {
+            Kind::ObjectPrivilegeTarget
+        };
+        (kind, vec![Node::new(Kind::TargetObject, vec![first])])
+    };
+    children.extend(object);
+    Node::new(kind, children)
+}
+
+fn target(statement: &Node) -> &Node {
+    statement
+        .children
+        .iter()
+        .find(|child| {
+            matches!(
+                child.kind,
+                Kind::GlobalPrivilegeTarget
+                    | Kind::DatabasePrivilegeTarget
+                    | Kind::ObjectPrivilegeTarget
+                    | Kind::WildcardQualifiedObjectTarget
+            )
+        })
+        .unwrap()
+}
+
+pub(crate) fn access_target(statement: &Node) -> PrivilegeTarget {
+    let target = target(statement);
+    let scope = match target.kind {
+        Kind::GlobalPrivilegeTarget => PrivilegeScope::Global,
+        Kind::DatabasePrivilegeTarget => PrivilegeScope::Database,
+        Kind::ObjectPrivilegeTarget => PrivilegeScope::Object,
+        Kind::WildcardQualifiedObjectTarget => PrivilegeScope::WildcardQualifiedObject,
+        _ => unreachable!(),
+    };
+    let object = target
+        .children
+        .iter()
+        .find_map(|child| match child.kind {
+            Kind::TablePrivilegeObject => Some(PrivilegeObject::Table),
+            Kind::ProcedurePrivilegeObject => Some(PrivilegeObject::Procedure),
+            Kind::FunctionPrivilegeObject => Some(PrivilegeObject::Function),
+            _ => None,
+        })
+        .unwrap_or(PrivilegeObject::Unspecified);
+    PrivilegeTarget {
+        scope,
+        object,
+        explicit_database: child(target, Kind::TargetDatabase).is_some(),
+    }
+}
+
+pub(crate) fn access_target_database(statement: &Node) -> &str {
+    child(target(statement), Kind::TargetDatabase).map_or("", |database| &database.children[0].text)
+}
+
+pub(crate) fn access_target_object(statement: &Node) -> &str {
+    &child(target(statement), Kind::TargetObject)
+        .unwrap()
+        .children[0]
+        .text
+}

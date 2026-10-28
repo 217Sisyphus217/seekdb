@@ -24,6 +24,7 @@
 #include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/resolver/tcl/transaction_resolver.h"
 #include "sql/resolver/prepare/prepared_command_resolver.h"
+#include "sql/resolver/dcl/access_control_resolver.h"
 #include "sql/parser/parsed_sql.h"
 #include "sql/resolver/ddl/ob_create_table_resolver.h"
 #include "sql/resolver/ddl/ob_rename_table_resolver.h"
@@ -56,16 +57,6 @@
 #include "sql/resolver/ddl/ob_analyze_stmt_resolver.h"
 #include "sql/resolver/ddl/ob_set_comment_resolver.h"
 #include "sql/resolver/ddl/ob_lock_table_resolver.h"
-#include "sql/resolver/dcl/ob_create_user_resolver.h"
-#include "sql/resolver/dcl/ob_drop_user_resolver.h"
-#include "sql/resolver/dcl/ob_rename_user_resolver.h"
-#include "sql/resolver/dcl/ob_set_password_resolver.h"
-#include "sql/resolver/dcl/ob_lock_user_resolver.h"
-#include "sql/resolver/dcl/ob_grant_resolver.h"
-#include "sql/resolver/dcl/ob_revoke_resolver.h"
-#include "sql/resolver/dcl/ob_create_role_resolver.h"
-#include "sql/resolver/dcl/ob_drop_role_resolver.h"
-#include "sql/resolver/dcl/ob_alter_user_role_resolver.h"
 #include "sql/resolver/cmd/ob_variable_set_resolver.h"
 #include "sql/resolver/cmd/ob_show_resolver.h"
 #include "sql/resolver/cmd/ob_diff_table_resolver.h"
@@ -79,7 +70,6 @@
 #include "sql/resolver/cmd/ob_load_data_resolver.h"
 #include "sql/resolver/expr/ob_raw_expr_wrap_enum_set.h"
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
-#include "sql/resolver/dcl/ob_alter_role_resolver.h"
 #include "sql/pl/ob_pl_package.h"
 
 namespace oceanbase
@@ -148,6 +138,21 @@ int ObResolver::resolve(const ParsedSql &parsed, ObStmt *&stmt)
       case peg::NodeKind::Execute:
       case peg::NodeKind::Deallocate:
         ret = resolve_prepared_command(*parsed.statement(), params_, stmt);
+        break;
+      case peg::NodeKind::CreateUser:
+      case peg::NodeKind::DropUser:
+      case peg::NodeKind::SetPassword:
+      case peg::NodeKind::CreateRole:
+      case peg::NodeKind::DropRole:
+      case peg::NodeKind::Grant:
+      case peg::NodeKind::Revoke:
+      case peg::NodeKind::RevokeAll:
+      case peg::NodeKind::GrantRole:
+      case peg::NodeKind::RevokeRole:
+      case peg::NodeKind::SetRole:
+      case peg::NodeKind::SetDefaultRole:
+      case peg::NodeKind::AlterUserDefaultRole:
+        ret = resolve_access_control(*parsed.statement(), params_, stmt);
         break;
       default:
         ret = resolve_transaction(*parsed.statement(), params_, stmt);
@@ -419,44 +424,6 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(Show);
         break;
       }
-      case T_CREATE_USER: {
-        REGISTER_STMT_RESOLVER(CreateUser);
-        break;
-      }
-      case T_DROP_USER: {
-        REGISTER_STMT_RESOLVER(DropUser);
-        break;
-      }
-      case T_RENAME_USER: {
-        REGISTER_STMT_RESOLVER(RenameUser);
-        break;
-      }
-      case T_SET_PASSWORD: {
-        REGISTER_STMT_RESOLVER(SetPassword);
-        break;
-      }
-      case T_LOCK_USER: {
-        REGISTER_STMT_RESOLVER(LockUser);
-        break;
-      }
-      case T_ALTER_USER_DEFAULT_ROLE:
-      case T_SET_ROLE: {
-        REGISTER_STMT_RESOLVER(AlterUserRole);
-        break;
-      }
-
-      case T_GRANT_ROLE:
-      case T_SYSTEM_GRANT:
-      case T_GRANT: {
-        REGISTER_STMT_RESOLVER(Grant);
-        break;
-      }
-      case T_SYSTEM_REVOKE:
-      case T_REVOKE:
-      case T_REVOKE_ALL: {
-        REGISTER_STMT_RESOLVER(Revoke);
-        break;
-      }
       case T_EXPLAIN: {
         REGISTER_STMT_RESOLVER(Explain);
         break;
@@ -565,18 +532,6 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       case T_SET_TABLE_COMMENT:
       case T_SET_COLUMN_COMMENT: {
         REGISTER_STMT_RESOLVER(SetComment);
-        break;
-      }
-      case T_CREATE_ROLE: {
-        REGISTER_STMT_RESOLVER(CreateRole);
-        break;
-      }
-      case T_DROP_ROLE: {
-        REGISTER_STMT_RESOLVER(DropRole);
-        break;
-      }
-      case T_ALTER_ROLE: {
-        REGISTER_STMT_RESOLVER(AlterRole);
         break;
       }
       case T_TG_CREATE: {
