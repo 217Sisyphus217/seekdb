@@ -230,7 +230,7 @@ int ObVariableSetResolver::resolve_value_expr(ParseNode &val_node, ObRawExpr *&v
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params_.param_list_;
-    ctx.parameter_bindings_ = params_.parameter_bindings_;
+    ctx.parameterization_ = params_.parameterization_;
     ctx.is_extract_param_type_ = !params_.is_prepare_protocol_; //when prepare do not extract
     ctx.schema_checker_ = params_.schema_checker_;
     ctx.session_info_ = params_.session_info_;

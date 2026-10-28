@@ -50,6 +50,8 @@ class ObPLRoutineInfo;
 }
 namespace sql
 {
+struct NumericLiteral;
+struct NumericLiteralOptions;
 class ObRawExprUtils;
 class ObRoutineMatchInfo
 {
@@ -341,6 +343,12 @@ public:
    */
   static int resolve_stmt_type(const ParseResult &result, stmt::StmtType &type);
   static stmt::StmtType get_stmt_type_by_item_type(const ObItemType item_type);
+  static int resolve_numeric_literal(const NumericLiteral &literal,
+                                     const NumericLiteralOptions &options,
+                                     common::ObIAllocator &allocator,
+                                     common::ObObjParam &val,
+                                     common::ObString &literal_prefix);
+
   /**
    * resolve expr_const, @see sql_parser.y
    *

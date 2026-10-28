@@ -985,7 +985,7 @@ int ObDMLResolver::resolve_sql_expr(const ParseNode &node, ObRawExpr *&expr,
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params_.param_list_;
-    ctx.parameter_bindings_ = params_.parameter_bindings_;
+    ctx.parameterization_ = params_.parameterization_;
     ctx.is_extract_param_type_ = !params_.is_prepare_protocol_; //when prepare do not extract
     ctx.external_param_info_ = params_.external_param_info_.need_clear_ ? nullptr : &params_.external_param_info_;
     ctx.current_scope_ = current_scope_;
@@ -4710,7 +4710,7 @@ int ObDMLResolver::resolve_partition_expr(const ParseNode &part_expr_node, ObRaw
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params_.param_list_;
-    ctx.parameter_bindings_ = params_.parameter_bindings_;
+    ctx.parameterization_ = params_.parameterization_;
     ctx.stmt_ = static_cast<ObStmt*>(get_stmt());
     ctx.session_info_ = params_.session_info_;
     ctx.query_ctx_ = params_.query_ctx_;
@@ -5015,7 +5015,7 @@ int ObDMLResolver::resolve_and_split_sql_expr(const ParseNode &node, ObIArray<Ob
                              session_info_->get_timezone_info(),
                              OB_NAME_CASE_INVALID);
     ctx.param_list_ = params_.param_list_;
-    ctx.parameter_bindings_ = params_.parameter_bindings_;
+    ctx.parameterization_ = params_.parameterization_;
     ctx.current_scope_ = current_scope_;
     ctx.stmt_ = static_cast<ObStmt*>(get_stmt());
     ctx.session_info_ = session_info_;
@@ -5352,8 +5352,8 @@ int ObDMLResolver::resolve_limit_clause(const ParseNode *node, bool disable_offs
     }
     const auto parameter_index = [this](const ParseNode *value) -> int64_t {
       if (value == nullptr) return -1;
-      const auto *binding = params_.parameter_bindings_ != nullptr
-          ? params_.parameter_bindings_->find(value) : nullptr;
+      const auto *binding = params_.parameterization_ != nullptr
+          ? params_.parameterization_->find(value) : nullptr;
       return binding != nullptr ? binding->parameter_index
           : value->type_ == T_QUESTIONMARK ? value->value_ : -1;
     };

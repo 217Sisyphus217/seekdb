@@ -19,6 +19,7 @@
 #include "ob_sql_parameterization.h"
 #include "lib/json/ob_json_print_utils.h"
 #include "sql/resolver/ob_resolver_utils.h"
+#include "sql/resolver/expr/numeric_literal.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -60,7 +61,7 @@ struct TransformTreeCtx
   const ObTimeZoneInfo *tz_info_;
   int64_t question_num_;
   ParamStore *params_;
-  ParameterBindings *bindings_;
+  ParameterizationResult *parameterization_;
   bool not_param_; // indicates that this node and its child nodes cannot be parameterized even when they are constants
   bool is_fast_parse_const_; // indicates whether the current node is a constant recognizable by fp
   bool enable_contain_param_;//Indicates whether the constants in this node and its sub-nodes are fp-recognizable parameters.
@@ -92,7 +93,7 @@ struct SelectItemTraverseCtx
   const int64_t buf_len_;
   int64_t &expr_pos_;
   SelectItemParamInfo &param_info_;
-  const ParameterBindings &bindings_;
+  const ParameterizationResult &parameterization_;
 
   SelectItemTraverseCtx(const common::ObIArray<ObPCParam *> &raw_params,
                         const ParseNode *tree,
@@ -101,9 +102,9 @@ struct SelectItemTraverseCtx
                         const int64_t buf_len,
                         int64_t &expr_pos,
                         SelectItemParamInfo &param_info,
-                        const ParameterBindings &bindings)
+                        const ParameterizationResult &bindings)
     : raw_params_(raw_params), tree_(tree), org_expr_name_(org_expr_name),
-      expr_start_pos_(expr_start_pos), buf_len_(buf_len), expr_pos_(expr_pos), param_info_(param_info), bindings_(bindings) {}
+      expr_start_pos_(expr_start_pos), buf_len_(buf_len), expr_pos_(expr_pos), param_info_(param_info), parameterization_(bindings) {}
 };
 
 struct TraverseStackFrame
@@ -129,7 +130,7 @@ TransformTreeCtx::TransformTreeCtx() :
  tz_info_(NULL),
  question_num_(0),
  params_(NULL),
- bindings_(nullptr),
+ parameterization_(nullptr),
  not_param_(false),
  is_fast_parse_const_(false),
  enable_contain_param_(true),
@@ -155,7 +156,7 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
                                                  ParseNode *tree,
                                                  SqlInfo &sql_info,
                                                  ParamStore &params,
-                                                 ParameterBindings &bindings,
+                                                 ParameterizationResult &bindings,
                                                  SelectItemParamInfoMap *select_item_param_infos,
                                                  bool is_transform_outline,
                                                  SQL_EXECUTION_MODE execution_mode,
@@ -187,7 +188,7 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
     ctx.value_father_level_ = NO_VALUES;
     ctx.question_num_ = 0;
     ctx.params_ = &params;
-    ctx.bindings_ = &bindings;
+    ctx.parameterization_ = &bindings;
     ctx.not_param_ = false;
     ctx.is_fast_parse_const_ = false;
     ctx.enable_contain_param_ = true;
@@ -201,7 +202,7 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
     ctx.is_from_pl_ = is_from_pl;
     ctx.parent_type_ = T_INVALID;
 
-    if (OB_FAIL(transform_tree(ctx, session, ArgumentParameterization{}))) {
+    if (OB_FAIL(transform_tree(ctx, session, ArgumentParameterization{}, false, nullptr, ParameterOrigin::Literal))) {
       if (OB_NOT_SUPPORTED != ret) {
         SQL_PC_LOG(WARN, "fail to transform syntax tree", K(ret));
       }
@@ -480,7 +481,10 @@ bool ObSqlParameterization::is_ignore_scale_check(TransformTreeCtx &ctx, const P
 */
 int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
                                           const ObSQLSessionInfo &session_info,
-                                          const ArgumentParameterization &parent_policy)
+                                          const ArgumentParameterization &parent_policy,
+                                          bool must_be_positive,
+                                          const ParseNode *parameter_expression,
+                                          ParameterOrigin origin)
 {
   int ret = OB_SUCCESS;
   int64_t value_level = NO_VALUES;
@@ -505,6 +509,12 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
   } else if (OB_FAIL(get_argument_policy(ctx.tree_, *ctx.sql_info_, own_policy))) {
   } else {
     const ArgumentParameterization &argument_policy = own_policy.arguments_ != nullptr ? own_policy : parent_policy;
+    if (parameter_expression == nullptr) parameter_expression = ctx.tree_;
+    const NumericLowering *numeric = ctx.parameterization_->numeric_lowering(parameter_expression);
+    if (numeric != nullptr && numeric->kind == NumericLowering::Kind::NegateLiteral
+        && origin == ParameterOrigin::Literal) {
+      origin = ParameterOrigin::Subtraction;
+    }
     bool enable_decimal_int = false;
     if (OB_FAIL(ret)) {
     } else if (T_PROJECT_STRING == ctx.tree_->type_
@@ -547,10 +557,15 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
 
           ObString literal_prefix;
           int64_t server_collation = CS_TYPE_INVALID;
-          if (OB_FAIL(add_param_flag(ctx.tree_, *ctx.sql_info_))) {
+          if (OB_FAIL(add_param_flag(origin, *ctx.sql_info_))) {
           } else if (fmt_int_or_ch_decint
                      && OB_FAIL(ctx.sql_info_->fmt_int_or_ch_decint_idx_.add_member(ctx.sql_info_->total_))) {
-          } else if (OB_FAIL(ObResolverUtils::resolve_const(node,
+          } else if (numeric != nullptr && numeric->literal != nullptr
+                     && OB_FAIL(ObResolverUtils::resolve_numeric_literal(*numeric->literal,
+                          NumericLiteralOptions{stmt::T_NONE, enable_decimal_int, ctx.is_from_pl_,
+                                                fmt_int_or_ch_decint, session_info.get_min_const_integer_precision()},
+                          *ctx.allocator_, value, literal_prefix))) {
+          } else if (numeric == nullptr && OB_FAIL(ObResolverUtils::resolve_const(node,
                               stmt::T_NONE, // Parameters use execution precision, including SQL inside outline DDL.
                               *(ctx.allocator_),
                               ctx.collation_type_,
@@ -616,11 +631,11 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
             const int64_t raw_token_index = is_execute_mode(ctx.mode_)
                 ? ctx.tree_->raw_sql_offset_ : ctx.sql_info_->total_;
             if (OB_SUCC(ret) && !is_execute_mode(ctx.mode_)) {
-              ret = ctx.bindings_->bind(ctx.tree_, ctx.question_num_, raw_token_index);
+              ret = ctx.parameterization_->bind(parameter_expression, ctx.question_num_, raw_token_index, origin);
             }
             ctx.question_num_++;
             ctx.sql_info_->total_++;
-            if (1 == ctx.tree_->is_num_must_be_pos_ && OB_SUCC(ret)
+            if (must_be_positive && OB_SUCC(ret)
                 && OB_FAIL(ctx.sql_info_->must_be_positive_index_.add_member(raw_token_index))) {
             }
             if (OB_NOT_NULL(ctx.tree_) &&
@@ -666,7 +681,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
 
     // sql with charset need not ps parameterize
     if (OB_SUCC(ret)) {
-      if ((T_QUESTIONMARK == ctx.tree_->type_ || ctx.bindings_->find(ctx.tree_) != nullptr)
+      if ((T_QUESTIONMARK == ctx.tree_->type_ || ctx.parameterization_->find(ctx.tree_) != nullptr)
           && OB_NOT_NULL(ctx.tree_->children_)
           && OB_NOT_NULL(ctx.tree_->children_[0]) && ctx.tree_->children_[0]->type_ == T_CHARSET) {
         ctx.sql_info_->ps_need_parameterized_ = false;
@@ -698,31 +713,18 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
     }
 
     // transform `operand - const_num_val` to `operand + (-const_num_val)`
-    if (OB_SUCC(ret) && OB_FAIL(transform_minus_op(*(ctx.allocator_), ctx.tree_, ctx.is_from_pl_))) {
+    if (OB_SUCC(ret) && OB_FAIL(lower_subtraction(*ctx.allocator_, ctx.tree_, *ctx.parameterization_, ctx.is_from_pl_))) {
     }
     if (T_LIMIT_CLAUSE == ctx.tree_->type_) {
-      // limit a offset b, a and b must be positive
-      // 0 is counted as positive, -0 is counted as negative
       if (OB_ISNULL(ctx.tree_->children_) || 2 != ctx.tree_->num_child_) {
         ret = OB_INVALID_ARGUMENT;
-      } else if (OB_NOT_NULL(ctx.tree_->children_[0])
-                 && ob_is_numeric_type(ITEM_TO_OBJ_TYPE(ctx.tree_->children_[0]->type_))
-                 && FALSE_IT(ctx.tree_->children_[0]->is_num_must_be_pos_ = 1)) {
-      } else if (OB_NOT_NULL(ctx.tree_->children_[1])
-                 && ob_is_numeric_type(ITEM_TO_OBJ_TYPE(ctx.tree_->children_[1]->type_))
-                 && FALSE_IT(ctx.tree_->children_[1]->is_num_must_be_pos_ = 1)) {
       }
     } else if (T_COMMA_LIMIT_CLAUSE == ctx.tree_->type_) {
-      // limit a, b, a and b must be positive
       if (OB_ISNULL(ctx.tree_->children_)
           || 2 != ctx.tree_->num_child_
           || OB_ISNULL(ctx.tree_->children_[0])
           || OB_ISNULL(ctx.tree_->children_[1])) {
         ret = OB_INVALID_ARGUMENT;
-      } else if (ob_is_numeric_type(ITEM_TO_OBJ_TYPE(ctx.tree_->children_[0]->type_))
-                 && FALSE_IT(ctx.tree_->children_[0]->is_num_must_be_pos_ = 1)) {
-      } else if (ob_is_numeric_type(ITEM_TO_OBJ_TYPE(ctx.tree_->children_[1]->type_))
-                 && FALSE_IT(ctx.tree_->children_[1]->is_num_must_be_pos_ = 1)) {
       }
     }
 
@@ -745,7 +747,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
     bool ignore_scale_check = ctx.ignore_scale_check_;
     for (int32_t i = 0;
          OB_SUCC(ret) && i < root->num_child_ && root->type_ != T_QUESTIONMARK
-         && ctx.bindings_->find(root) == nullptr
+         && ctx.parameterization_->find(parameter_expression) == nullptr
          && root->type_ != T_VARCHAR && root->type_ != T_CHAR && root->type_ != T_NCHAR;
          ++i) {
       // If not_param is already true, then there is no need to check further; because if a node is determined to be true, then the entire subtree of that node is true;
@@ -754,38 +756,37 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
         SQL_PC_LOG(WARN, "invalid argument", K(ctx.tree_->children_), K(ret));
       } else {
         const bool excluded_argument = argument_policy.excludes(root, i);
+        const bool child_must_be_positive = (root->type_ == T_LIMIT_CLAUSE
+            || root->type_ == T_COMMA_LIMIT_CLAUSE)
+            && root->children_[i] != nullptr
+            && ob_is_numeric_type(ITEM_TO_OBJ_TYPE(root->children_[i]->type_));
         ArgumentParameterization child_policy;
         if (argument_policy.arguments_ == root->children_[i]) child_policy = argument_policy;
-        if (!ctx.not_param_) { // If the constants of this node and its sub-nodes are not parameters, then replacement is not needed
-          // Rewrite the T_OP_NEG node to solve the positive and negative number mismatch problem
-          // If it is a T_OP_NEG->T_INT node, then change it to a T_INT node and multiply the value by -1;
-          // If it is T_OP_NEG->T_DOUBLE or T_NUMBER, then change to add - before the str of T_DOUBLE or T_NUMBER node
-          if (OB_ISNULL(root->children_[i])
-              || excluded_argument) {
-            //do nothing
-          } else if (T_OP_NEG == root->children_[i]->type_ && 1 == root->children_[i]->num_child_) {
-            if (OB_ISNULL(root->children_[i]->children_) || OB_ISNULL(root->children_[i]->children_[0])) {
-              //do nothing
-            } else if (T_INT != root->children_[i]->children_[0]->type_
-                       && T_NUMBER != root->children_[i]->children_[0]->type_
-                       && T_DOUBLE != root->children_[i]->children_[0]->type_
-                       && T_FLOAT != root->children_[i]->children_[0]->type_
-                       && T_VARCHAR != root->children_[i]->children_[0]->type_) {
-              //do nothing
-            } else if (T_VARCHAR == root->children_[i]->children_[0]->type_) { // T_VARCHAR does not need insert neg
-              root->children_[i]->children_[0]->is_neg_ = 1;
-            } else if ((INT64_MIN == root->children_[i]->children_[0]->value_
-                       && T_INT == root->children_[i]->children_[0]->type_)
-                         || root->children_[i]->children_[0]->is_assigned_from_child_) {
-              // select --9223372036854775808 from dual;
-              // 9223372036854775809 before T_OP_NEG is removed during the syntax phase, here we do not need to insert the negative sign when converting the syntax tree
-              // do nothing
-            } else if (OB_FAIL(insert_neg_sign(*(ctx.allocator_), root->children_[i]->children_[0]))) {
+        ParseNode *child = root->children_[i];
+        const ParseNode *child_expression = child;
+        ParameterOrigin child_origin = ParameterOrigin::Literal;
+        if (!ctx.not_param_ && !excluded_argument && child != nullptr
+            && child->type_ == T_OP_NEG && child->num_child_ == 1
+            && child->children_ != nullptr && child->children_[0] != nullptr) {
+          ParseNode *operand = child->children_[0];
+          if (operand->type_ == T_VARCHAR) {
+            // The unary operation remains; the literal's source still belongs to a negation.
+          } else if ((operand->type_ == T_INT || operand->type_ == T_NUMBER
+                      || operand->type_ == T_DOUBLE || operand->type_ == T_FLOAT)
+                     && !(operand->type_ == T_INT && operand->value_ == INT64_MIN)
+                     && !operand->is_assigned_from_child_) {
+            const NumericLiteral *literal = nullptr;
+            if (OB_FAIL(make_negated_literal(*ctx.allocator_, *operand, true, literal))) {
+            } else if (OB_FAIL(ctx.parameterization_->fold_negation(child, literal))) {
             } else {
-              root->children_[i] = root->children_[i]->children_[0];
-              root->children_[i]->is_neg_ = 1;
+              child = operand;
+              child_origin = ParameterOrigin::UnaryNegation;
             }
           }
+        }
+        if (root->type_ == T_OP_NEG && child != nullptr && child->type_ == T_VARCHAR
+            && !ctx.not_param_) {
+          child_origin = ParameterOrigin::UnaryNegation;
         }
 
         if (OB_SUCC(ret)) {
@@ -795,7 +796,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
           if (T_WHERE_CLAUSE == root->type_) { // Currently only processing where clause
             ctx.expr_scope_ = T_WHERE_SCOPE;
           }
-          ctx.tree_ = root->children_[i];
+          ctx.tree_ = child;
           ctx.value_father_level_ = value_level;
           ctx.assign_father_level_ = assign_level;
 
@@ -818,7 +819,8 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
           }
         }
         if (OB_SUCC(ret)) {
-          if (OB_FAIL(SMART_CALL(transform_tree(ctx, session_info, child_policy)))) {
+          if (OB_FAIL(SMART_CALL(transform_tree(ctx, session_info, child_policy,
+                                               child_must_be_positive, child_expression, child_origin)))) {
             if (OB_NOT_SUPPORTED != ret) {
               SQL_PC_LOG(WARN, "fail to transform tree", K(ret));
             }
@@ -1016,7 +1018,7 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
                                            tree,
                                            sql_info,
                                            params,
-                                           pc_ctx.parameter_bindings_,
+                                           pc_ctx.parameterization_,
                                            is_prepare_mode(mode) ? NULL : &pc_ctx.select_item_param_infos_,
                                            is_transform_outline,
                                            mode))) {
@@ -1078,7 +1080,7 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
     }
   }
   if (OB_FAIL(ret)) {
-    pc_ctx.parameter_bindings_.reset();
+    pc_ctx.parameterization_.reset();
     if (pc_ctx.select_item_param_infos_.created()) pc_ctx.select_item_param_infos_.clear();
   }
 
@@ -1750,55 +1752,46 @@ int ObSqlParameterization::raw_fast_parameterize_sql(ObIAllocator &allocator,
   return ret;
 }
 
-int ObSqlParameterization::insert_neg_sign(ObIAllocator &alloc_buf, ParseNode *node)
+int ObSqlParameterization::make_negated_literal(ObIAllocator &allocator, const ParseNode &source,
+                                                   bool negate, const NumericLiteral *&literal)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(node)) {
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(node), K(ret));
-  } else if (T_INT != node->type_ && T_DOUBLE != node->type_ && T_FLOAT != node->type_ && T_NUMBER != node->type_) {
-    ret = OB_ERR_UNEXPECTED;
-    SQL_PC_LOG(WARN, "invalid neg digit type", K(node->type_), K(ret));
+  NumericKind kind;
+  switch (source.type_) {
+    case T_INT: kind = NumericKind::Integer; break;
+    case T_UINT64: kind = NumericKind::Unsigned; break;
+    case T_NUMBER: kind = NumericKind::Decimal; break;
+    case T_FLOAT: kind = NumericKind::Float; break;
+    case T_DOUBLE: kind = NumericKind::Double; break;
+    default: return OB_ERR_UNEXPECTED;
+  }
+  ObString text(source.str_len_, source.str_value_);
+  uint64_t integer = static_cast<uint64_t>(source.value_);
+  if (negate) {
+    char *spelling = static_cast<char *>(allocator.alloc(text.length() + 2));
+    if (spelling == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+    spelling[0] = '-';
+    MEMCPY(spelling + 1, text.ptr(), text.length());
+    spelling[text.length() + 1] = '\0';
+    text.assign_ptr(spelling, text.length() + 1);
+    if (kind == NumericKind::Integer) integer = uint64_t(0) - integer;
+  }
+  void *storage = allocator.alloc(sizeof(NumericLiteral));
+  if (storage == nullptr) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
-    if (T_INT == node->type_) {
-      node->value_ = -node->value_;
-    }
-    char *new_str = static_cast<char *>(parse_malloc(node->str_len_ + 2, &alloc_buf));
-    char *new_raw_text = static_cast<char *>(parse_malloc(node->text_len_ + 2, &alloc_buf));
-    if (OB_ISNULL(new_str) || OB_ISNULL(new_raw_text)) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
-      SQL_PC_LOG(ERROR, "parse_strdup failed", K(ret), K(new_raw_text), K(new_str));
-    } else {
-      new_str[0] = '-';
-      new_raw_text[0] = '-';
-      MEMMOVE(new_str+1, node->str_value_, node->str_len_);
-      MEMMOVE(new_raw_text+1, node->raw_text_, node->text_len_);
-      new_str[node->str_len_ + 1] = '\0';
-      new_raw_text[node->text_len_ + 1] = '\0';
-
-      node->str_value_ = new_str;
-      node->raw_text_ = new_raw_text;
-      node->str_len_++;
-      node->text_len_++;
-    }
+    literal = new (storage) NumericLiteral{kind, integer, text};
   }
   return ret;
 }
 
-int ObSqlParameterization::add_param_flag(const ParseNode *node, SqlInfo &sql_info)
+int ObSqlParameterization::add_param_flag(ParameterOrigin origin, SqlInfo &sql_info)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(node)) {
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(ret));
-  } else if (1 == node->is_neg_) {
-    if (OB_FAIL(sql_info.neg_param_index_.add_member(sql_info.total_))) {
-    }
-  } else if (node->is_trans_from_minus_) {
-    if (OB_FAIL(sql_info.trans_from_minus_index_.add_member(sql_info.total_))) {
-    }
-  } else {
-    // do nothing
+  if (origin == ParameterOrigin::UnaryNegation) {
+    ret = sql_info.neg_param_index_.add_member(sql_info.total_);
+  } else if (origin == ParameterOrigin::Subtraction) {
+    ret = sql_info.trans_from_minus_index_.add_member(sql_info.total_);
   }
   return ret;
 }
@@ -2095,7 +2088,7 @@ int ObSqlParameterization::get_related_user_vars(const ParseNode *tree, common::
 int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObPCParam *> &raw_params,
                                                       const ParseNode *tree,
                                                       bool string_literal,
-                                                      const ParameterBindings &bindings,
+                                                      const ParameterizationResult &bindings,
                                                       SelectItemParamInfoMap &select_item_param_infos)
 {
   int ret = OB_SUCCESS;
@@ -2219,7 +2212,7 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
 int ObSqlParameterization::resolve_paramed_const(SelectItemTraverseCtx &ctx)
 {
   int ret = OB_SUCCESS;
-  const auto *binding = ctx.bindings_.find(ctx.tree_);
+  const auto *binding = ctx.parameterization_.find(ctx.tree_);
   const int64_t idx = binding->raw_token_index;
   if (idx >= ctx.raw_params_.count()) {
     ret = OB_INVALID_ARGUMENT;
@@ -2248,7 +2241,8 @@ int ObSqlParameterization::resolve_paramed_const(SelectItemTraverseCtx &ctx)
       if (ctx.param_info_.name_len_ < ctx.buf_len_) {
         ctx.param_info_.paramed_field_name_[ctx.param_info_.name_len_++] = '?'; // Replace constant with '?'
       }
-      if (ctx.tree_->is_neg_ && OB_FAIL(ctx.param_info_.neg_params_idx_.add_member(idx))) {
+      if (binding->origin == ParameterOrigin::UnaryNegation
+          && OB_FAIL(ctx.param_info_.neg_params_idx_.add_member(idx))) {
         SQL_PC_LOG(WARN, "failed to add member", K(ret), K(idx));
       }
       if (OB_SUCC(ret)) {
@@ -2258,123 +2252,36 @@ int ObSqlParameterization::resolve_paramed_const(SelectItemTraverseCtx &ctx)
   return ret;
 }
 
-int ObSqlParameterization::transform_minus_op(ObIAllocator &alloc, ParseNode *tree, bool is_from_pl)
+int ObSqlParameterization::lower_subtraction(ObIAllocator &allocator, const ParseNode *tree,
+                                                  ParameterizationResult &result, bool is_from_pl)
 {
   int ret = OB_SUCCESS;
-  if (T_OP_MINUS != tree->type_) {
-    // do nothing
-  } else if (2 != tree->num_child_
-             || OB_ISNULL(tree->children_)
-             || OB_ISNULL(tree->children_[1])) {
+  const ParseNode *operand = nullptr;
+  if (tree->type_ != T_OP_MINUS) {
+  } else if (tree->num_child_ != 2 || tree->children_ == nullptr || tree->children_[1] == nullptr) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (1 == tree->children_[1]->is_assigned_from_child_) {
-    // select 1 - (2) from dual;
-    // select 1 - (2/3/4) from dual;
-    // For constant node 2, it cannot be converted to -2
-    // do nothing
+  } else if (tree->children_[1]->is_assigned_from_child_) {
   } else if (ob_is_number_or_decimal_int_tc(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_))
              || ((ob_is_integer_type(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_))
-                  || ob_is_real_type(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_)))
+                   || ob_is_real_type(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_)))
                  && tree->children_[1]->value_ >= 0)) {
-    ParseNode *child = tree->children_[1];
-    tree->type_ = T_OP_ADD;
-    if (!is_from_pl) {
-      if (T_INT == child->type_) {
-        child->value_ = -child->value_;
-      }
-
-      char *new_str = static_cast<char *>(parse_malloc(child->str_len_ + 2, &alloc));
-      char *new_raw_text = static_cast<char *>(parse_malloc(child->text_len_ + 2, &alloc));
-      if (OB_ISNULL(new_str) || OB_ISNULL(new_raw_text)) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-      } else {
-        new_str[0] = '-';
-        new_raw_text[0] = '-';
-        MEMMOVE(new_str + 1, child->str_value_, child->str_len_);
-        MEMMOVE(new_raw_text + 1, child->raw_text_, child->text_len_);
-        new_str[child->str_len_ + 1] = '\0';
-        new_raw_text[child->text_len_ + 1] = '\0';
-
-        child->str_len_++;
-        child->text_len_ ++;
-        child->str_value_ = new_str;
-        child->raw_text_ = new_raw_text;
-        child->is_trans_from_minus_ = 1;
-      }
+    operand = tree->children_[1];
+  } else if (tree->children_[1]->type_ == T_OP_MUL || tree->children_[1]->type_ == T_OP_DIV
+             || tree->children_[1]->type_ == T_OP_INT_DIV || tree->children_[1]->type_ == T_OP_MOD) {
+    ret = find_leftest_const_node(*tree->children_[1], operand);
+  }
+  if (OB_SUCC(ret) && operand != nullptr) {
+    const NumericLiteral *literal = nullptr;
+    if (OB_FAIL(make_negated_literal(allocator, *operand, !is_from_pl, literal))) {
+    } else if (OB_FAIL(result.negate_literal(operand, literal))) {
     } else {
-      child->is_trans_from_minus_ = 1;
+      ret = result.add_negated_operand(tree);
     }
-  } else if (T_OP_MUL == tree->children_[1]->type_ || T_OP_DIV == tree->children_[1]->type_
-             || T_OP_INT_DIV == tree->children_[1]->type_
-             || T_OP_MOD == tree->children_[1]->type_) {
-    /*  '0 - 2 * 3' should be transformed to '0 + (-2) * 3' */
-    /*  '0 - 2 / 3' should be transformed to '0 + (-2) / 3' */
-    /*  '0 - 4 mod 3' should be transformed to '0 + (-4 mod 3)' */
-    /*  '0 - 2/3/4' => '0 + (-2/3/4)' */
-    /*  notify that, syntax tree of '0 - 2/3/4' is */
-    /*            - */
-    /*          /   \ */
-    /*         0    div */
-    /*             /   \ */
-    /*           div    4 */
-    /*          /   \ */
-    /*         2     3 */
-    /*  so, we need to find the leftest leave node and change its value and str */
-    /*  same for '%','*', mod */
-    /*  */
-    /*  For mod(), for example select 1 - mod(mod(3, 4), 2) from dual; */
-    /*  Syntax tree is: */
-    /*       - */
-    /*     /  \ */
-    /*    1   mod */
-    /*       /   \ */
-    /*     mod    2 */
-    /*    /  \ */
-    /*   3    4 */
-    /*   This syntax tree is the same as select 1 - 3%4%2 from dual, but - and 3 cannot be combined together here. */
-    /*   Otherwise quick parameterization and hard parsing get different constants (3 and -3), so T_OP_MOD cannot be converted to minus sign. */
-    ParseNode *const_node = NULL;
-    ParseNode *op_node = tree->children_[1];
-    if (OB_FAIL(find_leftest_const_node(*op_node, const_node))) {
-    } else if (OB_ISNULL(const_node)) {
-      // 1 - (2)/3, - and 2 are also not combinable
-      // do nothing
-    } else {
-      tree->type_ = T_OP_ADD;
-      if (!is_from_pl) {
-        if (T_INT == const_node->type_) {
-          const_node->value_ = -const_node->value_;
-        }
-        char *new_str = static_cast<char *>(parse_malloc(const_node->str_len_ + 2, &alloc));
-        char *new_raw_text = static_cast<char *>(parse_malloc(const_node->text_len_ + 2, &alloc));
-
-        if (OB_ISNULL(new_str) || OB_ISNULL(new_raw_text)) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-        } else {
-          new_str[0] = '-';
-          new_raw_text[0] = '-';
-          MEMMOVE(new_str + 1, const_node->str_value_, const_node->str_len_);
-          MEMMOVE(new_raw_text + 1, const_node->raw_text_, const_node->text_len_);
-          new_str[const_node->str_len_ + 1] = '\0';
-          new_raw_text[const_node->text_len_]= '\0';
-
-          const_node->str_len_++;
-          const_node->text_len_++;
-          const_node->str_value_ = new_str;
-          const_node->raw_text_ = new_raw_text;
-          const_node->is_trans_from_minus_ = 1;
-        }
-      } else {
-        const_node->is_trans_from_minus_ = 1;
-      }
-    }
-  } else {
-    // do nothing
   }
   return ret;
 }
 
-int ObSqlParameterization::find_leftest_const_node(ParseNode &cur_node, ParseNode *&const_node)
+int ObSqlParameterization::find_leftest_const_node(const ParseNode &cur_node, const ParseNode *&const_node)
 {
   int ret = OB_SUCCESS;
   if (ob_is_numeric_type(ITEM_TO_OBJ_TYPE(cur_node.type_))

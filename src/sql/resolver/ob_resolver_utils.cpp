@@ -25,6 +25,7 @@
 #include "sql/engine/cmd/ob_load_data_parser.h"
 #include "sql/resolver/cmd/ob_load_data_stmt.h"
 #include "sql/resolver/ob_resolver_utils.h"
+#include "sql/resolver/expr/numeric_literal.h"
 #include "sql/code_generator/ob_column_index_provider.h"
 #include "query/resolver/ob_partition_type_policy.h"
 #include "sql/resolver/cmd/ob_load_data_stmt.h"
@@ -1903,6 +1904,134 @@ int ObResolverUtils::set_string_val_charset(ObIAllocator &allocator,
   return ret;
 }
 
+int ObResolverUtils::resolve_numeric_literal(const NumericLiteral &literal,
+                                            const NumericLiteralOptions &options,
+                                            ObIAllocator &allocator,
+                                            ObObjParam &val,
+                                            ObString &literal_prefix)
+{
+  int ret = OB_SUCCESS;
+  val.set_result_flag(NOT_NULL_FLAG);
+  switch (literal.kind) {
+    case NumericKind::Float:
+    case NumericKind::Double: {
+      const ObItemType type = literal.kind == NumericKind::Double ? T_DOUBLE : T_FLOAT;
+      int err = 0;
+      double value = 0;
+      char *endptr = NULL;
+      value = strntod(literal.text.ptr(), static_cast<int32_t>(literal.text.length()),
+                      type, &endptr, &err);
+      if (EOVERFLOW == err) {
+        literal_prefix.assign_ptr(literal.text.ptr(), static_cast<int32_t>(literal.text.length()));
+        ret = OB_ERR_ILLEGAL_VALUE_FOR_TYPE;
+        LOG_USER_ERROR(OB_ERR_ILLEGAL_VALUE_FOR_TYPE, "double", literal_prefix.length(),
+                      literal_prefix.ptr());
+      } else {
+        if (literal.kind == NumericKind::Double) {
+          val.set_double(value);
+        } else {
+          val.set_float(value);
+        }
+        val.set_length(static_cast<int16_t>(literal.text.length()));
+        ObString tmp_input(static_cast<int32_t>(literal.text.length()), literal.text.ptr());
+        _LOG_DEBUG("finish parse double from str, tmp_input=%.*s, value=%.30lf, ret=%d, type=%d, literal_prefix=%.*s",
+                   tmp_input.length(), tmp_input.ptr(), value, ret, type, literal_prefix.length(), literal_prefix.ptr());
+      }
+      val.set_param_meta(val.get_meta());
+      break;
+    }
+    case NumericKind::Unsigned:
+    case NumericKind::Integer: {
+      if (literal.kind == NumericKind::Integer) {
+        val.set_int(static_cast<int64_t>(literal.integer));
+      } else {
+        val.set_uint64(literal.integer);
+      }
+      val.set_scale(0);
+      int16_t formalized_prec = static_cast<int16_t>(literal.text.length());
+      // for constant integers, reset precision to 4/8/16/20
+      if (!options.from_pl && options.decimal_int
+          && !(ObStmt::is_ddl_stmt(options.statement_type, true) || ObStmt::is_show_stmt(options.statement_type))) {
+        int16_t node_prec = static_cast<int16_t>(literal.text.length());
+        if (options.arithmetic) {
+          if (node_prec <= 4) {
+            formalized_prec = 4;
+          } else if (node_prec <= 8) {
+            formalized_prec = 8;
+          } else if (node_prec <= 16) {
+            formalized_prec = 16;
+          } else {
+            formalized_prec = 20;
+          }
+          formalized_prec = MAX(options.min_integer_precision, formalized_prec);
+        } else {
+          formalized_prec = 20;
+        }
+      }
+      val.set_precision(formalized_prec);
+      val.set_length(static_cast<int16_t>(literal.text.length()));
+      val.set_param_meta(val.get_meta());
+      LOG_DEBUG("resolve integer constant", K(val), K(val.get_meta()), K(formalized_prec), K(options.statement_type), K(lbt()));
+      break;
+    }
+    case NumericKind::Decimal: {
+      int16_t precision = PRECISION_UNKNOWN_YET;
+      int16_t scale = SCALE_UNKNOWN_YET;
+      number::ObNumber nmb;
+      ObDecimalInt *decint = nullptr;
+      int16_t len = 0;
+      ObString tmp_string(static_cast<int32_t>(literal.text.length()), literal.text.ptr());
+      bool use_decimalint_as_result = false;
+      int tmp_ret = OB_E(EventTable::EN_ENABLE_ORA_DECINT_CONST) OB_SUCCESS;
+
+      if (options.decimal_int && !options.from_pl && OB_SUCC(tmp_ret)) {
+        // If decimal int type is enabled, T_NUMBER is parsed as decimal int
+        int32_t val_len = 0;
+        ret = wide::from_string(literal.text.ptr(), literal.text.length(), allocator, scale, precision,
+                                val_len, decint);
+        len = static_cast<int16_t>(val_len);
+        // Scientific decimal literals such as +.12e-3 have scale = 5 and
+        // precision = 2, so ObNumber is used.
+        use_decimalint_as_result = (precision <= OB_MAX_DECIMAL_POSSIBLE_PRECISION
+                                    && scale <= OB_MAX_DECIMAL_POSSIBLE_PRECISION
+                                    && scale >= 0
+                                    && precision >= scale);
+      }
+      if (use_decimalint_as_result) {
+        // do nothing, result type is decimal int
+      } else if (NULL != tmp_string.find('e') || NULL != tmp_string.find('E')) {
+        ret = nmb.from_sci(literal.text.ptr(), static_cast<int32_t>(literal.text.length()), allocator, &precision, &scale);
+        len = static_cast<int16_t>(literal.text.length());
+      } else {
+        ret = nmb.from(literal.text.ptr(), static_cast<int32_t>(literal.text.length()), allocator, &precision, &scale);
+        len = static_cast<int16_t>(literal.text.length());
+      }
+      if (OB_FAIL(ret)) {
+        if (OB_INTEGER_PRECISION_OVERFLOW == ret) {
+        } else if (OB_NUMERIC_OVERFLOW == ret) {
+          LOG_WARN("numeric overflow");
+        } else {
+        }
+      } else {
+        if (use_decimalint_as_result) {
+          val.set_decimal_int(len, scale, decint);
+          val.set_precision(precision);
+          val.set_scale(scale);
+          val.set_length(len);
+        } else {
+          val.set_number(nmb);
+          val.set_precision(precision);
+          val.set_scale(scale);
+          val.set_length(len);
+        }
+      }
+      val.set_param_meta(val.get_meta());
+      break;
+    }
+  }
+  return ret;
+}
+
 int ObResolverUtils::resolve_const(const ParseNode *node,
                                    const stmt::StmtType stmt_type,
                                    ObIAllocator &allocator,
@@ -1929,7 +2058,6 @@ int ObResolverUtils::resolve_const(const ParseNode *node,
     LOG_WARN("parse node is invalid", K(node));
   } else {
     LOG_DEBUG("resolve item", "item_type", get_type_name(static_cast<int>(node->type_)), K(stmt_type));
-    int16_t precision = PRECISION_UNKNOWN_YET;
     int16_t scale = SCALE_UNKNOWN_YET;
     // const value contains NOT_NULL flag
     val.set_result_flag(NOT_NULL_FLAG);
@@ -2035,121 +2163,26 @@ int ObResolverUtils::resolve_const(const ParseNode *node,
       break;
     }
     case T_FLOAT:
-    case T_DOUBLE: {
-      int err = 0;
-      double value = 0;
-      char *endptr = NULL;
-      value = strntod(node->str_value_, static_cast<int32_t>(node->str_len_),
-                      node->type_, &endptr, &err);
-      if (EOVERFLOW == err) {
-        literal_prefix.assign_ptr(node->str_value_, static_cast<int32_t>(node->str_len_));
-        ret = OB_ERR_ILLEGAL_VALUE_FOR_TYPE;
-        LOG_USER_ERROR(OB_ERR_ILLEGAL_VALUE_FOR_TYPE, "double", literal_prefix.length(),
-                      literal_prefix.ptr());
-      } else {
-        if (T_DOUBLE == node->type_) {
-          val.set_double(value);
-        } else {
-          val.set_float(value);
-        }
-        val.set_length(static_cast<int16_t>(node->str_len_));
-        ObString tmp_input(static_cast<int32_t>(node->str_len_), node->str_value_);
-        _LOG_DEBUG("finish parse double from str, tmp_input=%.*s, value=%.30lf, ret=%d, type=%d, literal_prefix=%.*s",
-                   tmp_input.length(), tmp_input.ptr(), value, ret, node->type_, literal_prefix.length(), literal_prefix.ptr());
-      }
-      val.set_param_meta(val.get_meta());
-      break;
-    }
+    case T_DOUBLE:
     case T_UINT64:
-    case T_INT: {
-      if (NULL != parents_expr_info) {
+    case T_INT:
+    case T_NUMBER: {
+      const NumericLiteral literal{
+          node->type_ == T_INT ? NumericKind::Integer
+              : node->type_ == T_UINT64 ? NumericKind::Unsigned
+              : node->type_ == T_NUMBER ? NumericKind::Decimal
+              : node->type_ == T_FLOAT ? NumericKind::Float : NumericKind::Double,
+          static_cast<uint64_t>(node->value_),
+          ObString(static_cast<int32_t>(node->str_len_), node->str_value_)};
+      const NumericLiteralOptions options{stmt_type, enable_decimal_int_type, is_from_pl,
+          fmt_int_or_ch_decint, min_const_integer_precision};
+      if ((node->type_ == T_INT || node->type_ == T_UINT64) && parents_expr_info != nullptr) {
         LOG_DEBUG("T_INT as pl acc idx", K(parents_expr_info->has_member(IS_PL_ACCESS_IDX)));
       }
-      if (T_INT == node->type_) {
-        val.set_int(node->value_);
-      } else {
-        val.set_uint64(static_cast<uint64_t>(node->value_));
+      ret = resolve_numeric_literal(literal, options, allocator, val, literal_prefix);
+      if ((node->type_ == T_INT || node->type_ == T_UINT64) && node->is_date_unit_) {
+        literal_prefix = literal.text;
       }
-      val.set_scale(0);
-      int16_t formalized_prec = static_cast<int16_t>(node->str_len_);
-      // for constant integers, reset precision to 4/8/16/20
-      if (!is_from_pl && enable_decimal_int_type
-          && !(ObStmt::is_ddl_stmt(stmt_type, true) || ObStmt::is_show_stmt(stmt_type))) {
-        int16_t node_prec = static_cast<int16_t>(node->str_len_);
-        if (fmt_int_or_ch_decint) {
-          if (node_prec <= 4) {
-            formalized_prec = 4;
-          } else if (node_prec <= 8) {
-            formalized_prec = 8;
-          } else if (node_prec <= 16) {
-            formalized_prec = 16;
-          } else {
-            formalized_prec = 20;
-          }
-          formalized_prec = MAX(min_const_integer_precision, formalized_prec);
-        } else {
-          formalized_prec = 20;
-        }
-      }
-      val.set_precision(formalized_prec);
-      val.set_length(static_cast<int16_t>(node->str_len_));
-      val.set_param_meta(val.get_meta());
-      if (true == node->is_date_unit_) {
-        literal_prefix.assign_ptr(node->str_value_, static_cast<int32_t>(node->str_len_));
-      }
-      LOG_DEBUG("resolve integer constant", K(val), K(val.get_meta()), K(formalized_prec), K(stmt_type), K(lbt()));
-      break;
-    }
-    case T_NUMBER: {
-      number::ObNumber nmb;
-      ObDecimalInt *decint = nullptr;
-      int16_t len = 0;
-      ObString tmp_string(static_cast<int32_t>(node->str_len_), node->str_value_);
-      bool use_decimalint_as_result = false;
-      int tmp_ret = OB_E(EventTable::EN_ENABLE_ORA_DECINT_CONST) OB_SUCCESS;
-
-      if (enable_decimal_int_type && !is_from_pl && OB_SUCC(tmp_ret)) {
-        // If decimal int type is enabled, T_NUMBER is parsed as decimal int
-        int32_t val_len = 0;
-        ret = wide::from_string(node->str_value_, node->str_len_, allocator, scale, precision,
-                                val_len, decint);
-        len = static_cast<int16_t>(val_len);
-        // Scientific decimal literals such as +.12e-3 have scale = 5 and
-        // precision = 2, so ObNumber is used.
-        use_decimalint_as_result = (precision <= OB_MAX_DECIMAL_POSSIBLE_PRECISION
-                                    && scale <= OB_MAX_DECIMAL_POSSIBLE_PRECISION
-                                    && scale >= 0
-                                    && precision >= scale);
-      }
-      if (use_decimalint_as_result) {
-        // do nothing, result type is decimal int
-      } else if (NULL != tmp_string.find('e') || NULL != tmp_string.find('E')) {
-        ret = nmb.from_sci(node->str_value_, static_cast<int32_t>(node->str_len_), allocator, &precision, &scale);
-        len = static_cast<int16_t>(node->str_len_);
-      } else {
-        ret = nmb.from(node->str_value_, static_cast<int32_t>(node->str_len_), allocator, &precision, &scale);
-        len = static_cast<int16_t>(node->str_len_);
-      }
-      if (OB_FAIL(ret)) {
-        if (OB_INTEGER_PRECISION_OVERFLOW == ret) {
-        } else if (OB_NUMERIC_OVERFLOW == ret) {
-          LOG_WARN("numeric overflow");
-        } else {
-        }
-      } else {
-        if (use_decimalint_as_result) {
-          val.set_decimal_int(len, scale, decint);
-          val.set_precision(precision);
-          val.set_scale(scale);
-          val.set_length(len);
-        } else {
-          val.set_number(nmb);
-          val.set_precision(precision);
-          val.set_scale(scale);
-          val.set_length(len);
-        }
-      }
-      val.set_param_meta(val.get_meta());
       break;
     }
     case T_QUESTIONMARK: {
@@ -2451,7 +2484,7 @@ int ObResolverUtils::resolve_const_expr(ObResolverParams &params,
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params.param_list_;
-    ctx.parameter_bindings_ = params.parameter_bindings_;
+    ctx.parameterization_ = params.parameterization_;
     ctx.is_extract_param_type_ = !params.is_prepare_protocol_; //when prepare do not extract
     ctx.schema_checker_ = params.schema_checker_;
     ctx.session_info_ = params.session_info_;
@@ -3120,7 +3153,7 @@ int ObResolverUtils::resolve_partition_range_value_expr(ObResolverParams &params
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = ObCharset::charset_type_by_coll(part_func_expr.get_collation_type());
     ctx.param_list_ = params.param_list_;
-    ctx.parameter_bindings_ = params.parameter_bindings_;
+    ctx.parameterization_ = params.parameterization_;
     ctx.session_info_ = params.session_info_;
     ctx.query_ctx_ = params.query_ctx_;
     ObRawExprResolverImpl expr_resolver(ctx);
@@ -3264,7 +3297,7 @@ int ObResolverUtils::resolve_partition_range_value_expr(ObResolverParams &params
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params.param_list_;
-    ctx.parameter_bindings_ = params.parameter_bindings_;
+    ctx.parameterization_ = params.parameterization_;
     ctx.session_info_ = params.session_info_;
     ctx.query_ctx_ = params.query_ctx_;
     ObRawExprResolverImpl expr_resolver(ctx);
@@ -3422,7 +3455,7 @@ int ObResolverUtils::resolve_partition_expr(ObResolverParams &params,
     ctx.dest_collation_ = collation_connection;
     ctx.connection_charset_ = character_set_connection;
     ctx.param_list_ = params.param_list_;
-    ctx.parameter_bindings_ = params.parameter_bindings_;
+    ctx.parameterization_ = params.parameterization_;
     ctx.session_info_ = params.session_info_;
     ctx.query_ctx_ = params.query_ctx_;
     ObRawExprResolverImpl expr_resolver(ctx);

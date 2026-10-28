@@ -331,7 +331,7 @@ struct ObResolverParams
        lob_read_service_(NULL),
        query_ctx_(NULL),
        param_list_(NULL),
-       parameter_bindings_(nullptr),
+       parameterization_(nullptr),
        select_item_param_infos_(NULL),
        prepare_param_count_(0),
        external_param_info_(),
@@ -398,7 +398,7 @@ public:
   common::ObILobReadService *lob_read_service_;
   ObQueryCtx *query_ctx_;
   const ParamStore *param_list_;
-  const ParameterBindings *parameter_bindings_;
+  const ParameterizationResult *parameterization_;
   const SelectItemParamInfoMap *select_item_param_infos_;
   int64_t prepare_param_count_;
   ExternalParams external_param_info_;

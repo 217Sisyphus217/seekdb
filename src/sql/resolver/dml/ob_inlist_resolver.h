@@ -25,7 +25,7 @@ namespace sql
 class ObValuesTableDef;
 class ObDMLResolver;
 class ObQueryRefRawExpr;
-class ParameterBindings;
+class ParameterizationResult;
 struct DistinctObjMeta;
 struct InListRewriteInfo;
 
@@ -44,7 +44,7 @@ struct ObInListsResolverHelper
 {
   ObIAllocator &alloc_;
   const ParamStore *param_store_;
-  const ParameterBindings *parameter_bindings_;
+  const ParameterizationResult *parameterization_;
   ObCollationType connect_collation_;
   ObCollationType nchar_collation_;
   ObCollationType server_collation_;
@@ -53,7 +53,7 @@ struct ObInListsResolverHelper
 
   ObInListsResolverHelper(ObIAllocator &alloc, 
                           const ParamStore *param_store, 
-                          const ParameterBindings *parameter_bindings,
+                          const ParameterizationResult *parameter_bindings,
                           ObCollationType connect_collation,
                           ObCollationType nchar_collation, 
                           ObCollationType server_collation, 
@@ -61,7 +61,7 @@ struct ObInListsResolverHelper
                           bool is_prepare_stmt)
   : alloc_(alloc), 
     param_store_(param_store), 
-    parameter_bindings_(parameter_bindings),
+    parameterization_(parameter_bindings),
     connect_collation_(connect_collation),
     nchar_collation_(nchar_collation), 
     server_collation_(server_collation), 
@@ -90,7 +90,7 @@ public:
                                          const bool is_in_pl_prepare,
                                          const ObSQLSessionInfo *session_info,
                                          const ParamStore *param_store,
-                                         const ParameterBindings *parameter_bindings,
+                                         const ParameterizationResult *parameter_bindings,
                                          const ObStmt *stmt,
                                          common::ObIAllocator &alloc,
                                          bool &is_question_mark,

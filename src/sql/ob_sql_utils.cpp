@@ -1425,7 +1425,7 @@ int ObSQLUtils::get_outline_key(ObIAllocator &allocator,
     ParamStore params( (ObWrapperAllocator(allocator)) );
     ObSEArray<ObPCParam *, OB_PC_RAW_PARAM_COUNT> raw_params;
     SqlInfo sql_info;
-    ParameterBindings bindings;
+    ParameterizationResult bindings;
     char *buf = NULL;
     char *buf2 = NULL;
     int32_t pos = 0;

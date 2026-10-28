@@ -18,7 +18,7 @@
 
 #include "sql/resolver/dml/ob_inlist_resolver.h"
 #include "sql/resolver/dml/ob_dml_resolver.h"
-#include "sql/resolver/parameter_bindings.h"
+#include "sql/resolver/parameterization_result.h"
 #include "sql/engine/expr/ob_expr_version.h"
 #include "sql/rewrite/ob_transform_pre_process.h"
 
@@ -213,8 +213,8 @@ int ObInListResolver::get_inlist_rewrite_info(const ParseNode &in_list,
         bool is_const_type = false;
         const ParseNode *node = column_cnt == 1 ? in_list.children_[i] 
                                                 : in_list.children_[i]->children_[col_idx];
-        const ParameterBinding *binding = helper.parameter_bindings_ == nullptr
-            ? nullptr : helper.parameter_bindings_->find(node);
+        const ParameterBinding *binding = helper.parameterization_ == nullptr
+            ? nullptr : helper.parameterization_->find(node);
         if (OB_ISNULL(node)) {
           ret = OB_ERR_UNEXPECTED;
         } else if (FALSE_IT(rewrite_info.is_question_mark_ = binding != nullptr || T_QUESTIONMARK == node->type_)) {
@@ -277,7 +277,7 @@ int ObInListResolver::check_inlist_rewrite_enable(const ParseNode &in_list,
                                                   const bool is_in_pl_prepare,
                                                   const ObSQLSessionInfo *session_info,
                                                   const ParamStore *param_store,
-                                                  const ParameterBindings *parameter_bindings,
+                                                  const ParameterizationResult *parameter_bindings,
                                                   const ObStmt *stmt,
                                                   ObIAllocator &alloc,
                                                   bool &is_question_mark,
@@ -373,7 +373,7 @@ int ObInListResolver::resolve_access_param_values_table(const ParseNode &in_list
 {
   int ret = OB_SUCCESS;
   const ParseNode *row_node = NULL;
-  const ParameterBindings *parameter_bindings = cur_resolver_->params_.parameter_bindings_;
+  const ParameterizationResult *parameter_bindings = cur_resolver_->params_.parameterization_;
   ObCollationType coll_type = CS_TYPE_INVALID;
   ObLengthSemantics length_semantics = LS_DEFAULT;
   if (OB_ISNULL(allocator) || OB_ISNULL(session_info) || OB_ISNULL(param_store)) {
@@ -799,7 +799,7 @@ int ObInListResolver::try_merge_inlists(ObExprResolveContext &resolve_ctx,
   } else {
     ObInListsResolverHelper helper(alloc,
                                    resolve_ctx.param_list_,
-                                   resolve_ctx.parameter_bindings_,
+                                   resolve_ctx.parameterization_,
                                    connect_collation,
                                    nchar_collation,
                                    static_cast<ObCollationType>(server_collation),

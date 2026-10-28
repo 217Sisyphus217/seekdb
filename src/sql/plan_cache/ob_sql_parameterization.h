@@ -136,7 +136,7 @@ public:
                                    ParseNode *tree,
                                    SqlInfo &sql_info,
                                    ParamStore &params,
-                                   ParameterBindings &bindings,
+                                   ParameterizationResult &bindings,
                                    SelectItemParamInfoMap *select_item_param_infos,
                                    bool is_transform_outline,
                                    SQL_EXECUTION_MODE execution_mode = INVALID_MODE,
@@ -213,7 +213,6 @@ public:
   static int construct_no_check_type_params(const ObIArray<int64_t> &no_check_type_offsets,
                                             const ObBitSet<> &need_check_type_offsets,
                                             ParamStore &params);
-  static int insert_neg_sign(common::ObIAllocator &alloc_buf, ParseNode *node);
   static bool is_tree_not_param(const ParseNode *tree);
   static SQL_EXECUTION_MODE get_sql_execution_mode(ObPlanCacheCtx &pc_ctx);
   static bool is_prepare_mode(SQL_EXECUTION_MODE mode);
@@ -226,8 +225,11 @@ private:
 
   static bool is_node_not_param(TransformTreeCtx &ctx);
   static int transform_tree(TransformTreeCtx &ctx, const ObSQLSessionInfo &session_info,
-                             const ArgumentParameterization &parent_policy);
-  static int add_param_flag(const ParseNode *node, SqlInfo &sql_info);
+                             const ArgumentParameterization &parent_policy,
+                             bool must_be_positive,
+                             const ParseNode *parameter_expression,
+                             ParameterOrigin origin);
+  static int add_param_flag(ParameterOrigin origin, SqlInfo &sql_info);
   static int add_not_param_flag(const ParseNode *node, SqlInfo &sql_info);
   static int add_varchar_charset(const ParseNode *node, SqlInfo &sql_info);
   static int exclude_arguments(const ParseNode *arguments,
@@ -243,14 +245,15 @@ private:
   static int get_select_item_param_info(const common::ObIArray<ObPCParam *> &raw_params,
                                         const ParseNode *tree,
                                         bool string_literal,
-                                        const ParameterBindings &bindings,
+                                        const ParameterizationResult &bindings,
                                         SelectItemParamInfoMap &select_item_param_infos);
   static int parameterize_fields(SelectItemTraverseCtx &ctx);
 
   static int resolve_paramed_const(SelectItemTraverseCtx &ctx);
-  static int transform_minus_op(ObIAllocator &, ParseNode *, bool is_from_pl=false);
+  static int make_negated_literal(ObIAllocator &, const ParseNode &, bool negate, const NumericLiteral *&);
+  static int lower_subtraction(ObIAllocator &, const ParseNode *, ParameterizationResult &, bool is_from_pl);
 
-  static int find_leftest_const_node(ParseNode &cur_node, ParseNode *&const_node);
+  static int find_leftest_const_node(const ParseNode &cur_node, const ParseNode *&const_node);
   static bool need_fast_parser(const ObString &sql);
   static bool is_vector_index_query(const ParseNode *tree);
 };

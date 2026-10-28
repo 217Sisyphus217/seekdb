@@ -30,7 +30,7 @@
 #include "sql/plan_cache/ob_i_lib_cache_context.h"
 #include "sql/ob_sql_utils.h"
 #include "sql/plan_cache/ob_plan_cache_util.h"
-#include "sql/resolver/parameter_bindings.h"
+#include "sql/resolver/parameterization_result.h"
 
 namespace oceanbase
 {
@@ -475,7 +475,7 @@ void set_need_retry_add_plan(bool v) { need_retry_add_plan_ = v; }
   ObSqlTraits sql_traits_;
   int64_t normal_parse_const_cnt_;
   // select item parameterized information
-  ParameterBindings parameter_bindings_;
+  ParameterizationResult parameterization_;
   SelectItemParamInfoMap select_item_param_infos_;
   // According to some information when get plan fails, determine whether the newly generated plan should be added to plan cache
   bool should_add_plan_;

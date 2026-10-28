@@ -1342,8 +1342,8 @@ int ObSelectResolver::resolve_field_list(const ParseNode &node)
     // col_name1 is ":1", col_name2 is ":2", col_name3 is ":3"
     if (OB_FAIL(prepare_get_child_at(node.children_[i], 0))) {
     } else if (node.children_[i]->children_[0]->type_ == T_NULL
-               && (params_.parameter_bindings_ == nullptr
-                   || params_.parameter_bindings_->find(node.children_[i]->children_[0]) == nullptr)) {
+               && (params_.parameterization_ == nullptr
+                   || params_.parameterization_->find(node.children_[i]->children_[0]) == nullptr)) {
       // MySQL sets the alias of standalone null value("\N","null"...) to "NULL" during projection.
       // Note: when null value is in a composite expression, its alias is not modified.
       ObString alias_name = ObString::make_string("NULL");
@@ -4552,8 +4552,8 @@ int ObSelectResolver::check_union_leaf_to_values_table_valid(const ParseNode &pa
         } else if (T_ALIAS == param_node->type_ &&
                    OB_ISNULL(param_node = param_node->children_[0])) {
           ret = OB_ERR_UNEXPECTED;
-        } else if (FALSE_IT(binding = params_.parameter_bindings_ != nullptr
-            ? params_.parameter_bindings_->find(param_node) : nullptr)) {
+        } else if (FALSE_IT(binding = params_.parameterization_ != nullptr
+            ? params_.parameterization_->find(param_node) : nullptr)) {
         } else if (binding == nullptr && !IS_DATATYPE_OR_QUESTIONMARK_OP(param_node->type_)) {
           is_valid = false;
         } else if (OB_FAIL(ObResolverUtils::fast_get_param_type(*param_node, binding, param_store,

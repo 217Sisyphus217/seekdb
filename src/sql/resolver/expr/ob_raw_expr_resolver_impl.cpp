@@ -17,6 +17,8 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "ob_raw_expr_resolver_impl.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
+#include "sql/resolver/expr/numeric_literal.h"
+#include "sql/resolver/parameterization_result.h"
 #include "lib/json/ob_json_print_utils.h"
 #include "sql/pl/ob_pl_resolver.h"
 #include "sql/resolver/dml/ob_inlist_resolver.h"
@@ -367,8 +369,13 @@ int ObRawExprResolverImpl::do_recursive_resolve(const ParseNode *node,
     ret = OB_SIZE_OVERFLOW;
   } else {
     LOG_DEBUG("resolve item", "item_type", get_type_name(node->type_));
-    if (IS_DATATYPE_OR_QUESTIONMARK_OP(node->type_)
-        || (ctx_.parameter_bindings_ != nullptr && ctx_.parameter_bindings_->find(node) != nullptr)) {
+    const ParameterBinding *binding = ctx_.parameterization_ != nullptr
+        ? ctx_.parameterization_->find(node) : nullptr;
+    const NumericLowering *lowering = ctx_.parameterization_ != nullptr
+        ? ctx_.parameterization_->numeric_lowering(node) : nullptr;
+    if (binding != nullptr
+        || (lowering != nullptr && lowering->kind != NumericLowering::Kind::AddNegatedOperand)
+        || IS_DATATYPE_OR_QUESTIONMARK_OP(node->type_)) {
       if (OB_FAIL(process_datatype_or_questionmark(*node, expr))) {
       }
     } else {
@@ -1698,8 +1705,12 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
   ObConstRawExpr *c_expr = NULL;
   ObString literal_prefix;
   bool is_paramlize = false;
-  const ParameterBinding *binding = ctx_.parameter_bindings_ != nullptr
-      ? ctx_.parameter_bindings_->find(&node) : nullptr;
+  const ParameterBinding *binding = ctx_.parameterization_ != nullptr
+      ? ctx_.parameterization_->find(&node) : nullptr;
+  const NumericLowering *lowering = ctx_.parameterization_ != nullptr
+      ? ctx_.parameterization_->numeric_lowering(&node) : nullptr;
+  ObItemType expr_type = binding != nullptr ? T_QUESTIONMARK
+      : node.type_ == T_NCHAR ? T_VARCHAR : node.type_;
   const ObLengthSemantics default_length_semantics = (OB_NOT_NULL(ctx_.session_info_) ? ctx_.session_info_->get_actual_length_semantics() : LS_BYTE);
   const ObSQLSessionInfo *session_info = ctx_.session_info_;
   int64_t server_collation = CS_TYPE_INVALID;
@@ -1718,6 +1729,28 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
   } else if (binding != nullptr) {
     val.set_unknown(binding->parameter_index);
     val.set_param_meta(val.get_meta());
+  } else if (lowering != nullptr && lowering->kind != NumericLowering::Kind::AddNegatedOperand) {
+    if (OB_ISNULL(lowering->literal)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      const NumericLiteral &literal = *lowering->literal;
+      const NumericLiteralOptions options{session_info->get_stmt_type(), enable_decimal_int,
+          nullptr != ctx_.secondary_namespace_, ctx_.formalize_const_int_prec_,
+          session_info->get_min_const_integer_precision()};
+      switch (literal.kind) {
+        case NumericKind::Integer: expr_type = T_INT; break;
+        case NumericKind::Unsigned: expr_type = T_UINT64; break;
+        case NumericKind::Decimal: expr_type = T_NUMBER; break;
+        case NumericKind::Float: expr_type = T_FLOAT; break;
+        case NumericKind::Double: expr_type = T_DOUBLE; break;
+      }
+      if (OB_FAIL(ObResolverUtils::resolve_numeric_literal(literal, options,
+              ctx_.expr_factory_.get_allocator(), val, literal_prefix))) {
+      } else if (node.is_date_unit_
+                 && (literal.kind == NumericKind::Integer || literal.kind == NumericKind::Unsigned)) {
+        literal_prefix = literal.text;
+      }
+    }
   } else if (OB_FAIL(ObResolverUtils::resolve_const(&node,
                                              session_info->get_stmt_type(),
                                              ctx_.expr_factory_.get_allocator(),
@@ -1735,8 +1768,6 @@ int ObRawExprResolverImpl::process_datatype_or_questionmark(const ParseNode &nod
                                              nullptr != ctx_.secondary_namespace_,
                                              ctx_.formalize_const_int_prec_))) {
   }
-  const ObItemType expr_type = binding != nullptr ? T_QUESTIONMARK
-      : node.type_ == T_NCHAR ? T_VARCHAR : node.type_;
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(ctx_.expr_factory_.create_raw_expr(expr_type, c_expr))) {
   } else if (OB_ISNULL(c_expr)) {
@@ -2578,6 +2609,13 @@ int ObRawExprResolverImpl::process_pos_or_neg_node(const ParseNode *node, ObRawE
     ret = OB_INVALID_ARGUMENT;
   }
   for (; OB_SUCC(ret) && NULL != cur_expr && (cur_expr->type_ == T_OP_POS || cur_expr->type_ == T_OP_NEG);) {
+    if (cur_expr != node && ctx_.parameterization_ != nullptr) {
+      const NumericLowering *lowering = ctx_.parameterization_->numeric_lowering(cur_expr);
+      if (ctx_.parameterization_->find(cur_expr) != nullptr
+          || (lowering != nullptr && lowering->kind == NumericLowering::Kind::FoldUnaryExpression)) {
+        break;
+      }
+    }
     if (OB_UNLIKELY(1 != cur_expr->num_child_) || OB_ISNULL(cur_expr->children_)) {
       ret = OB_ERR_UNEXPECTED;
     } else {
@@ -2616,15 +2654,22 @@ int ObRawExprResolverImpl::process_operator_node(const ParseNode *node, ObRawExp
   ObOpRawExpr *b_expr = NULL;
   bool happened = false;
   bool formalize_const_int_prec = false;
+  ObItemType operator_type = T_INVALID;
   if (OB_ISNULL(node)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_UNLIKELY(2 != node->num_child_) || OB_ISNULL(node->children_)) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (T_OP_DIV == node->type_
-            || T_OP_MINUS == node->type_
-            || T_OP_ADD == node->type_
-            || T_OP_DIV == node->type_) {
-    formalize_const_int_prec = true;
+  } else {
+    const NumericLowering *lowering = ctx_.parameterization_ != nullptr
+        ? ctx_.parameterization_->numeric_lowering(node) : nullptr;
+    operator_type = lowering != nullptr && lowering->kind == NumericLowering::Kind::AddNegatedOperand
+        ? T_OP_ADD : node->type_;
+    if (T_OP_DIV == operator_type
+        || T_OP_MINUS == operator_type
+        || T_OP_ADD == operator_type
+        || T_OP_DIV == operator_type) {
+      formalize_const_int_prec = true;
+    }
   }
   if (OB_FAIL(ret)) {
   } else if (FALSE_IT(ctx_.formalize_const_int_prec_ = formalize_const_int_prec)) {
@@ -2632,7 +2677,7 @@ int ObRawExprResolverImpl::process_operator_node(const ParseNode *node, ObRawExp
   } else if (FALSE_IT(ctx_.formalize_const_int_prec_ = formalize_const_int_prec)) {
   } else if (OB_FAIL(SMART_CALL(recursive_resolve(node->children_[1], sub_expr2)))) {
   } else if (FALSE_IT(ctx_.formalize_const_int_prec_ = false)) {
-  } else if (OB_FAIL(ctx_.expr_factory_.create_raw_expr(node->type_, b_expr))) {
+  } else if (OB_FAIL(ctx_.expr_factory_.create_raw_expr(operator_type, b_expr))) {
   } else if (OB_ISNULL(expr = b_expr)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(b_expr->set_param_exprs(sub_expr1, sub_expr2))) {
@@ -3184,7 +3229,7 @@ int ObRawExprResolverImpl::resolve_right_branch_of_in_op(const ParseNode *node,
             NULL != ctx_.secondary_namespace_,
             ctx_.session_info_,
             ctx_.param_list_,
-            ctx_.parameter_bindings_,
+            ctx_.parameterization_,
             ctx_.stmt_,
             ctx_.expr_factory_.get_allocator(),
             is_question_mark,
@@ -6478,8 +6523,8 @@ int ObRawExprResolverImpl::process_odbc_time_literals(const ObItemType dst_time_
   int ret = OB_SUCCESS;
   expr = NULL;
   bool is_valid_time_str = false;
-  const ParameterBinding *binding = ctx_.parameter_bindings_ != nullptr
-      ? ctx_.parameter_bindings_->find(expr_node) : nullptr;
+  const ParameterBinding *binding = ctx_.parameterization_ != nullptr
+      ? ctx_.parameterization_->find(expr_node) : nullptr;
   const int64_t parameter_index = binding != nullptr ? binding->parameter_index
       : expr_node != nullptr && expr_node->type_ == T_QUESTIONMARK ? expr_node->value_ : -1;
   if (OB_ISNULL(expr_node)) {
