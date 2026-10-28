@@ -128,7 +128,6 @@ typedef struct _ParseNode
     struct {
       uint32_t is_neg_ : 1;// Record whether the parent node of the constant node is a T_OP_NEG node, 1 indicates yes, 0 indicates no
       uint32_t is_hidden_const_ : 1; // 1 indicates that a certain constant can be recognized by normal parse but not by fast parse, 0 indicates that both can recognize it.
-      uint32_t is_tree_not_param_ :1; //1 indicates that the node and its sub-nodes cannot be parameterized, 0 indicates no such restriction
       uint32_t length_semantics_  :2; // length semantics for char/varbinary declarations
       uint32_t is_copy_raw_text_ : 1; // Whether to refill the raw_text_ of constant nodes, used for parameterization of constant parameters in select items
       uint32_t is_trans_from_minus_: 1; // Whether the negative constant node is transformed from a minus operation, e.g., 1 - 2, the lexical stage will generate a -2

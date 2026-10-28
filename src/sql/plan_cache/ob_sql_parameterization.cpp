@@ -36,6 +36,18 @@ SqlInfo::SqlInfo() :
 
 namespace oceanbase {
 namespace sql {
+struct ArgumentParameterization
+{
+  const ParseNode *arguments_ = nullptr;
+  int64_t excluded_begin_ = 0;
+  int64_t excluded_end_ = 0;
+
+  bool excludes(const ParseNode *parent, int64_t index) const
+  {
+    return parent == arguments_ && index >= excluded_begin_ && index < excluded_end_;
+  }
+};
+
 struct TransformTreeCtx
 {
   ObIAllocator *allocator_;
@@ -188,7 +200,7 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
     ctx.is_from_pl_ = is_from_pl;
     ctx.parent_type_ = T_INVALID;
 
-    if (OB_FAIL(transform_tree(ctx, session))) {
+    if (OB_FAIL(transform_tree(ctx, session, ArgumentParameterization{}))) {
       if (OB_NOT_SUPPORTED != ret) {
         SQL_PC_LOG(WARN, "fail to transform syntax tree", K(ret));
       }
@@ -304,8 +316,6 @@ bool ObSqlParameterization::is_tree_not_param(const ParseNode *tree)
 {
   bool ret_bool = false;
   if (NULL == tree) {
-    ret_bool = true;
-  } else if (true == tree->is_tree_not_param_) {
     ret_bool = true;
   } else if (T_GROUPBY_CLAUSE == tree->type_) {
     // select a from t group by 1 enables group by parameterization
@@ -468,12 +478,14 @@ bool ObSqlParameterization::is_ignore_scale_check(TransformTreeCtx &ctx, const P
 *    solution: create a new item_type(T_WEIGHT_STRING_LEVEL_PARAM), set different param_num_ according to different syntax, so normal_parser can equal faster_parser, when handling T_WEIGHT_STRING_LEVEL_PARAM specifically, convert it to T_INT for subsequent processing.
 */
 int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
-                                          const ObSQLSessionInfo &session_info)
+                                          const ObSQLSessionInfo &session_info,
+                                          const ArgumentParameterization &parent_policy)
 {
   int ret = OB_SUCCESS;
   int64_t value_level = NO_VALUES;
   int64_t assign_level = NO_VALUES;
   bool enable_mysql_compatible_dates = false;
+  ArgumentParameterization own_policy;
   if (OB_ISNULL(ctx.top_node_)
       || OB_ISNULL(ctx.allocator_)
       || OB_ISNULL(ctx.sql_info_)
@@ -489,7 +501,9 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
     // do nothing
   } else if (OB_FAIL(ObSQLUtils::check_enable_mysql_compatible_dates(&session_info, false/*is_ddl*/,
                        enable_mysql_compatible_dates))) {
+  } else if (OB_FAIL(get_argument_policy(ctx.tree_, *ctx.sql_info_, own_policy))) {
   } else {
+    const ArgumentParameterization &argument_policy = own_policy.arguments_ != nullptr ? own_policy : parent_policy;
     bool enable_decimal_int = false;
     if (OB_FAIL(ret)) {
     } else if (T_PROJECT_STRING == ctx.tree_->type_
@@ -738,12 +752,15 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
         ret = OB_INVALID_ARGUMENT;
         SQL_PC_LOG(WARN, "invalid argument", K(ctx.tree_->children_), K(ret));
       } else {
+        const bool excluded_argument = argument_policy.excludes(root, i);
+        ArgumentParameterization child_policy;
+        if (argument_policy.arguments_ == root->children_[i]) child_policy = argument_policy;
         if (!ctx.not_param_) { // If the constants of this node and its sub-nodes are not parameters, then replacement is not needed
           // Rewrite the T_OP_NEG node to solve the positive and negative number mismatch problem
           // If it is a T_OP_NEG->T_INT node, then change it to a T_INT node and multiply the value by -1;
           // If it is T_OP_NEG->T_DOUBLE or T_NUMBER, then change to add - before the str of T_DOUBLE or T_NUMBER node
           if (OB_ISNULL(root->children_[i])
-              || root->children_[i]->is_tree_not_param_) { // if this children was marked as not_param during mark tree, then neg does not need to be processed }
+              || excluded_argument) {
             //do nothing
           } else if (T_OP_NEG == root->children_[i]->type_ && 1 == root->children_[i]->num_child_) {
             if (OB_ISNULL(root->children_[i]->children_) || OB_ISNULL(root->children_[i]->children_[0])) {
@@ -782,14 +799,9 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
           ctx.assign_father_level_ = assign_level;
 
           if (OB_SUCC(ret)) {
-            if (OB_FAIL(mark_tree(ctx.tree_ , *ctx.sql_info_))) {
-            }
-          }
-
-          if (OB_SUCC(ret)) {
             // If not_param is already true then there is no need to check further; because if a node is determined to be true, then its entire subtree is true;
             if (!ctx.not_param_) {
-              ctx.not_param_ = is_tree_not_param(ctx.tree_);
+              ctx.not_param_ = excluded_argument || is_tree_not_param(ctx.tree_);
             }
           }
 
@@ -805,7 +817,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
           }
         }
         if (OB_SUCC(ret)) {
-          if (OB_FAIL(SMART_CALL(transform_tree(ctx, session_info)))) {
+          if (OB_FAIL(SMART_CALL(transform_tree(ctx, session_info, child_policy)))) {
             if (OB_NOT_SUPPORTED != ret) {
               SQL_PC_LOG(WARN, "fail to transform tree", K(ret));
             }
@@ -1847,50 +1859,39 @@ int ObSqlParameterization::add_not_param_flag(const ParseNode *node, SqlInfo &sq
 
   return ret;
 }
-// T_FUN_SYS type function
-// According to mark_arr mark the parameter nodes in func as this node and its sub-nodes cannot be parameterized
-int ObSqlParameterization::mark_args(ParseNode *arg_tree,
-                                     const bool *mark_arr,
-                                     int64_t arg_num,
-                                     SqlInfo &sql_info)
+int ObSqlParameterization::exclude_arguments(const ParseNode *arguments,
+                                               int64_t argument_count,
+                                               int64_t excluded_begin,
+                                               int64_t excluded_end,
+                                               SqlInfo &sql_info,
+                                               ArgumentParameterization &policy)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(arg_tree) || OB_ISNULL(mark_arr)) {
+  if (OB_ISNULL(arguments) || OB_ISNULL(arguments->children_)
+      || arguments->num_child_ != argument_count) {
     ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(ret), K(arg_tree));
-  } else if (OB_ISNULL(arg_tree->children_)
-             || arg_num != arg_tree->num_child_) {
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(ret),
-               K(arg_tree->type_), K(arg_tree->children_), K(arg_tree->num_child_));
   } else {
     sql_info.ps_need_parameterized_ = false;
-    for (int64_t i = 0; OB_SUCC(ret) && i < arg_num; i++) {
-      if (true == mark_arr[i]) {
-        if (OB_ISNULL(arg_tree->children_[i])) {
-          ret = OB_INVALID_ARGUMENT;
-          SQL_PC_LOG(WARN, "invalid argument", K(ret), K(arg_tree->children_[i]));
-        } else {
-          arg_tree->children_[i]->is_tree_not_param_ = true;
-        }
-      }
+    for (int64_t i = excluded_begin; OB_SUCC(ret) && i < excluded_end; ++i) {
+      if (OB_ISNULL(arguments->children_[i])) ret = OB_INVALID_ARGUMENT;
+    }
+    if (OB_SUCC(ret)) {
+      policy.arguments_ = arguments;
+      policy.excluded_begin_ = excluded_begin;
+      policy.excluded_end_ = excluded_end;
     }
   }
   return ret;
 }
-// For nodes that cannot be parameterized and need special marking, mark them, generally nodes that cannot be directly identified by node type can be marked in this function
 
-// Mark those special nodes that cannot be parameterized.
-// After mark this node, it has following mechanism:
-//       If a node is marked as cannot be parameterized,
-//       CUREENT NODE AND ALL NODES OF IT'S SUBTREE cannot be parameterized.
-int ObSqlParameterization::mark_tree(ParseNode *tree ,SqlInfo &sql_info)
+int ObSqlParameterization::get_argument_policy(const ParseNode *tree, SqlInfo &sql_info,
+                                               ArgumentParameterization &policy)
 {
   int ret = OB_SUCCESS;
   if (NULL == tree) {
     //do nothing
   } else if (T_FUN_SYS == tree->type_) {
-    ParseNode **node = tree->children_;//node[0] : func name, node[1]: arg list
+    ParseNode *const *node = tree->children_; // function name and argument list
     if (2 != tree->num_child_) {
       //do nothing  if it is not fun_name and arg_list then it is not within the scope of what needs to be marked
     } else if (OB_ISNULL(node) || OB_ISNULL(node[0]) || OB_ISNULL(node[1])) {
@@ -1903,28 +1904,16 @@ int ObSqlParameterization::mark_tree(ParseNode *tree ,SqlInfo &sql_info)
           && (1 == node[1]->num_child_)) {
         // The return type of the USERENV function is determined by the specific value of the parameters, so if parameterized, we cannot obtain the specific values, hence parameterization is not done for now
         // UNIX_TIMESTAMP(param_str), the precision of the result is related to param_str, cannot be parameterized
-        const int64_t ARGS_NUMBER_ONE = 1;
-        bool mark_arr[ARGS_NUMBER_ONE] = {1}; //0 indicates parameterization, 1 indicates no parameterization
-        if (OB_FAIL(mark_args(node[1], mark_arr, ARGS_NUMBER_ONE, sql_info))) {
-        }
+        ret = exclude_arguments(node[1], 1, 0, 1, sql_info, policy);
       } else if (0 == func_name.case_compare("substr") && (3 == node[1]->num_child_)) {
-        const int64_t ARGS_NUMBER_THREE = 3;
-        bool mark_arr[ARGS_NUMBER_THREE] = {0, 1, 1}; // 0 indicates parameterized, 1 indicates non-parameterized
-        if (OB_FAIL(mark_args(node[1], mark_arr, ARGS_NUMBER_THREE, sql_info))) {
-        }
+        ret = exclude_arguments(node[1], 3, 1, 3, sql_info, policy);
       } else if (0 == func_name.case_compare("weight_string")
           && (5 == node[1]->num_child_)) {
-        const int64_t ARGS_NUMBER_FIVE = 5;
-        bool mark_arr[ARGS_NUMBER_FIVE] = {0, 1, 1, 1, 1}; //0 indicates parameterized, 1 indicates non-parameterized
-        if (OB_FAIL(mark_args(node[1], mark_arr, ARGS_NUMBER_FIVE, sql_info))) {
-        }
+        ret = exclude_arguments(node[1], 5, 1, 5, sql_info, policy);
       } else if ((0==func_name.case_compare("convert")
                   || (0==func_name.case_compare("char")))
                   && (2 == node[1]->num_child_)) {
-        const int64_t ARGS_NUMBER_TWO = 2;
-        bool mark_arr[ARGS_NUMBER_TWO] = {0, 1};
-        if (OB_FAIL(mark_args(node[1], mark_arr, ARGS_NUMBER_TWO, sql_info))) {
-        }
+        ret = exclude_arguments(node[1], 2, 1, 2, sql_info, policy);
       } else if ((0 == func_name.case_compare("str_to_date") // STR_TO_DATE(str,format)
                   || 0 == func_name.case_compare("date_format") //DATE_FORMAT(date,format)
                   || 0 == func_name.case_compare("from_unixtime")//FROM_UNIXTIME(unix_timestamp), FROM_UNIXTIME(unix_timestamp,format)
@@ -1933,37 +1922,20 @@ int ObSqlParameterization::mark_tree(ParseNode *tree ,SqlInfo &sql_info)
                   || 0 == func_name.case_compare("substr")
                   || 0 == func_name.case_compare("truncate")) // The precision of the truncate result needs to be derived based on the second parameter, so it cannot be parameterized
                  && (2 == node[1]->num_child_)) {
-        const int64_t ARGS_NUMBER_TWO = 2;
-        bool mark_arr[ARGS_NUMBER_TWO] = {0, 1};
-        if (OB_FAIL(mark_args(node[1], mark_arr, ARGS_NUMBER_TWO, sql_info))) {
-        }
+        ret = exclude_arguments(node[1], 2, 1, 2, sql_info, policy);
       } else if ((0 == func_name.case_compare("name_const"))
                   && (2 == node[1]->num_child_)) {
-        const int64_t ARGS_NUMBER_TWO = 2;
-        bool mark_arr[ARGS_NUMBER_TWO] = {1, 0};
-        if (OB_FAIL(mark_args(node[1], mark_arr, ARGS_NUMBER_TWO, sql_info))) {
-        }
+        ret = exclude_arguments(node[1], 2, 0, 1, sql_info, policy);
       } else if ((0 == func_name.case_compare("concat")) && 1 == node[0]->reserved_) {
         sql_info.ps_need_parameterized_ = false;
       } else if ((0 == func_name.case_compare("json_equal"))) {
         sql_info.ps_need_parameterized_ = false;
       } else if ((0 == func_name.case_compare("json_extract"))) {
-        sql_info.ps_need_parameterized_ = false;
-        for (int64_t i = 1; OB_SUCC(ret) && i < tree->num_child_; i++) {
-          if (OB_ISNULL(tree->children_[i])) {
-            ret = OB_INVALID_ARGUMENT;
-            SQL_PC_LOG(WARN, "invalid argument", K(ret), K(tree->children_[i]));
-          } else {
-            tree->children_[i]->is_tree_not_param_ = true;
-          }
-        }
+        ret = exclude_arguments(tree, 2, 1, 2, sql_info, policy);
       } else if ((0 == func_name.case_compare("json_member_of"))) {
         sql_info.ps_need_parameterized_ = false;
         if (2 == tree->num_child_) {
-          const int64_t ARGS_NUMBER_TWO = 2;
-          bool mark_arr[ARGS_NUMBER_TWO] = {0, 1}; // 0 indicates parameterized, 1 indicates non-parameterized
-          if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_TWO, sql_info))) {
-          }
+          ret = exclude_arguments(tree, 2, 1, 2, sql_info, policy);
         }
       } else if ((0 == func_name.case_compare("json_contains"))) {
         sql_info.ps_need_parameterized_ = false;
@@ -1971,136 +1943,92 @@ int ObSqlParameterization::mark_tree(ParseNode *tree ,SqlInfo &sql_info)
           if (OB_ISNULL(tree->children_[i])) {
             ret = OB_INVALID_ARGUMENT;
             SQL_PC_LOG(WARN, "invalid argument", K(ret), K(tree->children_[i]));
-          } else if (1 != 1) {
-            tree->children_[i]->is_tree_not_param_ = true;
           }
         }
       } else if ((0 == func_name.case_compare("json_overlaps"))) {
-        const int64_t ARGS_NUMBER_TWO = 2;
-        bool mark_arr[ARGS_NUMBER_TWO] = {1, 1};
-        if (OB_FAIL(mark_args(node[1], mark_arr, ARGS_NUMBER_TWO, sql_info))) {
-        }
+        ret = exclude_arguments(node[1], 2, 0, 2, sql_info, policy);
       } else if ((0 == func_name.case_compare("json_schema_valid"))
                 || (0 == func_name.case_compare("json_schema_validation_report"))) {
-        const int64_t ARGS_NUMBER_TWO = 2;
-        bool mark_arr[ARGS_NUMBER_TWO] = {1, 0};
-        if (OB_FAIL(mark_args(node[1], mark_arr, ARGS_NUMBER_TWO, sql_info))) {
-        }
+        ret = exclude_arguments(node[1], 2, 0, 1, sql_info, policy);
       }
     }
   } else if (T_OP_LIKE == tree->type_) {
     if (3 == tree->num_child_) {   // child[0] like child[1] escape child[2]
-      const int64_t ARGS_NUMBER_THREE = 3;
-      bool mark_arr[ARGS_NUMBER_THREE] = {0, 1, 1}; //0 indicates parameterized, 1 indicates non-parameterized
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_THREE, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 3, 1, 3, sql_info, policy);
     }
   } else if (T_OP_IS == tree->type_ || T_OP_IS_NOT == tree->type_) {
     if (tree->num_child_ == 2) {
-      const int64_t ARGS_NUMBER_TWO = 2;
-      bool mark_arr[ARGS_NUMBER_TWO] = {0,1};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_TWO, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 2, 1, 2, sql_info, policy);
     } else { /*do nothing*/ }
   } else if(T_FUN_SYS_JSON_VALUE == tree->type_) {
     if (10 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid json value expr argument", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_TEN = 10;
-      bool mark_arr[ARGS_NUMBER_TEN] = {0, 1, 1, 1, 1, 1, 1, 1, 1, 1};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_TEN, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 10, 1, 10, sql_info, policy);
     }
   } else if(T_FUN_SYS_JSON_OBJECT == tree->type_) {
     if (5 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid json object expr argument", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_FIVE = 5;
-      bool mark_arr[ARGS_NUMBER_FIVE] = {1, 1, 1, 1, 1};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_FIVE, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 5, 0, 5, sql_info, policy);
     }
   } else if(T_FUN_SYS_IS_JSON == tree->type_) {
     if (5 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid argument num for IS json", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_FIVE = 5;
-      bool mark_arr[ARGS_NUMBER_FIVE] = {0, 1, 1, 1, 1};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_FIVE, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 5, 1, 5, sql_info, policy);
     }
   } else if(T_FUN_SYS_JSON_QUERY == tree->type_) {
     if (13 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid json query expr argument", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_THIRTEEN = 13;
-      bool mark_arr[ARGS_NUMBER_THIRTEEN] = {0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};   // json doc type will affect returning type,
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_THIRTEEN, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 13, 1, 13, sql_info, policy);
     }
   } else if(T_FUN_SYS_JSON_EXISTS == tree->type_) {
     if (5 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid argument num for json_exists", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_FIVE = 5;
-      bool mark_arr[ARGS_NUMBER_FIVE] = {0, 1, 1, 1, 1};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_FIVE, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 5, 1, 5, sql_info, policy);
     }
   } else if(T_FUN_SYS_JSON_EQUAL == tree->type_) {
     if (3 < tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid json query expr argument", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_THREE = 3;
-      bool mark_arr[ARGS_NUMBER_THREE] = {0, 0, 1};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_THREE, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 3, 2, 3, sql_info, policy);
     }
   } else if(T_FUN_SYS_JSON_ARRAY == tree->type_) {
     if (4 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid json array expr argument", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_FOUR = 4;
-      bool mark_arr[ARGS_NUMBER_FOUR] = {0, 1, 1, 1};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_FOUR, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 4, 1, 4, sql_info, policy);
     }
   } else if(T_FUN_SYS_JSON_MERGE_PATCH == tree->type_) {
     if (7 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid json mergepatch expr argument", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_SEVEN = 7;
-      bool mark_arr[ARGS_NUMBER_SEVEN] = {0, 0, 1, 1, 1, 1, 1};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_SEVEN, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 7, 2, 7, sql_info, policy);
     }
   } else if (T_JSON_TABLE_EXPRESSION == tree->type_) {
     if (5 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid json table expr argument", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_FIVE = 5;
-      bool mark_arr[ARGS_NUMBER_FIVE] = {0, 1, 1, 1, 1};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_FIVE, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 5, 1, 5, sql_info, policy);
     }
   } else if (T_FUN_SYS_TREAT == tree->type_) {
     if (2 != tree->num_child_) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid treat expr argument", K(ret), K(tree->num_child_)); 
     } else {
-      const int64_t ARGS_NUMBER_TWO = 2;
-      bool mark_arr[ARGS_NUMBER_TWO] = {1, 0};
-      if (OB_FAIL(mark_args(tree, mark_arr, ARGS_NUMBER_TWO, sql_info))) {
-      }
+      ret = exclude_arguments(tree, 2, 0, 1, sql_info, policy);
     }
   } else { /*do nothing*/ }
   return ret;

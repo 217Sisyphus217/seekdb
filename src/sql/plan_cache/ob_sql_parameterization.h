@@ -41,6 +41,8 @@ namespace sql
 {
 typedef common::LinkHashValue<common::ObString> ParameterizationHashValue;
 
+struct ArgumentParameterization;
+
 struct SqlInfo: public ParameterizationHashValue
 {
   SqlInfo &operator=(const SqlInfo &that)
@@ -223,15 +225,19 @@ private:
   static int is_fast_parse_const(TransformTreeCtx &ctx);
 
   static bool is_node_not_param(TransformTreeCtx &ctx);
-  static int transform_tree(TransformTreeCtx &ctx, const ObSQLSessionInfo &session_info);
+  static int transform_tree(TransformTreeCtx &ctx, const ObSQLSessionInfo &session_info,
+                             const ArgumentParameterization &parent_policy);
   static int add_param_flag(const ParseNode *node, SqlInfo &sql_info);
   static int add_not_param_flag(const ParseNode *node, SqlInfo &sql_info);
   static int add_varchar_charset(const ParseNode *node, SqlInfo &sql_info);
-  static int mark_args(ParseNode *arg_tree,
-                       const bool *mark_arr,
-                       int64_t arg_num,
-                       SqlInfo &sql_info);
-  static int mark_tree(ParseNode *tree, SqlInfo &sql_info);
+  static int exclude_arguments(const ParseNode *arguments,
+                                 int64_t argument_count,
+                                 int64_t excluded_begin,
+                                 int64_t excluded_end,
+                                 SqlInfo &sql_info,
+                                 ArgumentParameterization &policy);
+  static int get_argument_policy(const ParseNode *tree, SqlInfo &sql_info,
+                                   ArgumentParameterization &policy);
   static int get_related_user_vars(const ParseNode *tree, common::ObIArray<common::ObString> &user_vars);
 
   static int get_select_item_param_info(const common::ObIArray<ObPCParam *> &raw_params,
