@@ -55,7 +55,11 @@ struct TransformTreeCtx
   int64_t paramlized_questionmask_count_;
   bool is_transform_outline_;
   ObLengthSemantics default_length_semantics_;
-  ObSEArray<void*, 16> project_list_; // record all T_PROJECT_STRING nodes
+  struct Projection {
+    const ParseNode *node_;
+    bool string_literal_;
+  };
+  ObSEArray<Projection, 16> project_list_;
   const ObIArray<ObPCParam *> *raw_params_;
   SQL_EXECUTION_MODE mode_;
   bool is_project_list_scope_;
@@ -135,7 +139,7 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
                                                  ParseNode *tree,
                                                  SqlInfo &sql_info,
                                                  ParamStore &params,
-                                                 SelectItemParamInfoArray *select_item_param_infos,
+                                                 SelectItemParamInfoMap *select_item_param_infos,
                                                  bool is_transform_outline,
                                                  SQL_EXECUTION_MODE execution_mode,
                                                  bool is_from_pl)
@@ -197,16 +201,19 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
                 K(session.get_current_query_string()),
                 "result_tree_", SJ(ObParserResultPrintWrapper(*ctx.top_node_)));
       } else {
-        select_item_param_infos->set_capacity(ctx.project_list_.count());
+        if (!select_item_param_infos->created() && ctx.project_list_.count() > 0) {
+          ret = select_item_param_infos->create(ctx.project_list_.count(), "ProjectionNames");
+        }
         for (int64_t i = 0; OB_SUCC(ret) && i < ctx.project_list_.count(); i++) {
-          ParseNode *tmp_root = static_cast<ParseNode *>(ctx.project_list_.at(i));
+          const auto &projection = ctx.project_list_.at(i);
+          const ParseNode *tmp_root = projection.node_;
           if (OB_ISNULL(tmp_root)) {
             ret = OB_INVALID_ARGUMENT;
-          } else if (0 == tmp_root->is_val_paramed_item_idx_
+          } else if (nullptr == select_item_param_infos->get(tmp_root)
                      && OB_FAIL(get_select_item_param_info(*raw_params,
                                                            tmp_root,
-                                                           select_item_param_infos,
-                                                           session))) {
+                                                           projection.string_literal_,
+                                                           *select_item_param_infos))) {
             SQL_PC_LOG(WARN, "failed to get select item param info", K(ret));
           } else {
             // do nothing
@@ -478,7 +485,12 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
     bool enable_decimal_int = false;
     if (OB_FAIL(ret)) {
     } else if (T_PROJECT_STRING == ctx.tree_->type_
-        && OB_FAIL(ctx.project_list_.push_back(ctx.tree_))) {
+        && (OB_ISNULL(ctx.tree_->children_) || ctx.tree_->num_child_ != 1
+            || OB_ISNULL(ctx.tree_->children_[0]))) {
+      ret = OB_INVALID_ARGUMENT;
+    } else if (T_PROJECT_STRING == ctx.tree_->type_
+        && OB_FAIL(ctx.project_list_.push_back({ctx.tree_,
+            ctx.tree_->children_[0]->type_ == T_VARCHAR}))) {
     } else if (OB_FAIL(ObSQLUtils::check_enable_decimalint(&session_info, enable_decimal_int))) {
     } else {
       // do nothing
@@ -761,17 +773,6 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
           ctx.value_father_level_ = value_level;
           ctx.assign_father_level_ = assign_level;
 
-          if (T_PROJECT_STRING == root->type_) {
-            if (OB_ISNULL(ctx.tree_)) {
-              ret = OB_INVALID_ARGUMENT;
-            } else if (T_VARCHAR == ctx.tree_->type_) {
-              // Mark this projection column as a constant string for subsequent string escaping
-              ctx.tree_->is_column_varchar_ = 1;
-            } else {
-              // do nothing
-            }
-          }
-
           if (OB_SUCC(ret)) {
             if (OB_FAIL(mark_tree(ctx.tree_ , *ctx.sql_info_))) {
             }
@@ -935,6 +936,9 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
                                                     ObCharsets4Parser charsets4parser)
 {
   int ret = OB_SUCCESS;
+  if (pc_ctx.select_item_param_infos_.created()) {
+    pc_ctx.select_item_param_infos_.clear();
+  }
   SqlInfo sql_info;
   bool need_parameterized = false;
   SQL_EXECUTION_MODE mode = get_sql_execution_mode(pc_ctx);
@@ -1051,6 +1055,10 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
       }
     }
   }
+  if (OB_FAIL(ret) && pc_ctx.select_item_param_infos_.created()) {
+    pc_ctx.select_item_param_infos_.clear();
+  }
+
   return ret;
 }
 // Generate not param info information and index information
@@ -2146,12 +2154,11 @@ int ObSqlParameterization::get_related_user_vars(const ParseNode *tree, common::
 }
 
 int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObPCParam *> &raw_params,
-                                                      ParseNode *tree,
-                                                      SelectItemParamInfoArray *select_item_param_infos,
-                                                      const ObSQLSessionInfo &session)
+                                                      const ParseNode *tree,
+                                                      bool string_literal,
+                                                      SelectItemParamInfoMap &select_item_param_infos)
 {
   int ret = OB_SUCCESS;
-  UNUSED(session);
   SelectItemParamInfo param_info;
   ObString org_field_name;
   int64_t expr_pos = tree->raw_sql_offset_;
@@ -2178,7 +2185,7 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
     // Simulate function recursive operation, traverse subtree
     // Stack each element is {cur_node, next_child_idx}
     // Pop operation:
-    // If cur_node's is_val_paramed_item_idx_ is true, it means this is a T_PROJECT_STRING and has already been traversed
+    // A projection with a recorded name template has already been traversed.
     // or T_QUESTION_MARK, or all child nodes have been traversed, pop from stack
     //
     // Push operation:
@@ -2188,7 +2195,7 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
       ctx.tree_ = stack_frames.at(frame_idx).cur_node_;
       if (NULL == ctx.tree_) {
         ret = OB_INVALID_ARGUMENT;
-      } else if (1 == ctx.tree_->is_val_paramed_item_idx_
+      } else if (nullptr != select_item_param_infos.get(ctx.tree_)
                  || T_QUESTIONMARK == ctx.tree_->type_
                  || stack_frames.at(frame_idx).next_child_idx_ >= ctx.tree_->num_child_) {
         if (T_QUESTIONMARK == ctx.tree_->type_) {
@@ -2239,19 +2246,10 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
       }
 
       if (T_QUESTIONMARK == tree->children_[0]->type_
-          && 1 == tree->children_[0]->is_column_varchar_) {
+          && string_literal) {
         param_info.esc_str_flag_ = true;
       }
     }
-  }
-
-  if (OB_FAIL(ret) || 0 == param_info.params_idx_.count()) {
-    // do nothing
-  } else if (OB_FAIL(select_item_param_infos->push_back(param_info))) {
-  } else {
-    tree->value_ = select_item_param_infos->count() - 1;
-    tree->is_val_paramed_item_idx_ = 1;
-
   }
 
   // MySQL sets the alias of standalone null value("\N","null"...) to "NULL" during projection.
@@ -2266,9 +2264,12 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
     } else if (OB_ISNULL(raw_params.at(idx)) || OB_ISNULL(raw_params.at(idx)->node_)) {
       ret = OB_INVALID_ARGUMENT;
     } else if (T_NULL == raw_params.at(idx)->node_->type_) {
-      tree->str_value_ = "NULL";
-      tree->str_len_ = strlen("NULL");
+      param_info.null_literal_ = true;
     }
+  }
+
+  if (OB_SUCC(ret) && param_info.params_idx_.count() > 0) {
+    ret = select_item_param_infos.set_refactored(tree, param_info);
   }
 
   return ret;

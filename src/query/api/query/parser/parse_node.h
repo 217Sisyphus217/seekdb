@@ -130,9 +130,7 @@ typedef struct _ParseNode
       uint32_t is_hidden_const_ : 1; // 1 indicates that a certain constant can be recognized by normal parse but not by fast parse, 0 indicates that both can recognize it.
       uint32_t is_tree_not_param_ :1; //1 indicates that the node and its sub-nodes cannot be parameterized, 0 indicates no such restriction
       uint32_t length_semantics_  :2; // length semantics for char/varbinary declarations
-      uint32_t is_val_paramed_item_idx_ :1; // Are the values of T_PROJECT_STRING indices in the select_item_param_infos array?
       uint32_t is_copy_raw_text_ : 1; // Whether to refill the raw_text_ of constant nodes, used for parameterization of constant parameters in select items
-      uint32_t is_column_varchar_ : 1; // Is the projection column a constant string, used for select item constant parameterization
       uint32_t is_trans_from_minus_: 1; // Whether the negative constant node is transformed from a minus operation, e.g., 1 - 2, the lexical stage will generate a -2
       uint32_t is_assigned_from_child_: 1; // Is the constant node assigned from a child node, used for handling int64_min
       uint32_t is_num_must_be_pos_: 1; //

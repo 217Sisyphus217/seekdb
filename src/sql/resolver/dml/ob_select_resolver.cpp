@@ -1324,12 +1324,17 @@ int ObSelectResolver::resolve_field_list(const ParseNode &node)
     alias_node = NULL;
     project_node = NULL;
     SelectItem select_item;
+    const SelectItemParamInfo *param_info = params_.select_item_param_infos_ != nullptr
+        && params_.select_item_param_infos_->created()
+        ? params_.select_item_param_infos_->get(node.children_[i]) : nullptr;
+    const ObString source_name = param_info != nullptr && param_info->null_literal_
+        ? ObString::make_string("NULL")
+        : ObString(node.children_[i]->str_len_, node.children_[i]->str_value_);
     // Rule for expr_name and alias_name
     // expr_name is filled with expr name, both ref_expr and other complex expr.
     // alias_name is filled with expr_name for default, but updated with real alias name if exists.
     // the special case is the column ref, which expr_name will be replaced with unqualified column name.
-    select_item.expr_name_.assign_ptr(node.children_[i]->str_value_,
-                                      static_cast<int32_t>(node.children_[i]->str_len_));
+    select_item.expr_name_ = source_name;
     // In PS mode, the alias name of the bind variable is ":" + num, not the actual value. As follows:
     // PREPARE STMT FROM 'SELECT ?, ?, ? FROM DUAL';
     // SET @I1 = 1;
@@ -1343,8 +1348,7 @@ int ObSelectResolver::resolve_field_list(const ParseNode &node)
       if (OB_FAIL(ob_write_string(*allocator_, alias_name, select_item.alias_name_))) {
       }
     } else {
-      select_item.alias_name_.assign_ptr(node.children_[i]->str_value_,
-                                      static_cast<int32_t>(node.children_[i]->str_len_));
+      select_item.alias_name_ = source_name;
     }
     project_node = node.children_[i]->children_[0];
     if (project_node->type_ == T_COLUMN_REF
@@ -1546,21 +1550,16 @@ int ObSelectResolver::resolve_field_list(const ParseNode &node)
         } else {
           if (params_.is_prepare_protocol_
               || !session_info_->get_local_ob_enable_plan_cache()
-              || 0 == node.children_[i]->is_val_paramed_item_idx_) {
+              || param_info == nullptr) {
             // ps do not parameterize columns; plan cache disabled do not parameterize columns
             // do nothing
-          } else if (OB_ISNULL(params_.select_item_param_infos_)
-                     || node.children_[i]->value_ >= params_.select_item_param_infos_->count()) {
-            ret = OB_INVALID_ARGUMENT;
           } else {
-            int64_t idx = node.children_[i]->value_;
-            const SelectItemParamInfo &param_info = params_.select_item_param_infos_->at(idx);
-            select_item.paramed_alias_name_.assign_ptr(param_info.paramed_field_name_, param_info.name_len_);
-            if (OB_FAIL(select_item.questions_pos_.assign(param_info.questions_pos_))) {
-            } else if (OB_FAIL(select_item.params_idx_.assign(param_info.params_idx_))) {
+            select_item.paramed_alias_name_.assign_ptr(param_info->paramed_field_name_, param_info->name_len_);
+            if (OB_FAIL(select_item.questions_pos_.assign(param_info->questions_pos_))) {
+            } else if (OB_FAIL(select_item.params_idx_.assign(param_info->params_idx_))) {
             } else {
-              select_item.esc_str_flag_ = param_info.esc_str_flag_;
-              select_item.neg_param_idx_ = param_info.neg_params_idx_;
+              select_item.esc_str_flag_ = param_info->esc_str_flag_;
+              select_item.neg_param_idx_ = param_info->neg_params_idx_;
 
               LOG_DEBUG("select item param info",
                         K(select_item.alias_name_), K(select_item.params_idx_),

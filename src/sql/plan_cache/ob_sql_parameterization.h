@@ -134,7 +134,7 @@ public:
                                    ParseNode *tree,
                                    SqlInfo &sql_info,
                                    ParamStore &params,
-                                   SelectItemParamInfoArray *select_item_param_infos,
+                                   SelectItemParamInfoMap *select_item_param_infos,
                                    bool is_transform_outline,
                                    SQL_EXECUTION_MODE execution_mode = INVALID_MODE,
                                    bool is_from_pl = false);
@@ -234,9 +234,9 @@ private:
   static int get_related_user_vars(const ParseNode *tree, common::ObIArray<common::ObString> &user_vars);
 
   static int get_select_item_param_info(const common::ObIArray<ObPCParam *> &raw_params,
-                                        ParseNode *tree,
-                                        SelectItemParamInfoArray *select_item_param_infos,
-                                        const ObSQLSessionInfo &session);
+                                        const ParseNode *tree,
+                                        bool string_literal,
+                                        SelectItemParamInfoMap &select_item_param_infos);
   static int parameterize_fields(SelectItemTraverseCtx &ctx);
 
   static int resolve_paramed_const(SelectItemTraverseCtx &ctx);

@@ -397,7 +397,7 @@ public:
   common::ObILobReadService *lob_read_service_;
   ObQueryCtx *query_ctx_;
   const ParamStore *param_list_;
-  const SelectItemParamInfoArray *select_item_param_infos_;
+  const SelectItemParamInfoMap *select_item_param_infos_;
   int64_t prepare_param_count_;
   ExternalParams external_param_info_;
   common::ObMySQLProxy *sql_proxy_;
