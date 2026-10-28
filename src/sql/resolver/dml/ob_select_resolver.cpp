@@ -1971,7 +1971,7 @@ int ObSelectResolver::resolve_star(const ParseNode *node)
       } else if (OB_FAIL(select_stmt->add_select_item(select_item))) {
       }
     } else if (OB_FAIL(session_info_->get_name_case_mode(case_mode))) {
-    } else if (OB_FAIL(ObResolverUtils::resolve_column_ref(node, case_mode, column_ref))) {
+    } else if (OB_FAIL(ObResolverUtils::resolve_column_ref(node, case_mode, *allocator_, column_ref))) {
     } else {
       ObSEArray<const TableItem*, 8> table_items;
       ObArray<SelectItem> target_list;

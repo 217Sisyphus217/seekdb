@@ -23,6 +23,9 @@ namespace oceanbase
 {
 namespace sql
 {
+struct LiteralToken;
+struct InListRows;
+
 class ObRawExprResolverImpl: public ObRawExprResolver
 {
   static const int32_t OUT_OF_STR_LEN = -2;
@@ -68,6 +71,9 @@ private:
   int mock_enum_type_info(common::ObIAllocator &allocator, ObString &string, uint64_t idx, ObIArray<common::ObString> &type_info);
   int mock_set_type_info(common::ObIAllocator &allocator, ObString &string, uint64_t idx, ObIArray<common::ObString> &type_info);
   int process_datatype_or_questionmark(const ParseNode &node, ObRawExpr *&expr);
+  int build_implicit_literal(const LiteralToken &literal, ObRawExpr *&expr);
+  int resolve_cast_collation(const char *charset_name, common::ObCollationType &collation);
+  int build_cast_argument(const ObRawExprResType &target, const char *charset_name, ObRawExpr *&expr);
   int process_system_variable_node(const ParseNode *node, ObRawExpr *&expr);
   int process_char_charset_node(const ParseNode *node, ObRawExpr *&expr);
 
@@ -86,7 +92,8 @@ private:
   int add_params_to_op_expr(ObRawExpr *op_param_1, ObRawExpr *op_param_2, ObOpRawExpr *op_expr);
   int transform_between_expr(ObRawExpr **btw_params, ObRawExpr *&out_expr, const bool is_not_btw);
   int process_between_node(const ParseNode *node, ObRawExpr *&expr);
-  int process_in_or_not_in_node(const ParseNode *node, const bool is_root_expr, ObRawExpr *&expr);
+  int process_in_or_not_in_node(const ParseNode *node, const bool is_root_expr, ObRawExpr *&expr,
+                               const InListRows *merged_rows = nullptr);
   int process_case_node(const ParseNode *node, ObRawExpr *&expr);
   int process_sub_query_node(const ParseNode *node, ObRawExpr *&expr);
   int process_agg_node(const ParseNode *node, ObRawExpr *&expr);
@@ -107,31 +114,13 @@ private:
   const static uint8_t OB_JSON_TYPE_MISSING_DATA    = 4;
   const static uint8_t OB_JSON_TYPE_EXTRA_DATA      = 5;
   const static uint8_t OB_JSON_TYPE_TYPE_ERROR      = 6;
-  enum {
-    OPT_JSON_VALUE,
-    OPT_JSON_QUERY,
-    OPT_JSON_OBJECT,
-    OPT_JSON_ARRAY,
-  };
-  enum ObJsonObjectEntry: int8_t {
-    JSON_OBJECT_KEY = 0,
-    JSON_OBJECT_VAL = 1,
-    JSON_OBJECT_FORMAT = 2
-  };
-  const int JSON_OBJECT_GROUP = 3;
   int process_json_value_node(const ParseNode *node, ObRawExpr *&expr);
   int pre_check_json_path_valid(const ParseNode *node);
-  int get_column_raw_text_from_node(const ParseNode *node, ObString &col_name);
-  int process_ora_json_object_node(const ParseNode *node, ObRawExpr *&expr);
-  int create_json_object_star_node(ParseNode *&node, common::ObIAllocator &allocator, int64_t &pos);
-  int process_ora_json_object_star_node(const ParseNode *node, ObRawExpr *&expr);
   int process_is_json_node(const ParseNode *node, ObRawExpr *&expr);
   int process_json_equal_node(const ParseNode *node, ObRawExpr *&expr);
   int process_json_query_node(const ParseNode *node, ObRawExpr *&expr);
-  int process_json_exists_node(const ParseNode *node, ObRawExpr *&expr);
   int process_json_array_node(const ParseNode *node, ObRawExpr *&expr);
   int process_json_mergepatch_node(const ParseNode *node, ObRawExpr *&expr);
-  static void modification_type_to_int(ParseNode &node);
   int process_fun_sys_node(const ParseNode *node, ObRawExpr *&expr, const bool is_root_expr);
   int process_match_against(const ParseNode *node, ObRawExpr *&expr);
   int process_match(const ParseNode *node, ObRawExpr *&expr);
@@ -163,17 +152,19 @@ private:
   int process_ident_node(const ParseNode &node, ObRawExpr *&expr);
   int process_cursor_attr_node(const ParseNode &node, ObRawExpr *&expr);
   int process_obj_access_node(const ParseNode &node, ObRawExpr *&expr);
+  int process_unresolved_function(const ParseNode &node, ObRawExpr *&expr);
+  int publish_qualified_name(ObQualifiedName &name, int64_t child_start, ObRawExpr *&expr);
   int resolve_obj_access_idents(const ParseNode &node, ObQualifiedName &q_name);
   int check_pl_variable(ObQualifiedName &q_name, bool &is_pl_var);
   inline bool is_pseudo_column_valid_scope(ObStmtScope scope) const;
-  int resolve_udf_node(const ParseNode *node, ObUDFInfo &udf_info);
+  int resolve_stored_function(const ParseNode &call, ObUDFInfo &udf_info);
   int process_sqlerrm_node(const ParseNode *node, ObRawExpr *&expr);
   int process_sqlcode_node(const ParseNode *node, ObRawExpr *&expr);
   int process_plsql_var_node(const ParseNode *node, ObRawExpr *&expr);
   int process_call_param_node(const ParseNode *node, ObRawExpr *&expr);
 
 
-  int expand_node(common::ObIAllocator &allocator, ParseNode *node, int p, ObVector<const ParseNode*> &arr);
+  int expand_node(const ParseNode *node, ObVector<const ParseNode*> &arr);
   static int not_int_check(const ObRawExpr *expr);
   static int not_row_check(const ObRawExpr *expr);
   static int param_not_row_check(const ObRawExpr *expr);
@@ -186,17 +177,13 @@ private:
                                  const ParseNode *expr_node,
                                  ObRawExpr *&expr);
   int process_array_contains_node(const ParseNode *node, ObRawExpr *&expr);
-  int remove_format_json_opt_in_pl(ParseNode *node, int8_t expr_flag);
-  int remove_strict_opt_in_pl(ParseNode *node, int8_t expr_flag);
   int process_lambda_func_node(const ParseNode *node, ObRawExpr *&expr);
   int process_array_map_func_node(const ParseNode *node, ObRawExpr *&expr);
-  int check_replace_lambda_params_node(const ParseNode *params_node, ParseNode *func_node);
-  int process_lambda_var_node(const ParseNode *node, ObRawExpr *&expr);
+  int build_lambda_parameter(int64_t index, ObRawExpr *&expr);
   int extract_var_exprs(ObRawExpr *expr, ObIArray<ObVarRawExpr *> &var_exprs);
   int check_lambda_params_duplicated(const ParseNode *params_node);
 private:
   int process_sys_func_params(ObSysFunRawExpr &func_expr, int current_columns_count);
-  int transform_ratio_afun_to_arg_div_sum(const ParseNode *ratio_to_report, ParseNode *&div);
   int convert_any_or_all_expr(ObRawExpr *&expr, bool &happened);
   int get_opposite_string(const common::ObString &orig_string, common::ObString &new_string, common::ObIAllocator &allocator);
   int reset_aggr_sort_nulls_first(ObIArray<OrderItem> &aggr_sort_item);
@@ -206,11 +193,13 @@ private:
                                     const ObItemType op_type,
                                     const ObRawExpr *left_expr,
                                     const bool is_root_condition,
-                                    ObRawExpr *&right_expr);
+                                    ObRawExpr *&right_expr,
+                                    const InListRows *merged_rows);
 private:
   // data members
   ObExprResolveContext &ctx_;
   bool is_contains_assignment_;
+  const common::ObIArray<common::ObString> *lambda_parameters_;
 };
 template <class T>
 int ObRawExprResolverImpl::process_node_with_children(const ParseNode *node,

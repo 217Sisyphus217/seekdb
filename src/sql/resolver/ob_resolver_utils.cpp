@@ -1580,12 +1580,12 @@ int ObResolverUtils::resolve_sp_name(ObSQLSessionInfo &session_info,
 }
 
 int ObResolverUtils::resolve_column_ref(const ParseNode *node, const ObNameCaseMode case_mode,
-                                        ObQualifiedName& column_ref)
+                                        ObIAllocator &allocator, ObQualifiedName &column_ref)
 {
   int ret = OB_SUCCESS;
-  ParseNode* db_node = NULL;
-  ParseNode* relation_node = NULL;
-  ParseNode* column_node = NULL;
+  const ParseNode * db_node = NULL;
+  const ParseNode * relation_node = NULL;
+  const ParseNode * column_node = NULL;
   if (OB_ISNULL(node) || 3 != node->num_child_) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("parse node is invalid", K(node));
@@ -1615,8 +1615,16 @@ int ObResolverUtils::resolve_column_ref(const ParseNode *node, const ObNameCaseM
   }
 
   if (OB_SUCC(ret) && OB_LOWERCASE_AND_INSENSITIVE == case_mode) {
-    ObCharset::casedn(CS_TYPE_UTF8MB4_GENERAL_CI, column_ref.database_name_);
-    ObCharset::casedn(CS_TYPE_UTF8MB4_GENERAL_CI, column_ref.tbl_name_);
+    ObString database;
+    ObString table;
+    OZ (ob_write_string(allocator, column_ref.database_name_, database));
+    OZ (ob_write_string(allocator, column_ref.tbl_name_, table));
+    if (OB_SUCC(ret)) {
+      ObCharset::casedn(CS_TYPE_UTF8MB4_GENERAL_CI, database);
+      ObCharset::casedn(CS_TYPE_UTF8MB4_GENERAL_CI, table);
+      column_ref.database_name_ = database;
+      column_ref.tbl_name_ = table;
+    }
   }
   return ret;
 }
@@ -2034,8 +2042,7 @@ int ObResolverUtils::resolve_numeric_literal(const NumericLiteral &literal,
   return ret;
 }
 
-namespace {
-int decode_string_literal(const ObString &text, ObObjType value_type,
+int ObResolverUtils::resolve_string_literal(const ObString &text, ObObjType value_type,
                           ObCollationType connection_collation, const ObString *charset,
                           bool binary_introducer, ObIAllocator &allocator, ObObjParam &val)
 {
@@ -2061,6 +2068,7 @@ int decode_string_literal(const ObString &text, ObObjType value_type,
   return ret;
 }
 
+namespace {
 int interpret_numeric_sign(NumericLiteral &literal, NumericSignMode mode, ObIAllocator &allocator)
 {
   int ret = OB_SUCCESS;
@@ -2130,13 +2138,13 @@ int ObResolverUtils::resolve_literal(const LiteralToken &literal,
           && !literal.concatenated) {
         charset = &national_charset;
       }
-      ret = decode_string_literal(literal.text, ObVarcharType, options.connection_collation,
+      ret = resolve_string_literal(literal.text, ObVarcharType, options.connection_collation,
                                   charset, false, allocator, val);
       break;
     }
     case peg::LiteralKind::Binary: {
       if (options.charset != nullptr) {
-        ret = decode_string_literal(literal.text, ObVarcharType, options.connection_collation,
+        ret = resolve_string_literal(literal.text, ObVarcharType, options.connection_collation,
                                     options.charset, true, allocator, val);
       } else if (literal.text.length() > OB_MAX_LONGTEXT_LENGTH) {
         ret = OB_ERR_INVALID_INPUT_ARGUMENT;
@@ -2314,7 +2322,7 @@ int ObResolverUtils::resolve_const(const ParseNode *node,
         charset = &charset_name;
         binary_introducer = node->num_child_ == 1;
       }
-      ret = decode_string_literal(text, node->type_ == T_NCHAR ? ObVarcharType
+      ret = resolve_string_literal(text, node->type_ == T_NCHAR ? ObVarcharType
                                   : static_cast<ObObjType>(node->type_), connection_collation,
                                   charset, binary_introducer, allocator, val);
       break;
@@ -4652,34 +4660,18 @@ bool ObResolverUtils::is_drc_user(ObSQLSessionInfo &session_info)
   return bret;
 }
 
-int ObResolverUtils::resolve_udf_name_by_parse_node(
-  const ParseNode *node, const common::ObNameCaseMode case_mode, ObUDFInfo &udf_info)
+int ObResolverUtils::resolve_udf_name(const ObString &name, const ObString &database,
+                                      const ObString &package, ObNameCaseMode case_mode,
+                                      ObIAllocator &allocator, ObUDFInfo &udf_info)
 {
   int ret = OB_SUCCESS;
-  ObString udf_name;
-  ObString package_name;
-  ObString database_name;
-  if (OB_ISNULL(node) || node->type_ != T_FUN_UDF) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(node->children_[0])) {
-	    ret = OB_ERR_UNEXPECTED;
-  } else {
-    udf_info.udf_name_.assign_ptr(const_cast<char*>(node->children_[0]->str_value_),
-        static_cast<int32_t>(node->children_[0]->str_len_));
-    if (OB_NOT_NULL(node->children_[3])) {
-      udf_info.udf_package_.assign_ptr(const_cast<char*>(node->children_[3]->str_value_),
-          static_cast<int32_t>(node->children_[3]->str_len_));
-    }
-    if (OB_NOT_NULL(node->children_[2])) {
-      udf_info.udf_database_.assign_ptr(const_cast<char*>(node->children_[2]->str_value_),
-          static_cast<int32_t>(node->children_[2]->str_len_));
-      bool perserve_lettercase = (case_mode != OB_LOWERCASE_AND_INSENSITIVE);
-      if (OB_FAIL(ObSQLUtils::check_and_convert_db_name(
-          CS_TYPE_UTF8MB4_GENERAL_CI,
-          perserve_lettercase,
-          udf_info.udf_database_))) {
-      }
-    }
+  if (OB_FAIL(ob_write_string(allocator, name, udf_info.udf_name_))) {
+  } else if (OB_FAIL(ob_write_string(allocator, package, udf_info.udf_package_))) {
+  } else if (OB_FAIL(ob_write_string(allocator, database, udf_info.udf_database_))) {
+  } else if (!database.empty()) {
+    const bool preserve_lettercase = case_mode != OB_LOWERCASE_AND_INSENSITIVE;
+    ret = ObSQLUtils::check_and_convert_db_name(
+        CS_TYPE_UTF8MB4_GENERAL_CI, preserve_lettercase, udf_info.udf_database_);
   }
   return ret;
 }
@@ -5199,76 +5191,6 @@ int ObResolverUtils::check_foreign_key_columns_type(const ObTableSchema &child_t
                 parent_col->get_column_name_str().ptr());
           } else { } // For other bit/int/number /datetime/time/year no data_length requirement
         }
-      }
-    }
-  }
-  return ret;
-}
-
-int ObResolverUtils::transform_sys_func_to_objaccess(
-  ObIAllocator *allocator, const ParseNode *sys_func, ParseNode *&obj_access)
-{
-  int ret = OB_SUCCESS;
-  if (allocator == nullptr || sys_func == nullptr || sys_func->type_ != T_FUN_SYS) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(obj_access
-      = new_non_terminal_node(allocator, T_OBJ_ACCESS_REF, 2, sys_func, nullptr))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  }
-  return ret;
-}
-
-int ObResolverUtils::transform_func_sys_to_udf(ObIAllocator *allocator, const ParseNode *func_sys,
-                                               const ObString &db_name, const ObString &pkg_name,
-                                               ParseNode *&func_udf)
-{
-  int ret = OB_SUCCESS;
-  ParseNode *db_name_node = NULL;
-  ParseNode *pkg_name_node = NULL;
-  func_udf = NULL;
-  if (OB_ISNULL(allocator) || OB_ISNULL(func_sys)) {
-    ret = OB_INVALID_ARGUMENT;
-  } else if (OB_ISNULL(func_udf = new_non_terminal_node(allocator, T_FUN_UDF, 4, nullptr, nullptr, nullptr, nullptr))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else {
-    //assign db name node
-    if (!db_name.empty()) {
-      if (OB_ISNULL(db_name_node = new_terminal_node(allocator, T_IDENT))) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-      } else {
-        func_udf->children_[2] = db_name_node;
-        db_name_node->str_value_ = parse_strndup(db_name.ptr(), db_name.length(), allocator);
-        if (OB_ISNULL(db_name_node->str_value_)) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-        } else {
-          db_name_node->str_len_ = db_name.length();
-        }
-      }
-    }
-
-    //assign pkg name node
-    if (!pkg_name.empty()) {
-      if (OB_ISNULL(pkg_name_node = new_terminal_node(allocator, T_IDENT))) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-      } else {
-        func_udf->children_[3] = pkg_name_node;
-        pkg_name_node->str_value_ = parse_strndup(pkg_name.ptr(), pkg_name.length(), allocator);
-        if (OB_ISNULL(pkg_name_node->str_value_)) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-        } else {
-          pkg_name_node->str_len_ = pkg_name.length();
-        }
-      }
-    }
-
-    if (OB_SUCC(ret)) {
-      //sys node and udf node have the same memory life cycle
-      //we share the func name and param node;
-      func_udf->children_[0] = func_sys->children_[0];  //func name
-      if (2 <= func_sys->num_child_) {
-        func_udf->children_[1] = func_sys->children_[1];  //func param
-      } else {
-        func_udf->children_[1] = NULL;
       }
     }
   }

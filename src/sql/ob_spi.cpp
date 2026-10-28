@@ -5991,16 +5991,24 @@ int ObSPIService::resolve_ref_objects(const ParseResult &parse_result,
           need_check_udf = false;
         } else {}
         if (OB_SUCC(ret) && need_check_udf) {
-          ParseNode *udf_node = node;
-          if (T_FUN_SYS == node->type_) {
-            ObString empty_db_name;
-            ObString empty_pkg_name;
-            if (OB_FAIL(ObResolverUtils::transform_func_sys_to_udf(reinterpret_cast<ObIAllocator *>(parse_result.malloc_pool_),
-                node, empty_db_name, empty_pkg_name, udf_node))) {
+          if ((node->type_ != T_FUN_SYS && node->type_ != T_FUN_UDF)
+              || OB_ISNULL(node->children_[0])) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            const ObString name(static_cast<int32_t>(node->children_[0]->str_len_),
+                                node->children_[0]->str_value_);
+            ObString database;
+            ObString package;
+            if (node->type_ == T_FUN_UDF) {
+              if (node->children_[2] != nullptr) {
+                database.assign_ptr(node->children_[2]->str_value_, node->children_[2]->str_len_);
+              }
+              if (node->children_[3] != nullptr) {
+                package.assign_ptr(node->children_[3]->str_value_, node->children_[3]->str_len_);
+              }
             }
-          }
-          if (OB_SUCC(ret)) {
-            if (OB_FAIL(ObResolverUtils::resolve_udf_name_by_parse_node(udf_node, case_mode, udf_info))) {
+            if (OB_FAIL(ObResolverUtils::resolve_udf_name(name, database, package, case_mode,
+                  *reinterpret_cast<ObIAllocator *>(parse_result.malloc_pool_), udf_info))) {
             } else if (udf_info.udf_database_.empty()) {
               udf_info.udf_database_ = session.get_database_name();
             }

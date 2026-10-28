@@ -516,7 +516,6 @@ public:
   int resolve_routine_decl_param_list(const ParseNode *param_list,
       ObPLAstUnit &package_ast,
       ObPLRoutineInfo &routine_info);
-  int replace_source_string(const ObString &old_sql, ParseNode *new_node);
   int replace_plsql_line(
     common::ObIAllocator &allocator, const ObStmtNodeTree *node, ObString &sql, ObString &new_sql);
 

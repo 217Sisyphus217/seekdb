@@ -29,15 +29,33 @@ class ParameterizationResult;
 struct DistinctObjMeta;
 struct InListRewriteInfo;
 
+struct InListRows
+{
+  // Original ExprList nodes, borrowed until deferred expression resolution finishes.
+  common::ObSEArray<const ParseNode *, 4> segments_;
+  int64_t row_count() const;
+  int get_copy_assign_ret() const { return segments_.get_copy_assign_ret(); }
+};
+
+struct InListGroup
+{
+  explicit InListGroup(const ParseNode *node = nullptr) : node_(node) {}
+  const ParseNode *node_;
+  // Empty when this operand was not combined with another membership predicate.
+  InListRows rows_;
+  int get_copy_assign_ret() const { return rows_.get_copy_assign_ret(); }
+};
+
 struct ObInListInfo
 {
-  ObInListInfo() : in_list_(NULL), in_list_expr_(NULL), row_cnt_(0), column_cnt_(0), is_question_mark_(true) {}
+  ObInListInfo() : in_list_expr_(NULL), row_cnt_(0), column_cnt_(0), is_question_mark_(true) {}
   TO_STRING_KV(K_(in_list_expr));
-  const ParseNode *in_list_;
+  InListRows rows_;
   ObQueryRefRawExpr *in_list_expr_;
   int64_t row_cnt_;
   int64_t column_cnt_;
   bool is_question_mark_;
+  int get_copy_assign_ret() const { return rows_.get_copy_assign_ret(); }
 };
 
 struct ObInListsResolverHelper 
@@ -81,7 +99,7 @@ public:
   ObInListResolver(ObDMLResolver *cur_resolver)
     : cur_resolver_(cur_resolver) {}
   virtual ~ObInListResolver() {}
-  static int check_inlist_rewrite_enable(const ParseNode &in_list,
+  static int check_inlist_rewrite_enable(const InListRows &rows,
                                          const ObItemType op_type,
                                          const ObRawExpr &left_expr,
                                          const ObStmtScope &scope,
@@ -95,18 +113,13 @@ public:
                                          common::ObIAllocator &alloc,
                                          bool &is_question_mark,
                                          bool &is_enable);
-  // try to merge IN nodes under root_node (which is an AND/OR node)
-  // if merge does not happen, the ret_node is root_node
-  // if merge happened, the merged node will be a new node with merged children, and if:
-  //   1. the merged node has only one child:      ret_node is that child node
-  //   2. the merged node has more then one child: ret_node is the merged_node
-  static int try_merge_inlists(ObExprResolveContext &resolve_ctx,
-                               const bool is_root_condition,
-                               const ParseNode *root_node,
-                               const ParseNode *&ret_node);
+  static int group_inlists(ObExprResolveContext &resolve_ctx,
+                          bool is_root_condition,
+                          const ParseNode &root,
+                          common::ObIArray<InListGroup> &groups);
   int resolve_inlist(ObInListInfo &inlist_infos);
 private:
-  static int get_inlist_rewrite_info(const ParseNode &in_list,
+  static int get_inlist_rewrite_info(const InListRows &rows,
                                      const int64_t column_cnt,
                                      int64_t col_idx,
                                      ObInListsResolverHelper &helper,
@@ -116,14 +129,7 @@ private:
                                      ObInListsResolverHelper &helper,
                                      InListRewriteInfo &last_info,
                                      bool &can_merge);
-  static int merge_two_in_nodes(ObIAllocator &alloc,
-                                const ParseNode *src_node,
-                                ParseNode *&dst_node);
-  static int do_merge_inlists(ObIAllocator &alloc,
-                              ObInListsResolverHelper &helper,
-                              const ParseNode *root_node,
-                              const ParseNode *&ret_node);
-  int resolve_values_table_from_inlist(const ParseNode *in_list,
+  int resolve_values_table_from_inlist(const InListRows &rows,
                                        const int64_t column_cnt,
                                        const int64_t row_cnt,
                                        const bool is_question_mark,
@@ -142,17 +148,15 @@ private:
                                          const bool is_prepare_stmt,
                                          const int64_t column_cnt,
                                          ObQueryRefRawExpr *query_ref);
-  int resolve_access_param_values_table(const ParseNode &in_list,
+  int resolve_access_param_values_table(const InListRows &rows,
                                         const int64_t column_cnt,
-                                        const int64_t row_cnt,
                                         const ParamStore *param_store,
                                         ObSQLSessionInfo *session_info,
                                         ObIAllocator *allocator,
                                         const bool is_called_in_sql,
                                         ObValuesTableDef &table_def);
-  int resolve_access_obj_values_table(const ParseNode &in_list,
+  int resolve_access_obj_values_table(const InListRows &rows,
                                       const int64_t column_cnt,
-                                      const int64_t row_cnt,
                                       ObSQLSessionInfo *session_info,
                                       ObIAllocator *allocator,
                                       const bool is_prepare_stage,

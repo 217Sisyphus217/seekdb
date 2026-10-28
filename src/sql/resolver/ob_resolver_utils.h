@@ -293,7 +293,8 @@ public:
                              ObString &sp_name,
                              bool need_db_name = true);
 
-  static int resolve_column_ref(const ParseNode *node, const common::ObNameCaseMode mode, ObQualifiedName& column_ref);
+  static int resolve_column_ref(const ParseNode *node, const common::ObNameCaseMode mode,
+                                common::ObIAllocator &allocator, ObQualifiedName &column_ref);
   static int resolve_obj_access_ref_node(ObRawExprFactory &expr_factory,
                                          const ParseNode *node,
                                          ObQualifiedName &q_name,
@@ -345,6 +346,10 @@ public:
    */
   static int resolve_stmt_type(const ParseResult &result, stmt::StmtType &type);
   static stmt::StmtType get_stmt_type_by_item_type(const ObItemType item_type);
+  static int resolve_string_literal(const common::ObString &text, common::ObObjType value_type,
+                                    common::ObCollationType connection_collation,
+                                    const common::ObString *charset, bool binary_introducer,
+                                    common::ObIAllocator &allocator, common::ObObjParam &val);
   static int resolve_literal(const LiteralToken &literal,
                              const LiteralDecodeOptions &options,
                              common::ObIAllocator &allocator,
@@ -575,8 +580,11 @@ public:
   static bool is_partition_range_column_type(const common::ObObjType type);
   static bool is_restore_user(ObSQLSessionInfo &session_info);
   static bool is_drc_user(ObSQLSessionInfo &session_info);
-  static int resolve_udf_name_by_parse_node(
-    const ParseNode *node, const common::ObNameCaseMode case_mode, ObUDFInfo& udf_info);
+  static int resolve_udf_name(const common::ObString &name,
+                              const common::ObString &database,
+                              const common::ObString &package,
+                              common::ObNameCaseMode case_mode,
+                              common::ObIAllocator &allocator, ObUDFInfo &udf_info);
   // Check duplicate foreign keys for CREATE TABLE and ALTER TABLE ADD FOREIGN KEY.
   static int check_dup_foreign_keys_exist(
              const common::ObIArray<share::schema::ObForeignKeyInfo> &fk_infos,
@@ -631,13 +639,6 @@ public:
       const share::schema::ObColumnSchemaV2 *column = NULL);
   static int get_columns_name_from_index_table_schema(const share::schema::ObTableSchema &index_table_schema,
                                                       ObIArray<ObString> &index_columns_name);
-  static int transform_sys_func_to_objaccess(
-    common::ObIAllocator *allocator, const ParseNode *sys_func, ParseNode *&obj_access);
-  static int transform_func_sys_to_udf(common::ObIAllocator *allocator,
-                                       const ParseNode *func_sys,
-                                       const common::ObString &db_name,
-                                       const common::ObString &pkg_name,
-                                       ParseNode *&func_udf);
   static int set_direction_by_mode(const ParseNode &sort_node, OrderItem &order_item, bool opt_nulls = false);
   static int resolve_string(const ParseNode *node, common::ObString &string);
   // Check non-updatable view shapes which are forbidden for DML statements:

@@ -976,10 +976,6 @@ public:
                             const ObIArray<ObRawExpr*> &exprs,
                             ObRawExpr * &and_expr);
 
-  static int new_parse_node(ParseNode *& node, ObRawExprFactory &expr_factory,
-                            ObItemType type, int num);
-
-
   static int build_pack_expr(ObRawExprFactory &expr_factory,
                              const bool is_ps,
                              const ObSQLSessionInfo *session_info,

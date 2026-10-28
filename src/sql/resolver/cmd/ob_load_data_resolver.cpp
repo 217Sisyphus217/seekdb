@@ -789,7 +789,7 @@ int ObLoadDataResolver::resolve_field_node(const ParseNode &node, const ObNameCa
   uint64_t table_id = load_stmt.get_load_arguments().table_id_;
   if (OB_UNLIKELY(T_COLUMN_REF != node.type_)) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(ObResolverUtils::resolve_column_ref(&node, case_mode, q_name))) {
+  } else if (OB_FAIL(ObResolverUtils::resolve_column_ref(&node, case_mode, *allocator_, q_name))) {
   } else if ((q_name.database_name_.length() > 0
                  && q_name.database_name_.case_compare(database_name) != 0)
              || (q_name.tbl_name_.length() > 0
@@ -1050,7 +1050,7 @@ int ObLoadDataResolver::resolve_each_set_node(const ParseNode &node, const ObNam
     ObColumnRefRawExpr *ref_expr = NULL;
     ObRawExpr *raw_expr = NULL;
     ObQualifiedName q_name;
-    if (OB_FAIL(ObResolverUtils::resolve_column_ref(column_node, case_mode, q_name))) {
+    if (OB_FAIL(ObResolverUtils::resolve_column_ref(column_node, case_mode, *allocator_, q_name))) {
     } else if (OB_FAIL(build_column_ref_expr(q_name, raw_expr))) {
     } else if (OB_ISNULL(ref_expr = static_cast<ObColumnRefRawExpr*>(raw_expr))){
       ret = OB_ERR_UNEXPECTED;

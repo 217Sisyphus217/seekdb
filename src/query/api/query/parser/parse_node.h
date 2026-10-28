@@ -260,8 +260,6 @@ extern ParseNode *new_terminal_node(void *malloc_pool, ObItemType type);
 extern int check_mem_status();
 extern int try_check_mem_status(int64_t check_try_times);
 
-int deep_copy_parse_node_base(void *malloc_pool, const ParseNode *src_node, ParseNode *dst_node);
-
 /// convert x'42ab' to binary string
 void ob_parse_binary(const char *src, int64_t len, char* dest);
 int64_t ob_parse_binary_len(int64_t len);
@@ -281,9 +279,6 @@ extern uint64_t parsenode_hash(const ParseNode *node, int *ret);
 extern bool parsenode_equal(const ParseNode *node1, const ParseNode *node2, int *ret);
 
 extern int64_t get_question_mark(ObQuestionMarkCtx *ctx, void *malloc_pool, const char *name);
-extern int64_t get_need_reserve_capacity(int64_t n);
-extern ParseNode *push_back_child(void *malloc_pool, int *error_code, ParseNode *left_node, ParseNode *node);
-extern ParseNode *append_child(void *malloc_pool, int *error_code, ParseNode *left_node, ParseNode *right_node);
 
 #define OB_NODE_CAST_TYPE_IDX 0
 #define OB_NODE_CAST_COLL_IDX 1

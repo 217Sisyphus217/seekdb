@@ -384,7 +384,7 @@ int ObDelUpdResolver::resolve_assign_columns(const ParseNode &assign_target,
     ObNameCaseMode case_mode = OB_NAME_CASE_INVALID;
     if (OB_FAIL(session_info_->get_name_case_mode(case_mode))) {
     } else if (OB_FAIL(ObResolverUtils::resolve_column_ref(
-                         col_node, case_mode, q_name))) {
+                         col_node, case_mode, *allocator_, q_name))) {
     } else if (q_name.is_star_) {
       ret = OB_ERR_UNEXPECTED;
     } else {
@@ -2149,7 +2149,7 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("invalid node children", K(column_node));
       } else if (OB_FAIL(session_info_->get_name_case_mode(case_mode))) {
-      } else if (OB_FAIL(ObResolverUtils::resolve_column_ref(column_node, case_mode, column_ref))) {
+      } else if (OB_FAIL(ObResolverUtils::resolve_column_ref(column_node, case_mode, *allocator_, column_ref))) {
       } else if (OB_FAIL(resolve_basic_column_ref(column_ref, ref_expr))) {
         report_user_error_msg(ret, ref_expr, column_ref);
       } else if (OB_ISNULL(ref_expr)) {

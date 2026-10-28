@@ -4997,26 +4997,6 @@ int ObPLResolver::add_pl_integer_checker_expr(ObRawExprFactory &expr_factory,
   return ret;
 }
 
-int ObPLResolver::replace_source_string(
-  const ObString &old_sql, ParseNode *new_node)
-{
-  int ret = OB_SUCCESS;
-  if (OB_NOT_NULL(new_node)) {
-    if (new_node->str_len_ > 0 && new_node->pl_str_off_ >= 0) {
-      new_node->str_value_ = parse_strndup(old_sql.ptr() + new_node->pl_str_off_,
-                                           new_node->str_len_,
-                                           &resolve_ctx_.allocator_);
-    }
-    for (int64_t i = 0; OB_SUCC(ret) && i < new_node->num_child_; ++i) {
-      OZ (SMART_CALL(replace_source_string(old_sql, new_node->children_[i])));
-    }
-  }
-  return ret;
-}
-
-
-
-
 int ObPLResolver::build_raw_expr(const ParseNode &node,
                                  ObRawExpr *&expr,
                                  ObIArray<ObQualifiedName> &columns,

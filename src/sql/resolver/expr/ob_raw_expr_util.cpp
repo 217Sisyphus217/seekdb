@@ -6169,38 +6169,6 @@ int ObRawExprUtils::build_and_expr(ObRawExprFactory &expr_factory,
 }
 
 
-int ObRawExprUtils::new_parse_node(ParseNode *& node, ObRawExprFactory &expr_factory,
-                                   ObItemType type, int num)
-{
-  int ret = OB_SUCCESS;
-  ObIAllocator *alloc_buf = &(expr_factory.get_allocator());
-  node = (ParseNode *)alloc_buf->alloc(sizeof(ParseNode));
-  if (OB_ISNULL(node)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else {
-    node->type_ = type;
-    node->num_child_ = num;
-    node->param_num_ = 0;
-    node->flag_ = 0;
-    node->value_ = INT64_MAX;
-    node->str_len_ = 0;
-    node->str_value_ = NULL;
-    node->text_len_ = 0;
-    node->raw_text_ = NULL;
-    node->pos_ = 0;
-    if (num > 0) {
-      int64_t alloc_size = sizeof(ParseNode *) * num ;
-      node->children_ = (ParseNode **)alloc_buf->alloc(alloc_size);
-      if (OB_ISNULL(node->children_)) {
-        ret = OB_ERR_UNEXPECTED;
-      }
-    } else {
-      node->children_ = NULL;
-    }
-  }
-  return ret;
-}
-
 int ObRawExprUtils::build_pack_expr(ObRawExprFactory &expr_factory,
                                     const bool is_ps,
                                     const ObSQLSessionInfo *session_info,
