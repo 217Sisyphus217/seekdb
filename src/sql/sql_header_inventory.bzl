@@ -417,6 +417,5 @@ SQL_INTERFACE_CLOSURE_HEADERS = [
 SQL_COMPOSITION_HEADERS = [
     "das/iter/ob_das_scan_iter.h",
     "das/iter/ob_das_text_retrieval_eval_node.h",
-    "parser/fts_base.h",
     "parser/fts_parse.h",
 ]

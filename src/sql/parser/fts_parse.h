@@ -14,28 +14,61 @@
  * limitations under the License.
  */
 
-#ifndef FTS_BASE_H
-#define FTS_BASE_H
+#pragma once
 
-#include <stdint.h>
-#include <assert.h>
-#include <time.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <stdarg.h>
-#include <string.h>
-#include <ctype.h>
-#include <math.h>
-#include "fts_base.h"
+#include <cstdint>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-// this is a C wrapper to call murmurhash in C++ definition
-void fts_parse_docment(const char *input, const int length, void *pool, FtsParserResult *ss);
+enum FtsError {
+  FTS_OK = 0,
+  FTS_ERROR_MEMORY = 1,
+  FTS_ERROR_SYNTAX = 2,
+  FTS_ERROR_OTHER = 3,
+};
 
-#ifdef __cplusplus
-}
-#endif
+enum FtsNodeType {
+  FTS_NODE_OPER,               /*!< Operator */
+  FTS_NODE_TERM,               /*!< Term (or word) */
+  FTS_NODE_LIST,               /*!< Expression list */
+  FTS_NODE_SUBEXP_LIST         /*!< Sub-Expression list */
+};
 
-#endif // FTS_BASE_H
+enum FtsOperType {
+  FTS_NONE, /*!< No operator */
+
+  FTS_IGNORE, /*!< Ignore rows that contain
+              this word */
+
+  FTS_EXIST, /*!< Include rows that contain
+             this word */
+};
+
+typedef struct FtsString{
+  char *str_;
+  uint32_t len_;
+} FtsString;
+
+typedef struct FtsNode FtsNode;
+
+typedef struct {
+  FtsNode *head; /*!< Children list head */
+  FtsNode *tail; /*!< Children list tail */
+} FtsNodeList;
+
+
+struct FtsNode{
+  enum FtsNodeType type;        /*!< The type of node */
+  FtsString term;        /*!< Term node */
+  enum FtsOperType oper;        /*!< Operator value */
+  FtsNodeList list;        /*!< Expression list */
+  FtsNode *next;       /*!< Link for expr list */
+  FtsNode *last; /*!< Direct up node */
+  bool go_up;              /*!< Flag if go one level up */
+};
+
+typedef struct {
+  int     ret_;
+  FtsString err_info_;
+  FtsNode *root_;
+} FtsParserResult;
+
+void fts_parse_docment(const char *input, int length, void *pool, FtsParserResult *result);

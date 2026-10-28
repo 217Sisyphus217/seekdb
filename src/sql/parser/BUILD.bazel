@@ -48,18 +48,6 @@ _PARSER_CXX_STANDALONE_SOURCES = [
 ]
 
 parser(
-    name = "generate_fts_parser",
-    grammar = "ftsparser.y",
-    lexer_source = "ftsblex.l",
-    parser = "bazel_generated/ftsparser_tab.c",
-    parser_header = "bazel_generated/ftsparser_tab.h",
-    lexer = "bazel_generated/ftsblex_lex.c",
-    lexer_header = "bazel_generated/ftsblex_lex.h",
-    flex_options = ["-Cfa", "-B", "-8"],
-    lexer_patch = "fts",
-)
-
-parser(
     name = "generate_sql_parser",
     grammar = "sql_parser_mysql_mode.y",
     lexer_source = "sql_parser_mysql_mode.l",
@@ -80,8 +68,6 @@ parser_type_names(
 cc_library(
     name = "_generated_headers",
     hdrs = [
-        "bazel_generated/ftsblex_lex.h",
-        "bazel_generated/ftsparser_tab.h",
         "bazel_generated/sql_parser_mysql_mode_lex.h",
         "bazel_generated/sql_parser_mysql_mode_tab.h",
     ],
@@ -156,8 +142,6 @@ cc_library(
 cc_library(
     name = "_server_parser_c",
     srcs = [
-        "bazel_generated/ftsblex_lex.c",
-        "bazel_generated/ftsparser_tab.c",
         "bazel_generated/sql_parser_mysql_mode_lex.c",
         "bazel_generated/sql_parser_mysql_mode_tab.c",
         "bazel_generated/type_name.c",

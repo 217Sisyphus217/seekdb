@@ -11,6 +11,7 @@
 
 普通 SQL 和内部 SQL 的完整解析阶段默认使用 Rust，解析失败直接报错。
 统计采集的 `METHOD_OPT`（`FOR ALL COLUMNS SIZE AUTO` 等）也由 Rust 解析。
+全文检索布尔表达式由 `src/fts.rs` 解析，通过同一个 CXX 桥接接口供 C++ 检索模块使用。
 快速参数化、多语句切分和 PL SQL 预处理仍沿用旧实现。
 旧词法处理和 PL 预处理链路仍在迁移，全量验证尚未完成。
 

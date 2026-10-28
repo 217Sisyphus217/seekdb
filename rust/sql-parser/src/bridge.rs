@@ -699,7 +699,27 @@ pub(crate) mod ffi {
         Statistics,
     }
 
+    enum SearchNodeKind {
+        Term,
+        List,
+        Group,
+        Required,
+        Excluded,
+    }
+
+    struct SearchNode {
+        kind: SearchNodeKind,
+        text: String,
+        children: Vec<SearchNode>,
+    }
+
+    struct SearchTree {
+        root: SearchNode,
+        error: String,
+    }
+
     extern "Rust" {
+        fn parse_search_query(input: &[u8]) -> SearchTree;
         fn parse_sql(
             sql: &[u8],
             ansi_quotes: bool,
@@ -710,6 +730,8 @@ pub(crate) mod ffi {
         ) -> ParseTree;
     }
 }
+
+use crate::fts::parse_search_query;
 
 fn number_parameters(
     node: &mut Node,

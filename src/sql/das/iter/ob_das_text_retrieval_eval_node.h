@@ -18,7 +18,6 @@
 #define OB_DAS_TEXT_RETRIEVAL_EVAL_NODE_H_
 
 #include "ob_das_iter.h"
-#include "sql/parser/fts_base.h"
 #include "sql/parser/fts_parse.h"
 
 namespace oceanbase

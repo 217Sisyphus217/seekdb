@@ -1626,8 +1626,7 @@ SQL_EXTRA_SOURCES = [
 ]
 
 SQL_PARSER_SOURCES = [
-    "src/sql/parser/fts_base.c",
-    "src/sql/parser/fts_parse.c",
+    "src/sql/parser/fts_parse.cpp",
     "src/sql/parser/non_reserved_keywords_mysql_mode.c",
     "src/sql/parser/ob_fast_parser.cpp",
     "src/sql/parser/ob_memory_tracker_wrapper.cpp",

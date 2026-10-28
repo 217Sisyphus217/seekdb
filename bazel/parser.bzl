@@ -102,7 +102,7 @@ parser = rule(
         "lexer": attr.output(mandatory = True),
         "lexer_header": attr.output(mandatory = True),
         "flex_options": attr.string_list(),
-        "lexer_patch": attr.string(values = ["", "fts", "sql"]),
+        "lexer_patch": attr.string(values = ["", "sql"]),
     },
 )
 
