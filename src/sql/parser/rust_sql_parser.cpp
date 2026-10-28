@@ -319,6 +319,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::ViewList: return T_VIEW_LIST;
     case Kind::ShowCreateView: return T_SHOW_CREATE_VIEW;
     case Kind::CreateTableLike: return T_CREATE_TABLE_LIKE;
+    case Kind::ForkTable: return T_FORK_TABLE;
+    case Kind::ForkDatabase: return T_FORK_DATABASE;
     case Kind::Charset: return T_CHARSET;
     case Kind::DropTable: return T_DROP_TABLE;
     case Kind::TruncateTable: return T_TRUNCATE_TABLE;
@@ -613,6 +615,11 @@ ObItemType node_type(const peg::Node &node)
     case Kind::ExecuteArguments: return T_ARGUMENT_LIST;
     case Kind::Deallocate: return T_DEALLOCATE;
     case Kind::CreateProcedure: return T_SP_CREATE;
+    case Kind::CreateTrigger: return T_TG_CREATE;
+    case Kind::DropTrigger: return T_TG_DROP;
+    case Kind::TriggerSource: return T_TG_SOURCE;
+    case Kind::TriggerDefinition: return T_TG_SIMPLE_DML;
+    case Kind::TriggerOrder: return T_TG_ORDER;
     case Kind::CreateFunction: return T_SF_CREATE;
     case Kind::DropProcedure: return T_SP_DROP;
     case Kind::DropFunction: return T_SF_DROP;
@@ -621,6 +628,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::RoutineName: return T_SP_NAME;
     case Kind::RoutineParameters: return T_SP_PARAM_LIST;
     case Kind::RoutineParameter: return T_SP_PARAM;
+    case Kind::RowType: return T_SP_ROWTYPE;
+    case Kind::PlTypeAccess: return T_SP_OBJ_ACCESS_REF;
     case Kind::RoutineClauses: return T_SP_CLAUSE_LIST;
     case Kind::Deterministic: return T_SP_DETERMINISTIC;
     case Kind::DataAccess: return T_SP_DATA_ACCESS;
@@ -881,6 +890,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     if (child->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   }
   if (type != T_FUN_SYS || source.kind == Kind::Cast) node->value_ = type == T_SELECT ? parameters : source.value;
+  if (type == T_TG_SIMPLE_DML) node->int16_values_[0] = source.value ? T_AFTER : T_BEFORE;
   if (type == T_REFERENCE_OPTION) {
     node->int32_values_[0] = source.value ? T_DELETE : T_UPDATE;
     node->int32_values_[1] = node->children_[0]->type_;
@@ -917,7 +927,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
       || source.kind == Kind::ObjectAccess || source.kind == Kind::KeyPartition || source.kind == Kind::HashPartition
       || source.kind == Kind::ListPartition || source.kind == Kind::ListColumnsPartition
       || source.kind == Kind::RangePartition || source.kind == Kind::RangeColumnsPartition
-      || source.kind == Kind::VectorParameters || source.kind == Kind::PartitionAdd
+      || source.kind == Kind::VectorParameters || source.kind == Kind::PartitionAdd || source.kind == Kind::TriggerDefinition
       || (source.kind == Kind::DateUnit && raw_length != 0)) {
     text = raw;
     length = raw_length;
@@ -1040,6 +1050,17 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     body->raw_text_ = body->str_value_ + body_source.start - source.start;
     body->text_len_ = body_source.end - body_source.start;
   }
+  if (type == T_TG_SIMPLE_DML) {
+    ParseNode *body = node->children_[3];
+    const auto &body_source = source.children[3];
+    const size_t length = body_source.end - body_source.start;
+    char *text = static_cast<char *>(parse_malloc(length + 3, pool));
+    if (text == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
+    MEMCPY(text, sql.ptr() + body_source.start, length);
+    MEMCPY(text + length, ";\n", 3);
+    body->str_value_ = text;
+    body->str_len_ = length + 2;
+  }
   if (type == T_OP_LIKE && source.text == "not like") {
     ParseNode *negation = new_node(pool, T_OP_NOT, 1);
     if (negation == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
@@ -1054,7 +1075,8 @@ int build_tree(const common::ObString &sql, peg::ParseTree &tree, ParseResult &r
   ParseNode *query = nullptr;
   const common::ObString expression_sql = tree.expanded_sql.empty()
       ? sql : common::ObString(tree.expanded_sql.size(), tree.expanded_sql.data());
-  const int ret = build_node(sql, expression_sql, tree.root, tree.parameters, result.malloc_pool_, query, routine_body);
+  const bool pl = routine_body || tree.root.kind == Kind::CreateTrigger || tree.root.kind == Kind::TriggerSource;
+  const int ret = build_node(sql, expression_sql, tree.root, tree.parameters, result.malloc_pool_, query, pl);
   if (ret != common::OB_SUCCESS) return ret;
   ParseNode *root = new_node(result.malloc_pool_, T_STMT_LIST, 1);
   if (root == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
@@ -1094,7 +1116,8 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
   auto parsed = peg::parse_sql(rust::Slice<const uint8_t>(
       reinterpret_cast<const uint8_t *>(sql.ptr()), sql.length()),
       result.sql_mode_ & SMO_ANSI_QUOTES, result.sql_mode_ & SMO_NO_BACKSLASH_ESCAPES,
-      result.sql_mode_ & SMO_PIPES_AS_CONCAT, result.sql_mode_ & SMO_HIGH_NOT_PRECEDENCE, routine_body);
+      result.sql_mode_ & SMO_PIPES_AS_CONCAT, result.sql_mode_ & SMO_HIGH_NOT_PRECEDENCE,
+      routine_body ? peg::ParseMode::Routine : result.is_for_trigger_ ? peg::ParseMode::Trigger : peg::ParseMode::Sql);
   if (!parsed.error.empty()) {
     snprintf(error, sizeof(error), "rust-peg: %s", parsed.error.c_str());
     result.start_col_ = parsed.error_offset + 1;

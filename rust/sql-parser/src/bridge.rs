@@ -254,6 +254,8 @@ pub(crate) mod ffi {
         ViewList,
         ShowCreateView,
         CreateTableLike,
+        ForkTable,
+        ForkDatabase,
         Charset,
         DropTable,
         TruncateTable,
@@ -555,6 +557,11 @@ pub(crate) mod ffi {
         ExecuteArguments,
         Deallocate,
         CreateProcedure,
+        CreateTrigger,
+        DropTrigger,
+        TriggerSource,
+        TriggerDefinition,
+        TriggerOrder,
         CreateFunction,
         DropProcedure,
         DropFunction,
@@ -563,6 +570,8 @@ pub(crate) mod ffi {
         RoutineName,
         RoutineParameters,
         RoutineParameter,
+        RowType,
+        PlTypeAccess,
         RoutineClauses,
         Deterministic,
         DataAccess,
@@ -661,6 +670,12 @@ pub(crate) mod ffi {
         error_offset: usize,
     }
 
+    enum ParseMode {
+        Sql,
+        Routine,
+        Trigger,
+    }
+
     extern "Rust" {
         fn parse_sql(
             sql: &[u8],
@@ -668,7 +683,7 @@ pub(crate) mod ffi {
             no_backslash_escapes: bool,
             pipes_as_concat: bool,
             high_not_precedence: bool,
-            routine_body: bool,
+            parse_mode: ParseMode,
         ) -> ParseTree;
     }
 }
@@ -711,7 +726,7 @@ fn parse_sql(
     no_backslash_escapes: bool,
     pipes_as_concat: bool,
     high_not_precedence: bool,
-    routine_body: bool,
+    parse_mode: ffi::ParseMode,
 ) -> ffi::ParseTree {
     let mut result = ffi::ParseTree {
         root: Node::missing(),
@@ -736,10 +751,11 @@ fn parse_sql(
         high_not_precedence,
     };
     let parsed = grammar::executable_sql(sql, mode).and_then(|sql| {
-        let parsed = if routine_body {
-            grammar::sql::routine_body(&sql, mode)
-        } else {
-            grammar::sql::query(&sql, mode)
+        let parsed = match parse_mode {
+            ffi::ParseMode::Routine => grammar::sql::routine_body(&sql, mode),
+            ffi::ParseMode::Trigger => grammar::sql::trigger(&sql, mode),
+            ffi::ParseMode::Sql => grammar::sql::query(&sql, mode),
+            _ => unreachable!("unknown parser entry point"),
         };
         if let std::borrow::Cow::Owned(sql) = sql {
             result.expanded_sql = sql;
