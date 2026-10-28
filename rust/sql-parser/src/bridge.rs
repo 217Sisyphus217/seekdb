@@ -20,6 +20,67 @@ use crate::{
 
 #[cxx::bridge(namespace = "oceanbase::sql::peg")]
 pub(crate) mod ffi {
+    #[derive(Clone, Copy, Default)]
+    struct SqlMode {
+        ansi_quotes: bool,
+        no_backslash_escapes: bool,
+        pipes_as_concat: bool,
+        high_not_precedence: bool,
+    }
+
+    struct ScanOptions {
+        mode: SqlMode,
+        parameterize: bool,
+        filter_hints: bool,
+        format: bool,
+        batch_statement: bool,
+    }
+
+    enum LiteralKind {
+        Integer,
+        Unsigned,
+        Decimal,
+        Float,
+        String,
+        NationalString,
+        Binary,
+        Boolean,
+        Null,
+        Date,
+        Time,
+        Timestamp,
+        Placeholder,
+    }
+
+    struct Literal {
+        kind: LiteralKind,
+        start: usize,
+        end: usize,
+        sql_offset: usize,
+        value: u64,
+        content_start: usize,
+        content_end: usize,
+        concatenated: bool,
+        first_part_length: usize,
+    }
+
+    struct ValuesPosition {
+        sql_offset: usize,
+        literal_index: usize,
+    }
+
+    struct ScanResult {
+        sql: String,
+        literals: Vec<Literal>,
+        literal_text: Vec<u8>,
+        parameter_names: Vec<String>,
+        ordinal_parameters: usize,
+        values: Vec<ValuesPosition>,
+        insert_values_offset: usize,
+        error: String,
+        error_offset: usize,
+    }
+
     enum NodeKind {
         Missing,
         EmptyQuery,
@@ -728,45 +789,36 @@ pub(crate) mod ffi {
     }
 
     extern "Rust" {
+        type Scanner<'a>;
+        // The SQL buffer must remain valid and unchanged until the scanner is dropped.
+        unsafe fn begin_scan<'a>(sql: &'a [u8], options: ScanOptions) -> Box<Scanner<'a>>;
+        fn advance(self: &mut Scanner<'_>) -> bool;
+        fn finish_scan(scanner: Box<Scanner<'_>>) -> ScanResult;
         fn split_sql(
             sql: &[u8],
-            ansi_quotes: bool,
-            no_backslash_escapes: bool,
-            pipes_as_concat: bool,
-            high_not_precedence: bool,
+            mode: SqlMode,
             first_only: bool,
         ) -> StatementSplits;
         fn parse_search_query(input: &[u8]) -> SearchTree;
         fn parse_sql(
             sql: &[u8],
-            ansi_quotes: bool,
-            no_backslash_escapes: bool,
-            pipes_as_concat: bool,
-            high_not_precedence: bool,
+            mode: SqlMode,
             parse_mode: ParseMode,
         ) -> ParseTree;
     }
 }
 
 use crate::fts::parse_search_query;
+use crate::scan::{begin_scan, finish_scan, Scanner};
 
 fn split_sql(
     input: &[u8],
-    ansi_quotes: bool,
-    no_backslash_escapes: bool,
-    pipes_as_concat: bool,
-    high_not_precedence: bool,
+    mode: SqlMode,
     first_only: bool,
 ) -> ffi::StatementSplits {
     let mut result = ffi::StatementSplits {
         ends: vec![],
         failed: false,
-    };
-    let mode = SqlMode {
-        ansi_quotes,
-        no_backslash_escapes,
-        pipes_as_concat,
-        high_not_precedence,
     };
     let sql = std::str::from_utf8(input).ok().and_then(|sql| {
         grammar::executable_sql(sql, mode, true)
@@ -840,10 +892,7 @@ fn number_parameters(
 
 fn parse_sql(
     sql: &[u8],
-    ansi_quotes: bool,
-    no_backslash_escapes: bool,
-    pipes_as_concat: bool,
-    high_not_precedence: bool,
+    mode: SqlMode,
     parse_mode: ffi::ParseMode,
 ) -> ffi::ParseTree {
     let mut result = ffi::ParseTree {
@@ -861,12 +910,6 @@ fn parse_sql(
             result.error = error.to_string();
             return result;
         }
-    };
-    let mode = SqlMode {
-        ansi_quotes,
-        no_backslash_escapes,
-        pipes_as_concat,
-        high_not_precedence,
     };
     let parse = |text: &str| match parse_mode {
         ffi::ParseMode::Routine => grammar::sql::routine_body(text, mode),

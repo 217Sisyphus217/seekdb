@@ -15,12 +15,8 @@
 mod bridge;
 mod fts;
 mod grammar;
+mod lex;
 mod node;
+mod scan;
 
-#[derive(Clone, Copy, Default)]
-pub struct SqlMode {
-    pub ansi_quotes: bool,
-    pub no_backslash_escapes: bool,
-    pub pipes_as_concat: bool,
-    pub high_not_precedence: bool,
-}
+pub use bridge::ffi::SqlMode;

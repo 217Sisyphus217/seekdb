@@ -15,7 +15,6 @@
  */
 
 #include "share/ob_define.h"
-#include "ob_fast_parser.h"
 #if defined(__GNUC__) && defined(__x86_64__) 
 #include "data_plane/vector/ob_vector_op_common.h"
 #endif
@@ -26,101 +25,6 @@ namespace common
 {
 
 #if defined(__GNUC__) && defined(__x86_64__) 
-OB_DECLARE_AVX512_SPECIFIC_CODE (
-inline static void get_first_non_hex_char_avx512(oceanbase::sql::ObRawSql& raw_sql)
-{
-  __m512i zero = _mm512_set1_epi8('0');
-  __m512i nine = _mm512_set1_epi8('9');
-  __m512i a = _mm512_set1_epi8('a');
-  __m512i f = _mm512_set1_epi8('f');
-  __m512i A = _mm512_set1_epi8('A');
-  __m512i F = _mm512_set1_epi8('F');
-
-  int64_t hex_pos = raw_sql.cur_pos_;
-  while (hex_pos + 64 <= raw_sql.raw_sql_len_) {
-    __m512i chars = _mm512_loadu_si512((__m512i *)(raw_sql.raw_sql_ + hex_pos));
-    __mmask64 mask = (_mm512_cmpge_epu8_mask(chars, zero) & _mm512_cmple_epu8_mask(chars, nine)) |
-                    (_mm512_cmpge_epu8_mask(chars, a) & _mm512_cmple_epu8_mask(chars, f)) |
-                    (_mm512_cmpge_epu8_mask(chars, A) & _mm512_cmple_epu8_mask(chars, F));
-    
-    if (mask != 0xFFFFFFFFFFFFFFFF) {
-      raw_sql.cur_pos_ = hex_pos + _tzcnt_u64(~mask);
-      return;
-    }
-    
-    hex_pos += 64;
-  }
-
-  for (; hex_pos < raw_sql.raw_sql_len_; ++hex_pos) {
-    char ch = raw_sql.raw_sql_[hex_pos];
-    if (!(ch != sql::INVALID_CHAR && sql::HEX_FLAGS[static_cast<uint8_t>(ch)])) {
-      break;
-    }
-  }
-
-  raw_sql.cur_pos_ = hex_pos;
-  if (hex_pos >= raw_sql.raw_sql_len_) {
-    raw_sql.search_end_ = true;
-    raw_sql.cur_pos_ = raw_sql.raw_sql_len_;
-  }
-}
-)
-
-OB_DECLARE_AVX2_SPECIFIC_CODE(
-inline static void get_first_non_hex_char_avx2(oceanbase::sql::ObRawSql& raw_sql)
-{
-  __m256i zero = _mm256_set1_epi8('0' - 1);
-  __m256i nine = _mm256_set1_epi8('9' + 1);
-  __m256i a = _mm256_set1_epi8('a' - 1);
-  __m256i f = _mm256_set1_epi8('f' + 1);
-  __m256i A = _mm256_set1_epi8('A' - 1);
-  __m256i F = _mm256_set1_epi8('F' + 1);
-
-  int64_t hex_pos = raw_sql.cur_pos_;
-  while (hex_pos + 32 <= raw_sql.raw_sql_len_) {
-    __m256i chars = _mm256_loadu_si256((__m256i *)(raw_sql.raw_sql_ + hex_pos));
-    __m256i num_mask1 = _mm256_and_si256(_mm256_cmpgt_epi8(chars, zero), _mm256_cmpgt_epi8(nine, chars));	    
-    __m256i num_mask2 = _mm256_and_si256(_mm256_cmpgt_epi8(chars, a), _mm256_cmpgt_epi8(f, chars));	    
-    __m256i num_mask3 = _mm256_and_si256(_mm256_cmpgt_epi8(chars, A), _mm256_cmpgt_epi8(F, chars));	    
-    int32_t mask = _mm256_movemask_epi8(_mm256_or_si256(_mm256_or_si256(num_mask1, num_mask2), num_mask3));
-    if (mask != 0xFFFFFFFFFFFFFFFF) {
-      raw_sql.cur_pos_ = hex_pos + _tzcnt_u32(~mask);
-      return;
-    }
-    
-    hex_pos += 32;
-  }
-
-  for (; hex_pos < raw_sql.raw_sql_len_; ++hex_pos) {
-    char ch = raw_sql.raw_sql_[hex_pos];
-    if (!(ch != sql::INVALID_CHAR && sql::HEX_FLAGS[static_cast<uint8_t>(ch)])) {
-      break;
-    }
-  }
-
-  raw_sql.cur_pos_ = hex_pos;
-  if (hex_pos >= raw_sql.raw_sql_len_) {
-    raw_sql.search_end_ = true;
-    raw_sql.cur_pos_ = raw_sql.raw_sql_len_;
-  }
-}
-)
-
-void process_hex_chars_simd(oceanbase::sql::ObRawSql& raw_sql, bool& is_arch_supported)
-{
-  #if OB_USE_MULTITARGET_CODE
-  if (common::is_arch_supported(ObTargetArch::AVX512)) {
-    common::specific::avx512::get_first_non_hex_char_avx512(raw_sql);
-  } else if (common::is_arch_supported(ObTargetArch::AVX2)) {
-    common::specific::avx2::get_first_non_hex_char_avx2(raw_sql);
-  } else {
-    is_arch_supported = false;
-  }
-  #else
-  is_arch_supported = false;
-  #endif
-}
-
 OB_DECLARE_AVX512_SPECIFIC_CODE (
 inline static void process_binary_avx512(const char **src, const char *end, char **dest)
 {

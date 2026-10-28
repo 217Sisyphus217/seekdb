@@ -827,14 +827,7 @@ int ObPlanCache::check_can_do_insert_opt(common::ObIAllocator &allocator,
     int64_t ins_params_count = 0;
     int64_t upd_params_count = 0;
     int64_t delta_length = 0;
-    ObSQLMode sql_mode = pc_ctx.sql_ctx_.session_info_->get_sql_mode();
-    ObCharsets4Parser charsets4parser = pc_ctx.sql_ctx_.session_info_->get_charsets4parser();
-    FPContext fp_ctx(charsets4parser);
-    fp_ctx.enable_batched_multi_stmt_ = pc_ctx.sql_ctx_.handle_batched_multi_stmt();
-    fp_ctx.sql_mode_ = sql_mode;
-    ObFastParserMysql fp(allocator, fp_ctx);
-
-    if (OB_FAIL(fp.parser_insert_str(allocator,
+    if (OB_FAIL(ObFastParser::compress_insert(allocator,
                                      fp_result.values_token_pos_,
                                      fp_result.pc_key_.name_,
                                      first_truncated_sql,

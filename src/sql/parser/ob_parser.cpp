@@ -549,8 +549,8 @@ int ObParser::split_multiple_stmt(const ObString &stmt,
     } else {
       auto split = peg::split_sql(
           rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(stmt.ptr()), length),
-          sql_mode_ & SMO_ANSI_QUOTES, sql_mode_ & SMO_NO_BACKSLASH_ESCAPES,
-          sql_mode_ & SMO_PIPES_AS_CONCAT, sql_mode_ & SMO_HIGH_NOT_PRECEDENCE,
+          peg::SqlMode{bool(sql_mode_ & SMO_ANSI_QUOTES), bool(sql_mode_ & SMO_NO_BACKSLASH_ESCAPES),
+                       bool(sql_mode_ & SMO_PIPES_AS_CONCAT), bool(sql_mode_ & SMO_HIGH_NOT_PRECEDENCE)},
           is_ret_first_stmt);
       size_t offset = 0;
       for (size_t end : split.ends) {

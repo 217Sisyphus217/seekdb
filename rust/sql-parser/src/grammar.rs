@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{node::*, SqlMode};
+use crate::{lex::decode_string as decode, node::*, SqlMode};
 use std::borrow::Cow;
 
 const WEIGHT_STRING_PAD_WITH_SPACE: u64 = 0x40;
@@ -127,35 +127,6 @@ fn reserved(word: &str) -> bool {
     ]
     .iter()
     .any(|keyword| word.eq_ignore_ascii_case(keyword))
-}
-
-fn decode(text: &str, no_backslash_escapes: bool) -> String {
-    let quote = text.chars().next().unwrap();
-    let mut chars = text[1..text.len() - 1].chars();
-    let mut result = String::new();
-    while let Some(ch) = chars.next() {
-        if ch == quote {
-            chars.next();
-            result.push(ch);
-        } else if ch == '\\' && !no_backslash_escapes {
-            match chars.next().unwrap() {
-                '0' => result.push('\0'),
-                'b' => result.push('\x08'),
-                'n' => result.push('\n'),
-                'r' => result.push('\r'),
-                't' => result.push('\t'),
-                'Z' => result.push('\x1a'),
-                ch @ ('%' | '_') => {
-                    result.push('\\');
-                    result.push(ch);
-                }
-                ch => result.push(ch),
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-    result
 }
 
 fn chain(first: Node, rest: Vec<(String, Node)>) -> Result<Node, &'static str> {

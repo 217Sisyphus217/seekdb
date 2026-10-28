@@ -1144,8 +1144,8 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
   result.input_sql_len_ = sql.length();
   auto parsed = peg::parse_sql(rust::Slice<const uint8_t>(
       reinterpret_cast<const uint8_t *>(sql.ptr()), sql.length()),
-      result.sql_mode_ & SMO_ANSI_QUOTES, result.sql_mode_ & SMO_NO_BACKSLASH_ESCAPES,
-      result.sql_mode_ & SMO_PIPES_AS_CONCAT, result.sql_mode_ & SMO_HIGH_NOT_PRECEDENCE,
+      peg::SqlMode{bool(result.sql_mode_ & SMO_ANSI_QUOTES), bool(result.sql_mode_ & SMO_NO_BACKSLASH_ESCAPES),
+                   bool(result.sql_mode_ & SMO_PIPES_AS_CONCAT), bool(result.sql_mode_ & SMO_HIGH_NOT_PRECEDENCE)},
       routine_body ? peg::ParseMode::Routine : result.is_expression_ ? peg::ParseMode::Expression
       : result.is_for_trigger_ ? peg::ParseMode::Trigger
       : result.is_method_opt_parser_ ? peg::ParseMode::Statistics : peg::ParseMode::Sql);
