@@ -130,6 +130,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::TableAutoIncrement: return T_AUTO_INCREMENT;
     case Kind::BlockSize: return T_BLOCK_SIZE;
     case Kind::TabletSize: return T_TABLET_SIZE;
+    case Kind::LobInrowThreshold: return T_LOB_INROW_THRESHOLD;
     case Kind::PctFree: return T_PCTFREE;
     case Kind::Index: return T_INDEX;
     case Kind::IndexColumns: return T_INDEX_COLUMN_LIST;
@@ -234,6 +235,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Min: return T_FUN_MIN;
     case Kind::Max: return T_FUN_MAX;
     case Kind::Avg: return T_FUN_AVG;
+    case Kind::JsonArrayAgg: return T_FUN_JSON_ARRAYAGG;
+    case Kind::JsonObjectAgg: return T_FUN_JSON_OBJECTAGG;
     case Kind::Stddev: return T_FUN_STDDEV;
     case Kind::StddevPop: return T_FUN_STDDEV_POP;
     case Kind::StddevSamp: return T_FUN_STDDEV_SAMP;
@@ -324,6 +327,15 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Charset: return T_CHARSET;
     case Kind::DropTable: return T_DROP_TABLE;
     case Kind::TruncateTable: return T_TRUNCATE_TABLE;
+    case Kind::Temporary: return T_TEMPORARY;
+    case Kind::Srid: return T_CONSTR_SRID;
+    case Kind::Point: return T_FUN_SYS_POINT;
+    case Kind::LineString: return T_FUN_SYS_LINESTRING;
+    case Kind::Polygon: return T_FUN_SYS_POLYGON;
+    case Kind::MultiPoint: return T_FUN_SYS_MULTIPOINT;
+    case Kind::MultiLineString: return T_FUN_SYS_MULTILINESTRING;
+    case Kind::MultiPolygon: return T_FUN_SYS_MULTIPOLYGON;
+    case Kind::GeometryCollection: return T_FUN_SYS_GEOMCOLLECTION;
     case Kind::OptimizeTable: return T_OPTIMIZE_TABLE;
     case Kind::PurgeRecyclebin: return T_PURGE_RECYCLEBIN;
     case Kind::PurgeTable: return T_PURGE_TABLE;
@@ -336,6 +348,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::AlterPartition: return T_ALTER_PARTITION_OPTION;
     case Kind::Repartition: return T_ALTER_PARTITION_PARTITIONED;
     case Kind::PartitionAdd: return T_ALTER_PARTITION_ADD;
+    case Kind::PartitionExchange: return T_ALTER_PARTITION_EXCHANGE;
     case Kind::PartitionDrop: return T_ALTER_PARTITION_DROP;
     case Kind::PartitionTruncate: return T_ALTER_PARTITION_TRUNCATE;
     case Kind::SubpartitionDrop: return T_ALTER_SUBPARTITION_DROP;
@@ -808,7 +821,11 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
       node->int16_values_[OB_NODE_CAST_N_SCALE_IDX] = type == T_NUMBER ? scale : -1;
     } else if (type == T_DATETIME || type == T_DATE || type == T_TIME || type == T_YEAR) {
       node->int16_values_[OB_NODE_CAST_N_SCALE_IDX] = short_precision;
+    } else if (type == T_GEOMETRY) {
+      node->int16_values_[OB_NODE_CAST_GEO_TYPE_IDX] = source.value;
     }
+  } else if (type == T_GEOMETRY) {
+    node->int32_values_[1] = source.value;
   } else if (string) {
     node->int32_values_[0] = size == 0 && type == T_CHAR ? 1 : precision;
     node->int32_values_[1] = name == "string" ? 2 : binary;
@@ -826,7 +843,7 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
     node->int16_values_[0] = size == 0 ? (name == "decimal" ? 10 : -1) : short_precision;
     node->int16_values_[1] = name != "decimal" && size < 2 ? -1 : scale;
   }
-  if (!cast && !string) {
+  if (!cast && !string && type != T_GEOMETRY) {
     node->int16_values_[2] = (source.value & 2) != 0;
     node->int16_values_[3] = (source.value & 1) != 0;
   }

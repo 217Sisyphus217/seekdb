@@ -267,8 +267,7 @@ impl Node {
                 .any(|parameter| !matches!(parameter.kind, Kind::Int | Kind::Uint))
             || (name == "double" && parameters.len() == 1)
             || (matches!(name, "varchar" | "varbinary") && parameters.is_empty())
-            || (matches!(name, "bool" | "boolean" | "date" | "json" | "geometry")
-                && !parameters.is_empty())
+            || (matches!(name, "bool" | "boolean" | "date" | "json") && !parameters.is_empty())
             || (matches!(
                 name,
                 "tinytext"
@@ -512,6 +511,31 @@ impl Node {
                 .text("mod".into())
                 .expression(start, end);
         }
+        let geometry = match function.as_str() {
+            "point" => Some(Kind::Point),
+            "linestring" => Some(Kind::LineString),
+            "polygon" => Some(Kind::Polygon),
+            "multipoint" => Some(Kind::MultiPoint),
+            "multilinestring" => Some(Kind::MultiLineString),
+            "multipolygon" => Some(Kind::MultiPolygon),
+            "geometrycollection" | "geomcollection" => Some(Kind::GeometryCollection),
+            _ => None,
+        };
+        if let Some(kind) = geometry {
+            if modifier.is_some()
+                || window.is_some()
+                || (kind == Kind::Point && arguments.len() != 2)
+                || (kind != Kind::GeometryCollection && arguments.is_empty())
+            {
+                return Err("geometry constructor arguments");
+            }
+            let children = if kind == Kind::Point {
+                arguments
+            } else {
+                vec![Self::list(Kind::ExprList, arguments)]
+            };
+            return Self::new(kind, children).expression(start, end);
+        }
         let kind = match function.as_str() {
             "cast" => Kind::Cast,
             "count" => Kind::Count,
@@ -519,6 +543,8 @@ impl Node {
             "min" => Kind::Min,
             "max" => Kind::Max,
             "avg" => Kind::Avg,
+            "json_arrayagg" => Kind::JsonArrayAgg,
+            "json_objectagg" => Kind::JsonObjectAgg,
             "std" | "stddev" => Kind::Stddev,
             "stddev_pop" => Kind::StddevPop,
             "stddev_samp" => Kind::StddevSamp,
@@ -607,6 +633,8 @@ impl Node {
                     | Kind::Min
                     | Kind::Max
                     | Kind::Avg
+                    | Kind::JsonArrayAgg
+                    | Kind::JsonObjectAgg
                     | Kind::ApproxCountDistinctSynopsisMerge
                     | Kind::SumOpnsize
             );
@@ -639,14 +667,14 @@ impl Node {
                 || distinct && non_distinct_aggregate
                 || matches!(
                     kind,
-                    Kind::ApproxCountDistinctSynopsisMerge | Kind::SumOpnsize
+                    Kind::ApproxCountDistinctSynopsisMerge | Kind::SumOpnsize | Kind::JsonObjectAgg
                 ))
         {
             return Err("invalid aggregate modifier");
         }
         let argument_count = match kind {
             Kind::TopFreHist => 4,
-            Kind::HybridHist => 2,
+            Kind::HybridHist | Kind::JsonObjectAgg => 2,
             _ => 1,
         };
         if aggregate
@@ -663,7 +691,7 @@ impl Node {
         {
             return Err("histogram rate and bucket count must be numeric constants");
         }
-        let children = if ranking || histogram {
+        let children = if ranking || histogram || kind == Kind::JsonObjectAgg {
             arguments
         } else if timestamp || no_arguments {
             vec![arguments.into_iter().next().unwrap_or_else(Self::missing)]

@@ -55,6 +55,8 @@ SHOW CHARSET／COLLATION、SET TRANSACTION 和 MAJOR／MINOR FREEZE。
 ALTER CHECK、重新分区、增删／截断分区、OPTIMIZE TABLE 和 KVCACHE 清理。
 支持 FORK TABLE／DATABASE、触发器创建／删除、执行顺序和 NEW／OLD 引用，
 以及触发器内部生成的行类型参数和 SQL 绑定。
+支持空间类型声明／构造／转换和 SRID、CONVERT USING、JSON 聚合、临时表声明，
+以及分区交换和 LOB 行内存储阈值；功能限制仍由现有执行层判断。
 系统视图及统计采样支持 CAST 的 IGNORE 和 CHARSET 选项；未知优化器 hint 按原有规则忽略。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 

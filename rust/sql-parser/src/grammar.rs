@@ -438,6 +438,7 @@ peg::parser! {
             }
         rule string_function(level: usize) -> Node = start:position!() function:(
                 kw("position") "(" _ needle:bit_or(level) kw("in") haystack:expr(level) { ("position",vec![needle,haystack]) }
+                / kw("convert") "(" _ value:expr(level) kw("using") !kw("default") charset:charset_name() { ("convert",vec![value,charset]) }
                 / (kw("char") / kw("character")) "(" _ args:expr_list(level) charset:(kw("using") value:charset_name() { value })? {
                     let mut args=args;args.push(charset.unwrap_or_else(|| Node::new(Kind::CharsetName,vec![]).text("binary".into())));("char",args)
                 }
@@ -1013,6 +1014,13 @@ peg::parser! {
             / kw("rollback") kw("work")? { Node::new(Kind::Rollback, vec![Node::missing()]) }
         rule if_not_exists() -> Node = kw("if") kw("not") kw("exists") { Node::new(Kind::IfNotExists, vec![]) }
         rule if_exists() -> Node = kw("if") kw("exists") { Node::new(Kind::IfExists, vec![]) }
+        rule temporary() -> Node = kw("temporary") { Node::new(Kind::Temporary,vec![]) }
+        rule geometry_type() -> Node = start:position!() kind:(kw("geometry") { 0 }
+            / kw("point") { 1 } / kw("linestring") { 2 } / kw("polygon") { 3 }
+            / kw("multipoint") { 4 } / kw("multilinestring") { 5 } / kw("multipolygon") { 6 }
+            / (kw("geometrycollection") / kw("geomcollection")) { 7 }) end:position!() {
+            Node::new(Kind::DataType,vec![]).text("geometry".into()).value(kind).at(start,end)
+        }
         rule type_name() -> &'static str
             = kw("tinyint") { "tinyint" } / kw("smallint") { "smallint" } / kw("mediumint") { "mediumint" }
             / (kw("int") / kw("integer")) { "int" } / kw("bigint") { "bigint" }
@@ -1027,7 +1035,7 @@ peg::parser! {
             / kw("varbinary") { "varbinary" } / kw("binary") { "binary" }
             / kw("datetime") { "datetime" } / kw("timestamp") { "timestamp" }
             / kw("time") { "time" } / kw("date") { "date" } / kw("year") { "year" } / kw("json") { "json" }
-            / kw("bit") { "bit" } / kw("geometry") { "geometry" }
+            / kw("bit") { "bit" }
         rule type_size() -> Node = start:position!() text:$(['0'..='9']+) !cont() end:position!() _ {? Node::number(text, start, end) }
         rule charset_keyword() = kw("charset") / (kw("character") / kw("char")) kw("set")
         rule cast_type() -> Node = start:position!() name:(kw("signed") kw("integer")? { "signed" }
@@ -1045,6 +1053,7 @@ peg::parser! {
                 if parameters.len()>max || parameters.iter().any(|value| !matches!(value.kind,Kind::Int|Kind::Uint)) { Err("invalid cast type parameters") }
                 else { parameters.extend(charset);Ok(Node::new(Kind::CastType,parameters).text(name.into()).at(start,end)) }
             }
+            / !kw("geometry") value:geometry_type() { Node { kind:Kind::CastType,..value } }
         rule data_type() -> Node = collection_type(0)
         rule collection_type(level: usize) -> Node = depth(level) start:position!() value:(
                 kw("array") "(" _ value:collection_type(level+1) ")" end:position!() _ {
@@ -1067,6 +1076,7 @@ peg::parser! {
                 charset:(charset_keyword() value:collation_name() { Node { kind:Kind::Charset,..value } })? end:position!() {
                     Node::new(kind,vec![Node::optional(charset),Node::missing(),Node::optional(binary),Node::new(Kind::StringList,values)]).at(start,end)
                 }
+            / geometry_type()
             / start:position!() name:type_name()
             parameters:("(" _ values:(type_size() ++ ("," _)) ")" _ { values })?
             unsigned:kw("unsigned")? zerofill:kw("zerofill")? charset:(charset_keyword() value:collation_name() { Node { kind:Kind::Charset,..value } })? end:position!() {?
@@ -1083,6 +1093,7 @@ peg::parser! {
             / kw("primary")? kw("key") { Node::new(Kind::ColumnPrimaryKey, vec![]) }
             / kw("unique") kw("key")? { Node::new(Kind::UniqueKey, vec![]) }
             / kw("comment") value:string() { Node::new(Kind::ColumnComment, vec![value]) }
+            / kw("srid") value:type_size() { Node::new(Kind::Srid,vec![value]) }
             / check_constraint()
         rule column_attribute() -> Node
             = generated_column_attribute()
@@ -1147,7 +1158,8 @@ peg::parser! {
             / kw("default")? kw("collate") ("=" _)? value:collation_name() { Node { kind:Kind::Collation,..value } }
             / kind:(kw("compression") { Kind::Compression } / kw("comment") { Kind::ColumnComment }) ("=" _)? value:string() { Node::new(kind,vec![value]) }
             / kind:(kw("auto_increment") { Kind::TableAutoIncrement } / kw("block_size") { Kind::BlockSize }
-                / kw("tablet_size") { Kind::TabletSize } / kw("pctfree") { Kind::PctFree }) ("=" _)? value:type_size() { Node::new(kind,vec![value]) }
+                / kw("tablet_size") { Kind::TabletSize } / kw("pctfree") { Kind::PctFree }
+                / (kw("lob_inrow_threshold") / kw("default_lob_inrow_threshold")) { Kind::LobInrowThreshold }) ("=" _)? value:type_size() { Node::new(kind,vec![value]) }
             / kw("row_format") ("=" _)? value:(kw("redundant") { 1 } / kw("compact") { 2 }
                 / (kw("dynamic") / kw("default")) { 3 } / kw("compressed") { 4 } / kw("condensed") { 5 }) {
                     Node::new(Kind::StoreFormat,vec![Node::new(Kind::HiddenInt,vec![]).value(value)])
@@ -1268,7 +1280,7 @@ peg::parser! {
             / kw("alter") kw("column")? name:column() value:(kw("set") kw("default") value:expr(0) { Node::new(Kind::ColumnDefault,vec![value]) }
                 / kw("drop") kw("default") { Node::new(Kind::Nullable,vec![]) }) { Node::new(Kind::ColumnAlter,vec![name,value]) }
         rule alter_index() -> Node
-            = kw("add") value:index_definition() { Node { kind:Kind::IndexAdd,..value } }
+            = kw("add") !kw("vector") value:index_definition() { Node { kind:Kind::IndexAdd,..value } }
             / kw("add") kw("primary") kw("key") ident()? "(" _ names:(ident() ++ ("," _)) ")" _ options:index_options(false) {
                 Node::new(Kind::PrimaryKey,vec![Node::new(Kind::ColumnList,names.into_iter().map(Node::name).collect()),options])
             }
@@ -1278,6 +1290,9 @@ peg::parser! {
         rule partition_names() -> Node = names:(ident() ++ ("," _)) { Node::new(Kind::Names,names.into_iter().map(Node::name).collect()) }
         rule alter_partition() -> Node
             = value:partition_option() { Node::new(Kind::Repartition,value.children) }
+            / kw("exchange") kw("partition") name:ident() kw("with") kw("table") table:name() kw("without") kw("validation") {?
+                Ok(Node::new(Kind::PartitionExchange,vec![Node::name(name),Node::relation(table)?]))
+            }
             / kw("add") kw("partition") start:position!()
                 values:(value:partition_elements(Kind::RangePartition,Kind::Missing) { Node { kind:Kind::RangePartitions,..value } }
                     / partition_elements(Kind::ListPartition,Kind::Missing)) end:position!() {
@@ -1336,16 +1351,16 @@ peg::parser! {
             / kw("create") (kw("database") / kw("schema")) absent:if_not_exists()? name:ident() options:database_option()* {
                 Node::new(Kind::CreateDatabase, vec![Node::optional(absent), Node::name(name), Node::list(Kind::DatabaseOptions,options)])
             }
-            / kw("create") hints()? kw("table") absent:if_not_exists()? name:name()
+            / kw("create") hints()? temporary:temporary()? kw("table") absent:if_not_exists()? name:name()
                 source:(kw("like") name:name() { name } / "(" _ kw("like") name:name() ")" _ { name }) {?
-                Ok(Node::new(Kind::CreateTableLike,vec![Node::missing(),Node::optional(absent),Node::relation(name)?,Node::relation(source)?]))
+                Ok(Node::new(Kind::CreateTableLike,vec![Node::optional(temporary),Node::optional(absent),Node::relation(name)?,Node::relation(source)?]))
             }
-            / kw("create") hints:hints()? kw("table") absent:if_not_exists()? name:name()
+            / kw("create") hints:hints()? temporary:temporary()? kw("table") absent:if_not_exists()? name:name()
                 elements:("(" _ elements:(table_element() ++ ("," _)) ")" _ { elements })?
                 options:((value:table_option() ("," _)? { value })*) partition:partition_option()?
                 query:(modifier:(kw("ignore") { Kind::Ignore } / kw("replace") { Kind::Replace })? kw("as")? query:select(0) { (modifier,query) })? {?
                 if elements.is_none() && query.is_none() { return Err("table columns or SELECT"); }
-                let mut children=vec![Node::missing(), Node::optional(absent), Node::relation(name)?,
+                let mut children=vec![Node::optional(temporary), Node::optional(absent), Node::relation(name)?,
                     Node::list(Kind::TableElements, elements.unwrap_or_default()), Node::list(Kind::TableOptions,options), Node::optional(partition), Node::missing(), Node::missing()];
                 if let Some((modifier,query))=query {
                     children.extend([query,Node::list(Kind::Hints,hints.unwrap_or_default()),modifier.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing)]);
@@ -1362,9 +1377,9 @@ peg::parser! {
             / kw("drop") (kw("database") / kw("schema")) exists:if_exists()? name:ident() {
                 Node::new(Kind::DropDatabase, vec![Node::optional(exists), Node::name(name)])
             }
-            / kw("drop") (kw("table") / kw("tables")) exists:if_exists()? names:(name() ++ ("," _)) {?
+            / kw("drop") temporary:temporary()? (kw("table") / kw("tables")) exists:if_exists()? names:(name() ++ ("," _)) {?
                 let tables=names.into_iter().map(Node::relation).collect::<Result<Vec<_>, _>>()?;
-                Ok(Node::new(Kind::DropTable, vec![Node::missing(), Node::optional(exists), Node::new(Kind::TableList, tables)]))
+                Ok(Node::new(Kind::DropTable, vec![Node::optional(temporary), Node::optional(exists), Node::new(Kind::TableList, tables)]))
             }
             / kw("truncate") kw("table")? name:name() {? Ok(Node::new(Kind::TruncateTable,vec![Node::relation(name)?])) }
             / kw("optimize") kw("table") names:(name() ++ ("," _)) {?
