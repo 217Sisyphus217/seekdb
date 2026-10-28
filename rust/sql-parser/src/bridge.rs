@@ -70,6 +70,7 @@ pub(crate) mod ffi {
         Collation,
         SetCollation,
         Compression,
+        TableMode,
         StoreFormat,
         TableAutoIncrement,
         BlockSize,

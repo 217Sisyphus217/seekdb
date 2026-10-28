@@ -126,6 +126,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Collation: return T_COLLATION;
     case Kind::SetCollation: return T_FUN_SYS_SET_COLLATION;
     case Kind::Compression: return T_COMPRESSION;
+    case Kind::TableMode: return T_TABLE_MODE;
     case Kind::StoreFormat: return T_STORE_FORMAT;
     case Kind::TableAutoIncrement: return T_AUTO_INCREMENT;
     case Kind::BlockSize: return T_BLOCK_SIZE;

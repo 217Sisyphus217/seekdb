@@ -1172,7 +1172,8 @@ peg::parser! {
             = kw("organization") ("=" _)? kind:(kw("index") { Kind::OrganizationIndex } / kw("heap") { Kind::OrganizationHeap }) { Node::new(Kind::Organization,vec![Node::new(kind,vec![])]) }
             / kw("default")? charset_keyword() ("=" _)? value:charset_name() { Node::new(Kind::TableCharset,vec![value]) }
             / kw("default")? kw("collate") ("=" _)? value:collation_name() { Node { kind:Kind::Collation,..value } }
-            / kind:(kw("compression") { Kind::Compression } / kw("comment") { Kind::ColumnComment }) ("=" _)? value:string() { Node::new(kind,vec![value]) }
+            / kind:(kw("compression") { Kind::Compression } / kw("comment") { Kind::ColumnComment }
+                / kw("table_mode") { Kind::TableMode }) ("=" _)? value:string() { Node::new(kind,vec![value]) }
             / kind:(kw("auto_increment") { Kind::TableAutoIncrement } / kw("block_size") { Kind::BlockSize }
                 / kw("tablet_size") { Kind::TabletSize } / kw("pctfree") { Kind::PctFree }
                 / (kw("lob_inrow_threshold") / kw("default_lob_inrow_threshold")) { Kind::LobInrowThreshold }) ("=" _)? value:type_size() { Node::new(kind,vec![value]) }
@@ -1383,9 +1384,9 @@ peg::parser! {
                 }
                 Ok(Node::new(Kind::CreateTable,children))
             }
-            / kw("create") kind:index_kind()? kw("index") absent:if_not_exists()? name:name() method:index_method()? kw("on") table:name()
+            / kw("create") hints:hints()? kind:index_kind()? kw("index") absent:if_not_exists()? name:name() method:index_method()? kw("on") table:name()
                 "(" _ columns:(index_column(kind==Some(3)) ++ ("," _)) ")" _ options:index_options(kind==Some(3)) partition:partition_option()? {?
-                Ok(Node::new(Kind::CreateIndex,vec![Node::relation(name)?.value(kind.unwrap_or(0)),Node::relation(table)?,Node::new(Kind::IndexColumns,columns),options,Node::optional(method),Node::optional(partition),Node::missing(),Node::optional(absent),Node::missing()]))
+                Ok(Node::new(Kind::CreateIndex,vec![Node::relation(name)?.value(kind.unwrap_or(0)),Node::relation(table)?,Node::new(Kind::IndexColumns,columns),options,Node::optional(method),Node::optional(partition),Node::missing(),Node::optional(absent),Node::list(Kind::Hints,hints.unwrap_or_default())]))
             }
             / kw("drop") kw("index") name:ident() kw("on") table:name() {?
                 Ok(Node::new(Kind::DropIndex,vec![Node::name(name),Node::relation(table)?]))
