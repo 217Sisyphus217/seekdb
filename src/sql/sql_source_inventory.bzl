@@ -1459,12 +1459,10 @@ SQL_UNITY_GROUPS = [
         name = "ob_sql_resolver_prepare_0",
         language = "c++",
         srcs = [
-            "src/sql/resolver/prepare/ob_deallocate_resolver.cpp",
             "src/sql/resolver/prepare/ob_deallocate_stmt.cpp",
-            "src/sql/resolver/prepare/ob_execute_resolver.cpp",
             "src/sql/resolver/prepare/ob_execute_stmt.cpp",
-            "src/sql/resolver/prepare/ob_prepare_resolver.cpp",
             "src/sql/resolver/prepare/ob_prepare_stmt.cpp",
+            "src/sql/resolver/prepare/prepared_command_resolver.cpp",
         ],
     ),
     struct(

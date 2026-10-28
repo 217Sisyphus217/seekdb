@@ -1823,13 +1823,13 @@ peg::parser! {
         pub rule routine_body() -> Node = _ value:(package_block() / kw("create") value:routine_definition(true) { value }
             / value:routine_definition(true) { value.children.into_iter().last().unwrap() } / pl_statement(0)) (";" _)* { value }
         rule prepared_statement() -> Node
-            = kw("prepare") name:ident() kw("from") source:(string() / value:user_variable() { Node::new(Kind::GetUserVariable,vec![value]) }) {
-                Node::new(Kind::Prepare,vec![Node::name(name),source])
+            = kw("prepare") name:ident() kw("from") source:(string() / user_variable()) {
+                Node::new(Kind::Prepare,vec![source]).text(name.text)
             }
-            / kw("execute") name:ident() args:(kw("using") args:((value:user_variable() { Node::new(Kind::GetUserVariable,vec![value]) }) ++ ("," _)) { args })? {
-                Node::new(Kind::Execute,vec![Node::name(name),Node::list(Kind::ExecuteArguments,args.unwrap_or_default())])
+            / kw("execute") name:ident() args:(kw("using") args:(user_variable() ++ ("," _)) { args })? {
+                Node::new(Kind::Execute,args.unwrap_or_default()).text(name.text)
             }
-            / (kw("deallocate") / kw("drop")) kw("prepare") name:ident() { Node::new(Kind::Deallocate,vec![Node::name(name)]) }
+            / (kw("deallocate") / kw("drop")) kw("prepare") name:ident() { Node::new(Kind::Deallocate,vec![]).text(name.text) }
         rule analyze() -> Node = kw("analyze") kw("table") tables:((names:name() {? Node::relation(names) }) ++ ("," _)) {
             let tables=tables.into_iter().reduce(|left,right| Node::new(Kind::Link,vec![left,right])).unwrap();
             Node::new(Kind::Analyze,vec![tables,Node::missing(),Node::missing()])

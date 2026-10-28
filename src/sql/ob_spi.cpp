@@ -1897,7 +1897,7 @@ int ObSPIService::spi_parse_prepare(common::ObIAllocator &allocator,
           prepare_result.has_hidden_rowid_ = false;
           if (OB_FAIL(ret)) {
           } else if (parsed.statement() != nullptr) {
-            // Transaction commands have no PL bindings, INTO targets, or object references.
+            // Native commands have no PL bindings, INTO targets, or object references.
           } else if (OB_FAIL(resolve_exec_params(parse_result,
                                           session,
                                           schema_guard,

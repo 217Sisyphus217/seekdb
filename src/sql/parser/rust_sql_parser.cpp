@@ -33,6 +33,22 @@ using common::OB_ERR_PARSE_SQL;
 namespace {
 using Kind = peg::NodeKind;
 
+bool uses_native_resolver(const peg::Node &node)
+{
+  switch (node.kind) {
+    case Kind::Begin:
+    case Kind::Commit:
+    case Kind::Rollback:
+    case Kind::Savepoint:
+    case Kind::ReleaseSavepoint:
+    case Kind::RollbackSavepoint:
+    case Kind::Prepare:
+    case Kind::Execute:
+    case Kind::Deallocate: return true;
+    default: return false;
+  }
+}
+
 ObItemType operator_type(const peg::Node &node)
 {
   const common::ObString op(node.text.size(), node.text.data());
@@ -631,10 +647,6 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Revoke: return T_REVOKE;
     case Kind::RevokeAll: return T_REVOKE_ALL;
     case Kind::ShowGrants: return T_SHOW_GRANTS;
-    case Kind::Prepare: return T_PREPARE;
-    case Kind::Execute: return T_EXECUTE;
-    case Kind::ExecuteArguments: return T_ARGUMENT_LIST;
-    case Kind::Deallocate: return T_DEALLOCATE;
     case Kind::CreateProcedure: return T_SP_CREATE;
     case Kind::CreateTrigger: return T_TG_CREATE;
     case Kind::DropTrigger: return T_TG_DROP;
@@ -886,7 +898,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
       || type == T_PACKAGE_CREATE || type == T_PACKAGE_CREATE_BODY;
   if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
   const bool native_sql = source.kind == Kind::PlSql && source.children.size() == 1
-      && peg::is_transaction(source.children[0]);
+      && uses_native_resolver(source.children[0]);
   const size_t child_count = native_sql ? 0 : source.children.size();
   node = new_node(pool, type, type == T_SELECT ? PARSE_SELECT_MAX_IDX : child_count);
   if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
@@ -1174,7 +1186,7 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
   }
   int ret = fill_parse_metadata(sql, parsed, result);
   if (ret != common::OB_SUCCESS) return ret;
-  if (peg::is_transaction(parsed.root)) {
+  if (uses_native_resolver(parsed.root)) {
     if (owner == nullptr) return common::OB_ERR_UNEXPECTED;
     owner->syntax_.emplace(std::move(parsed));
     return common::OB_SUCCESS;
@@ -1186,6 +1198,9 @@ int ParsedSql::statement_type(stmt::StmtType &type) const
 {
   if (!syntax_) return ObResolverUtils::resolve_stmt_type(legacy_, type);
   switch (syntax_->root.kind) {
+    case peg::NodeKind::Prepare: type = stmt::T_PREPARE; break;
+    case peg::NodeKind::Execute: type = stmt::T_EXECUTE; break;
+    case peg::NodeKind::Deallocate: type = stmt::T_DEALLOCATE; break;
     case peg::NodeKind::Begin: type = stmt::T_START_TRANS; break;
     case peg::NodeKind::Commit:
     case peg::NodeKind::Rollback: type = stmt::T_END_TRANS; break;

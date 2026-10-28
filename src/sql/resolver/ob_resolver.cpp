@@ -23,10 +23,8 @@
 #include "sql/resolver/dml/ob_update_resolver.h"
 #include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/resolver/tcl/transaction_resolver.h"
+#include "sql/resolver/prepare/prepared_command_resolver.h"
 #include "sql/parser/parsed_sql.h"
-#include "sql/resolver/prepare/ob_prepare_resolver.h"
-#include "sql/resolver/prepare/ob_execute_resolver.h"
-#include "sql/resolver/prepare/ob_deallocate_resolver.h"
 #include "sql/resolver/ddl/ob_create_table_resolver.h"
 #include "sql/resolver/ddl/ob_rename_table_resolver.h"
 #include "sql/resolver/ddl/ob_truncate_table_resolver.h"
@@ -56,12 +54,8 @@
 #include "sql/resolver/ddl/ob_recyclebin_restore_resolver.h"
 #include "sql/resolver/ddl/ob_purge_resolver.h"
 #include "sql/resolver/ddl/ob_analyze_stmt_resolver.h"
-#include "sql/resolver/ddl/ob_purge_resolver.h"
 #include "sql/resolver/ddl/ob_set_comment_resolver.h"
 #include "sql/resolver/ddl/ob_lock_table_resolver.h"
-#include "sql/resolver/dml/ob_insert_resolver.h"
-#include "sql/resolver/dml/ob_update_resolver.h"
-#include "sql/resolver/dml/ob_delete_resolver.h"
 #include "sql/resolver/dcl/ob_create_user_resolver.h"
 #include "sql/resolver/dcl/ob_drop_user_resolver.h"
 #include "sql/resolver/dcl/ob_rename_user_resolver.h"
@@ -72,8 +66,6 @@
 #include "sql/resolver/dcl/ob_create_role_resolver.h"
 #include "sql/resolver/dcl/ob_drop_role_resolver.h"
 #include "sql/resolver/dcl/ob_alter_user_role_resolver.h"
-#include "sql/resolver/tcl/transaction_resolver.h"
-#include "sql/parser/parsed_sql.h"
 #include "sql/resolver/cmd/ob_variable_set_resolver.h"
 #include "sql/resolver/cmd/ob_show_resolver.h"
 #include "sql/resolver/cmd/ob_diff_table_resolver.h"
@@ -85,10 +77,6 @@
 #include "sql/resolver/cmd/ob_anonymous_block_resolver.h"
 #include "sql/resolver/cmd/ob_call_procedure_resolver.h"
 #include "sql/resolver/cmd/ob_load_data_resolver.h"
-#include "sql/resolver/prepare/ob_execute_resolver.h"
-#include "sql/resolver/prepare/ob_deallocate_resolver.h"
-#include "sql/resolver/ddl/ob_purge_resolver.h"
-#include "sql/resolver/ddl/ob_set_comment_resolver.h"
 #include "sql/resolver/expr/ob_raw_expr_wrap_enum_set.h"
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
 #include "sql/resolver/dcl/ob_alter_role_resolver.h"
@@ -155,7 +143,15 @@ int ObResolver::resolve(const ParsedSql &parsed, ObStmt *&stmt)
     if (exec_ctx != nullptr && exec_ctx->get_sql_ctx() != nullptr) {
       exec_ctx->get_sql_ctx()->stmt_type_ = type;
     }
-    ret = resolve_transaction(*parsed.statement(), params_, stmt);
+    switch (parsed.statement()->kind) {
+      case peg::NodeKind::Prepare:
+      case peg::NodeKind::Execute:
+      case peg::NodeKind::Deallocate:
+        ret = resolve_prepared_command(*parsed.statement(), params_, stmt);
+        break;
+      default:
+        ret = resolve_transaction(*parsed.statement(), params_, stmt);
+    }
   }
   return ret;
 }
@@ -377,30 +373,6 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_OPTIMIZE_TABLE: {
         REGISTER_STMT_RESOLVER(OptimizeTable);
-        break;
-      }
-      case T_PREPARE: {
-        if (params_.is_prepare_protocol_) {
-          ret = OB_ERR_PARSE_SQL;
-        } else {
-          REGISTER_STMT_RESOLVER(Prepare);
-        }
-        break;
-      }
-      case T_EXECUTE: {
-        if (params_.is_prepare_protocol_) {
-          ret = OB_ERR_PARSE_SQL;
-        } else {
-          REGISTER_STMT_RESOLVER(Execute);
-        }
-        break;
-      }
-      case T_DEALLOCATE: {
-        if (params_.is_prepare_protocol_) {
-          ret = OB_ERR_PARSE_SQL;
-        } else {
-          REGISTER_STMT_RESOLVER(Deallocate);
-        }
         break;
       }
       case T_VARIABLE_SET: {

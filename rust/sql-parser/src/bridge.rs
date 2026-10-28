@@ -637,7 +637,6 @@ pub(crate) mod ffi {
         ShowGrants,
         Prepare,
         Execute,
-        ExecuteArguments,
         Deallocate,
         CreateProcedure,
         CreateTrigger,
@@ -828,8 +827,9 @@ pub(crate) mod ffi {
         ) -> StatementSplits;
         fn parse_search_query(input: &[u8]) -> SearchTree;
         fn inspect_expression(sql: &[u8], mode: SqlMode) -> ExpressionInfo;
-        fn is_transaction(node: &Node) -> bool;
         fn transaction_options(node: &Node) -> TransactionOptions;
+        fn prepared_source(node: &Node) -> &Node;
+        fn execution_arguments(node: &Node) -> &[Node];
         fn parse_sql(
             sql: &[u8],
             mode: SqlMode,
@@ -842,12 +842,12 @@ use crate::fts::parse_search_query;
 use crate::inspect::inspect_expression;
 use crate::scan::{begin_scan, finish_scan, Scanner};
 
-fn is_transaction(node: &Node) -> bool {
-    matches!(
-        node.kind,
-        Kind::Begin | Kind::Commit | Kind::Rollback | Kind::Savepoint
-            | Kind::ReleaseSavepoint | Kind::RollbackSavepoint
-    )
+fn prepared_source(node: &Node) -> &Node {
+    &node.children[0]
+}
+
+fn execution_arguments(node: &Node) -> &[Node] {
+    &node.children
 }
 
 fn transaction_options(node: &Node) -> ffi::TransactionOptions {

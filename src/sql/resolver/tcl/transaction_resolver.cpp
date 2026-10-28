@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "sql/resolver/tcl/transaction_resolver.h"
+#include "sql/resolver/statement_factory.h"
 #include "rust/sql_parser.h"
 #include "sql/ob_sql_context.h"
 #include "sql/resolver/ob_resolver_define.h"
@@ -31,32 +32,13 @@ using namespace common;
 
 namespace
 {
-template <typename Statement>
-int create_transaction_statement(ObResolverParams &params, Statement *&stmt)
-{
-  int ret = OB_SUCCESS;
-  if (OB_FAIL(params.stmt_factory_->create_stmt(stmt)) || OB_ISNULL(stmt)) {
-    ret = OB_SQL_RESOLVER_NO_MEMORY;
-    LOG_WARN("failed to create transaction statement", K(ret));
-  } else {
-    stmt->set_query_ctx(params.query_ctx_);
-    params.query_ctx_->set_is_prepare_stmt(params.is_prepare_protocol_ && params.is_prepare_stage_);
-    params.query_ctx_->set_timezone_info(params.session_info_->get_timezone_info());
-    params.query_ctx_->set_sql_stmt_coll_type(params.session_info_->create_obj_print_params().cs_type_);
-    if (OB_FAIL(stmt->set_stmt_id())) {
-      LOG_WARN("failed to set transaction statement id", K(ret));
-    }
-  }
-  return ret;
-}
-
 int resolve_begin(const peg::Node &node, ObResolverParams &params, ObStmt *&stmt)
 {
   int ret = OB_SUCCESS;
   ObStartTransStmt *start_stmt = nullptr;
   const auto options = peg::transaction_options(node);
   const share::schema::ObSimpleSysVariableSchema *variables = nullptr;
-  if (OB_FAIL(create_transaction_statement(params, start_stmt))) {
+  if (OB_FAIL(create_resolved_statement(params, start_stmt))) {
   } else if (OB_ISNULL(params.schema_checker_)
              || OB_ISNULL(params.schema_checker_->get_schema_guard())) {
     ret = OB_ERR_UNEXPECTED;
@@ -85,7 +67,7 @@ int resolve_savepoint(const peg::Node &node, ObResolverParams &params, ObStmt *&
   Statement *savepoint_stmt = nullptr;
   ObString name;
   const ObString source_name(static_cast<int32_t>(node.text.size()), node.text.data());
-  if (OB_FAIL(create_transaction_statement(params, savepoint_stmt))) {
+  if (OB_FAIL(create_resolved_statement(params, savepoint_stmt))) {
   } else if (OB_FAIL(ob_write_string(*params.allocator_, source_name, name))) {
   } else if (OB_FAIL(savepoint_stmt->set_sp_name(name.ptr(), name.length()))) {
   } else {
@@ -111,7 +93,7 @@ int resolve_transaction(const peg::Node &node, ObResolverParams &params, ObStmt 
       case peg::NodeKind::Commit:
       case peg::NodeKind::Rollback: {
         ObEndTransStmt *end_stmt = nullptr;
-        if (OB_FAIL(create_transaction_statement(params, end_stmt))) {
+        if (OB_FAIL(create_resolved_statement(params, end_stmt))) {
         } else {
           end_stmt->set_is_rollback(node.kind == peg::NodeKind::Rollback);
           stmt = end_stmt;
