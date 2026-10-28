@@ -502,10 +502,8 @@ public:
                                            bool coltype_not_defined = false);
   static int resolve_generated_column_info(const common::ObString &expr_str,
                                            ObIAllocator &allocator,
-                                           ObItemType &root_expr_type,
+                                           ObItemType &root_function_type,
                                            common::ObIArray<common::ObString> &column_names);
-  static int resolve_column_info_recursively(const ParseNode *node,
-                                             common::ObIArray<common::ObString> &column_names);
   static share::schema::ObColumnSchemaV2* get_column_schema_from_array(
     ObIArray<share::schema::ObColumnSchemaV2 *> &resolved_cols,
     const common::ObString &column_name);

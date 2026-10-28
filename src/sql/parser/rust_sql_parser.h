@@ -19,4 +19,5 @@
 
 namespace oceanbase::sql {
 int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routine_body = false);
+int report_parse_error(const common::ObString &sql, size_t offset);
 }

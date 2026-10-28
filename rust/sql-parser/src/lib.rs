@@ -15,6 +15,7 @@
 mod bridge;
 mod fts;
 mod grammar;
+mod inspect;
 mod lex;
 mod node;
 mod scan;

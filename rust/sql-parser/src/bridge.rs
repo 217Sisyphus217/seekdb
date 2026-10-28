@@ -756,6 +756,19 @@ pub(crate) mod ffi {
         error_offset: usize,
     }
 
+    struct ColumnReference {
+        parts: Vec<String>,
+        wildcard: bool,
+    }
+
+    struct ExpressionInfo {
+        root_kind: NodeKind,
+        function_name: String,
+        columns: Vec<ColumnReference>,
+        error: String,
+        error_offset: usize,
+    }
+
     struct StatementSplits {
         ends: Vec<usize>,
         failed: bool,
@@ -800,6 +813,7 @@ pub(crate) mod ffi {
             first_only: bool,
         ) -> StatementSplits;
         fn parse_search_query(input: &[u8]) -> SearchTree;
+        fn inspect_expression(sql: &[u8], mode: SqlMode) -> ExpressionInfo;
         fn parse_sql(
             sql: &[u8],
             mode: SqlMode,
@@ -809,6 +823,7 @@ pub(crate) mod ffi {
 }
 
 use crate::fts::parse_search_query;
+use crate::inspect::inspect_expression;
 use crate::scan::{begin_scan, finish_scan, Scanner};
 
 fn split_sql(
@@ -890,7 +905,7 @@ fn number_parameters(
     Ok(())
 }
 
-fn parse_sql(
+pub(crate) fn parse_sql(
     sql: &[u8],
     mode: SqlMode,
     parse_mode: ffi::ParseMode,

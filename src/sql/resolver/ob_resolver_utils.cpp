@@ -17,6 +17,8 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "rust/config.h"
+#include "rust/sql_parser.h"
+#include "sql/parser/rust_sql_parser.h"
 #include "share/config/ob_config_helper.h"
 #include "sql/resolver/cmd/ob_load_data_stmt.h"
 
@@ -3687,77 +3689,49 @@ int ObResolverUtils::resolve_generated_column_expr(ObResolverParams &params,
   return ret;
 }
 
-// This function is used to resolve the dependent columns of generated column when retrieve schema.
-// We use this function instead of build_generated_column_expr because there is not a thread-safe
-// mem_context and the expr is not necessary.
+// Schema loading needs syntax dependencies without an execution or expression context.
 int ObResolverUtils::resolve_generated_column_info(const ObString &expr_str,
                                                    ObIAllocator &allocator,
-                                                   ObItemType &root_expr_type,
+                                                   ObItemType &root_function_type,
                                                    ObIArray<ObString> &column_names)
 {
   int ret = OB_SUCCESS;
-  const ParseNode *node = NULL;
-  if (OB_FAIL(ObRawExprUtils::parse_expr_node_from_str(
-              expr_str, ObCharsets4Parser(),
-              allocator, node))) {
-  } else if (OB_ISNULL(node)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(SMART_CALL(resolve_column_info_recursively(node, column_names)))) {
+  const auto info = peg::inspect_expression(
+      rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(expr_str.ptr()), expr_str.length()),
+      peg::SqlMode{});
+  root_function_type = T_INVALID;
+  if (!info.error.empty()) {
+    ret = report_parse_error(expr_str, info.error_offset);
   } else {
-    ObItemType type = node->type_;
-    if (T_FUN_SYS == type) {
-      if (OB_UNLIKELY(1 > node->num_child_) || OB_ISNULL(node->children_) || OB_ISNULL(node->children_[0])) {
-        ret = OB_ERR_PARSER_SYNTAX;
+    for (const auto &column : info.columns) {
+      if (column.parts.size() > 1 || (column.wildcard && !column.parts.empty())) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (column.wildcard || column.parts.empty()) {
+        ret = OB_INVALID_ARGUMENT;
       } else {
-        ObString func_name(node->children_[0]->str_len_, node->children_[0]->str_value_);
-        type = ObExprOperatorFactory::get_type_by_name(func_name);
-        if (OB_UNLIKELY(T_INVALID == (type))) {
-          ret = OB_ERR_FUNCTION_UNKNOWN;
+        const auto &name = column.parts[0];
+        ObString owned_name;
+        if (OB_FAIL(ob_write_string(allocator, ObString(name.size(), name.data()), owned_name))) {
+        } else if (OB_FAIL(column_names.push_back(owned_name))) {
         }
       }
+      if (OB_FAIL(ret)) break;
     }
-    OX (root_expr_type = type);
-  }
-  return ret;
-}
-
-int ObResolverUtils::resolve_column_info_recursively(const ParseNode *node,
-                                                     ObIArray<ObString> &column_names)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(node)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (T_COLUMN_REF == node->type_) {
-    if (OB_UNLIKELY(node->num_child_ != 3)) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_UNLIKELY(node->children_[0] != NULL || node->children_[1] != NULL)) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_ISNULL(node->children_[2])) {
-      ret = OB_INVALID_ARGUMENT;
-    } else if (OB_UNLIKELY(T_STAR == node->children_[2]->type_)) {
-      ret = OB_INVALID_ARGUMENT;
-    } else {
-      ObString column_name(static_cast<int32_t>(node->children_[2]->str_len_),
-                           node->children_[2]->str_value_);
-      if (OB_FAIL(column_names.push_back(column_name))) {
+    if (OB_SUCC(ret)) {
+      switch (info.root_kind) {
+        case peg::NodeKind::JsonQuery:
+          root_function_type = T_FUN_SYS_JSON_QUERY;
+          break;
+        case peg::NodeKind::Function:
+        case peg::NodeKind::Cast:
+        case peg::NodeKind::StringConcat:
+          root_function_type = ObExprOperatorFactory::get_type_by_name(
+              ObString(info.function_name.size(), info.function_name.data()));
+          if (root_function_type == T_INVALID) ret = OB_ERR_FUNCTION_UNKNOWN;
+          break;
+        default:
+          break;
       }
-    }
-  } else if (T_OBJ_ACCESS_REF == node->type_) {
-    if (OB_UNLIKELY(node->num_child_ != 2)) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_ISNULL(node->children_[0])) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (T_IDENT == node->children_[0]->type_ && NULL == node->children_[1]) {
-      ObString column_name(static_cast<int32_t>(node->children_[0]->str_len_),
-                           node->children_[0]->str_value_);
-      OZ (column_names.push_back(column_name));
-    }
-  }
-  for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
-    const ParseNode *child_node = node->children_[i];
-    if (NULL == child_node) {
-      // do nothing
-    } else if (OB_FAIL(SMART_CALL(resolve_column_info_recursively(child_node, column_names)))) {
     }
   }
   return ret;

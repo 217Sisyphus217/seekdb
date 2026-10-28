@@ -1135,6 +1135,20 @@ int build_tree(const common::ObString &sql, peg::ParseTree &tree, ParseResult &r
 }
 }
 
+int report_parse_error(const common::ObString &sql, size_t offset)
+{
+  int line = 1;
+  for (size_t i = 0; i < offset; ++i) line += sql.ptr()[i] == '\n';
+  size_t length = std::min<size_t>(80, sql.length() - offset);
+  while (length > 0 && offset + length < sql.length()
+         && (static_cast<unsigned char>(sql.ptr()[offset + length]) & 0xc0) == 0x80) {
+    --length;
+  }
+  LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
+                 static_cast<int>(length), sql.ptr() + offset, line);
+  return common::OB_ERR_PARSE_SQL;
+}
+
 int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routine_body)
 {
   static thread_local char error[MAX_ERROR_MSG];
@@ -1153,16 +1167,7 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
     snprintf(error, sizeof(error), "rust-peg: %s", parsed.error.c_str());
     result.start_col_ = parsed.error_offset + 1;
     result.end_col_ = parsed.error_offset + 1;
-    int line = 1;
-    for (size_t i = 0; i < parsed.error_offset; ++i) line += sql.ptr()[i] == '\n';
-    size_t length = std::min<size_t>(80, sql.length() - parsed.error_offset);
-    while (length > 0 && parsed.error_offset + length < sql.length()
-           && (static_cast<unsigned char>(sql.ptr()[parsed.error_offset + length]) & 0xc0) == 0x80) {
-      --length;
-    }
-    LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
-                   static_cast<int>(length), sql.ptr() + parsed.error_offset, line);
-    return common::OB_ERR_PARSE_SQL;
+    return report_parse_error(sql, parsed.error_offset);
   }
   return build_tree(sql, parsed, result, routine_body);
 }
