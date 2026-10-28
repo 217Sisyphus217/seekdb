@@ -284,9 +284,11 @@ peg::parser! {
             = depth(level) value:collection_expression(level+1) { value }
             / depth(level) value:date_function(level+1) { value }
             / depth(level) value:string_function(level+1) { value }
-            / depth(level) start:position!() value:(kw("cast") "(" _ value:expr(level+1) kw("as") target:cast_type() ignore:kw("ignore")? { (value,target,ignore.is_some()) }
-                / kw("convert") "(" _ value:expr(level+1) "," _ target:cast_type() { (value,target,false) }) ")" end:position!() _ {?
-                Ok(Node::call(vec![Name { text:"cast".into(),quoted:false,start,end:start+4 }],None,vec![value.0,value.1],None,start,end)?.value(u64::from(value.2)))
+            / depth(level) value:json_query(level+1) { value }
+            / depth(level) start:position!() value:(kw("cast") "(" _ value:expr(level+1) kw("as") target:cast_type() array:kw("array")? ignore:kw("ignore")? { (value,target,ignore.is_some(),array.is_some()) }
+                / kw("convert") "(" _ value:expr(level+1) "," _ target:cast_type() { (value,target,false,false) }) ")" end:position!() _ {?
+                if value.3 { value.0.cast_array(value.1,start,end) }
+                else { Ok(Node::call(vec![Name { text:"cast".into(),quoted:false,start,end:start+4 }],None,vec![value.0,value.1],None,start,end)?.value(u64::from(value.2))) }
             }
             / depth(level) start:position!() kw("case") operand:expr(level+1)?
                 branches:(kw("when") condition:expr(level+1) kw("then") value:expr(level+1)
@@ -332,8 +334,14 @@ peg::parser! {
                     match window { Some(window) => Node::new(Kind::WindowFunction,vec![value,window]),None => value }.expression(start,end)
                 }
             / charset_literal() / temporal_literal() / binary_literal() / number() / string_expression() / bool_null() / parameter()
+            / depth(level) start:position!() names:name() column_end:position!() op:$("->>" / "->") _ path:string_expression() {?
+                let end=path.end;
+                let value=Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text("JSON_EXTRACT".into()),Node::new(Kind::ExprList,vec![Node::column(names,false,start,column_end)?,path])]);
+                let value=if op=="->>" { Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text("JSON_UNQUOTE".into()),Node::new(Kind::ExprList,vec![value])]) } else { value };
+                value.expression(start,end)
+            }
             / depth(level) start:position!() !(['x'|'X'] "'" hex_digit()* "'") parts:expression_name() tail:("." _ "*" end:position!() _ { (None, end) }
-                / enabled(parts.len()!=1 || parts[0].quoted || !["row","match","trim","position","weight_string","char","character","array","map","array_agg",
+                / enabled(parts.len()!=1 || parts[0].quoted || !["row","match","json_query","trim","position","weight_string","char","character","array","map","array_agg",
                     "array_map","array_filter","array_first","array_sortby","vector_distance","vector_similarity"].iter().any(|name| parts[0].text.eq_ignore_ascii_case(name)))
                     "(" _ modifier:((kw("distinct") / kw("unique")) { Kind::Distinct } / kw("all") { Kind::All })? args:expr_list(level+1)? ")" close:position!() _
                     window:(kw("over") value:window(level+1) { value })?
@@ -388,6 +396,34 @@ peg::parser! {
                 }
             / first:expr(level) rest:(kw("from") value:expr(level) { value })? {
                 match rest { Some(value) => vec![Node::new(Kind::DefaultInt,vec![]),first,value],None => vec![first] }
+            }
+        rule json_query_response() -> Node
+            = kw("error") { Node::new(Kind::HiddenInt,vec![]) }
+            / start:position!() kw("null") { Node::new(Kind::NullClause,vec![]).value(1).at(start,start+4) }
+        rule json_query_responses() -> Vec<Node> = clauses:((value:(json_query_response()
+                    / kw("empty") kind:(kw("array") { 3 } / kw("object") { 4 })? { Node::new(Kind::HiddenInt,vec![]).value(kind.unwrap_or(2)) })
+                kw("on") slot:(kw("error") { 0 } / kw("empty") { 1 }) { (slot,value) })*)
+            mismatch:(value:(json_query_response() / kw("dot") { Node::new(Kind::HiddenInt,vec![]).value(3) }) kw("on") kw("mismatch") { value })? {?
+                let mut responses=[None,None];
+                for (slot,value) in clauses { if responses[slot].replace(value).is_some() { return Err("duplicate JSON response clause"); } }
+                let mut values:Vec<_>=responses.into_iter().map(|value| value.unwrap_or_else(|| Node::new(Kind::HiddenInt,vec![]).value(5))).collect();
+                values.push(mismatch.unwrap_or_else(|| Node::new(Kind::HiddenInt,vec![]).value(2)));Ok(values)
+            }
+        rule json_wrapper() -> u64
+            = kw("without") array:kw("array")? kw("wrapper") { u64::from(array.is_some()) }
+            / kw("with") conditional:(kw("unconditional") { false } / kw("conditional") { true })? array:kw("array")? kw("wrapper") {
+                match conditional { None => 2+u64::from(array.is_some()),Some(value) => 4+u64::from(value)+2*u64::from(array.is_some()) }
+            }
+        rule json_query(level: usize) -> Node = start:position!() kw("json_query") "(" _ data:expr(level) "," _ path:string_expression()
+            target:(kw("returning") target:cast_type() { target })? truncate:kw("truncate")?
+            scalars:(kw("allow") kw("scalars") { 0 } / kw("disallow") kw("scalars") { 1 })? pretty:kw("pretty")? ascii:kw("ascii")?
+            wrapper:json_wrapper()? asis:kw("asis")? responses:json_query_responses() multivalue:kw("multivalue")? ")" end:position!() _ {?
+                let target=target.unwrap_or_else(|| Node::new(Kind::CastType,vec![Node::new(Kind::HiddenInt,vec![]).value(512)]).text("char".into()));
+                let mut children=vec![data,path,target];
+                children.extend([u64::from(truncate.is_some()),scalars.unwrap_or(2),u64::from(pretty.is_some()),u64::from(ascii.is_some()),wrapper.unwrap_or(8),u64::from(asis.is_some())]
+                    .into_iter().map(|value| Node::new(Kind::HiddenInt,vec![]).value(value)));
+                children.extend(responses);children.push(Node::new(Kind::HiddenInt,vec![]).value(u64::from(multivalue.is_some())));
+                Node::new(Kind::JsonQuery,children).expression(start,end)
             }
         rule fulltext_column() -> Node = start:position!() names:name() end:position!() {? Node::column(names,false,start,end) }
         rule fulltext_search(level: usize) -> Node = start:position!() kw("match") "(" _ columns:(fulltext_column() ++ ("," _)) ")" _ kw("against") "(" _ search:expr(level)
@@ -1102,7 +1138,8 @@ peg::parser! {
             = kw("first") { Node::new(Kind::ColumnFirst,vec![]) }
             / kind:(kw("before") { Kind::ColumnBefore } / kw("after") { Kind::ColumnAfter }) name:ident() { Node::new(kind,vec![Node::name(name)]) }
         rule table_option() -> Node
-            = kw("default")? charset_keyword() ("=" _)? value:charset_name() { Node::new(Kind::TableCharset,vec![value]) }
+            = kw("organization") ("=" _)? kind:(kw("index") { Kind::OrganizationIndex } / kw("heap") { Kind::OrganizationHeap }) { Node::new(Kind::Organization,vec![Node::new(kind,vec![])]) }
+            / kw("default")? charset_keyword() ("=" _)? value:charset_name() { Node::new(Kind::TableCharset,vec![value]) }
             / kw("default")? kw("collate") ("=" _)? value:collation_name() { Node { kind:Kind::Collation,..value } }
             / kind:(kw("compression") { Kind::Compression } / kw("comment") { Kind::ColumnComment }) ("=" _)? value:string() { Node::new(kind,vec![value]) }
             / kind:(kw("auto_increment") { Kind::TableAutoIncrement } / kw("block_size") { Kind::BlockSize }
@@ -1235,7 +1272,10 @@ peg::parser! {
             / kw("drop") kw("primary") kw("key") { Node::new(Kind::PrimaryKeyDrop,vec![]) }
             / kw("rename") (kw("index") / kw("key")) from:ident() kw("to") to:ident() { Node::new(Kind::IndexRename,vec![Node::name(from),Node::name(to)]) }
         rule alter_action() -> Node
-            = value:(kw("add") value:foreign_key() { value }
+            = value:partition_option() { Node::new(Kind::AlterPartition,vec![Node::new(Kind::Repartition,value.children)]) }
+            / kw("add") value:check_constraint() { Node::new(Kind::AlterCheckConstraint,vec![value]) }
+            / kw("drop") kw("check") name:ident() { Node::new(Kind::AlterCheckConstraint,vec![Node::new(Kind::CheckConstraint,vec![Node::name(name)])]) }
+            / value:(kw("add") value:foreign_key() { value }
                 / kw("drop") kw("foreign") kw("key") name:ident() { Node::new(Kind::ForeignKeyDrop,vec![Node::name(name)]) }) {
                 Node::new(Kind::AlterForeignKey,vec![value])
             }
@@ -1402,6 +1442,7 @@ peg::parser! {
                 Node::new(Kind::FlushCache,vec![cache,Node::optional(namespace),Node::optional(id),Node::optional(databases)])
             }
             / kw("sql") cache:cache_type() kw("global")? { Node::new(Kind::FlushCache,vec![cache,Node::missing(),Node::missing(),Node::missing()]) }
+            / kw("kvcache") name:(kw("cache") ("=" _)? value:collation_name() { Node::new(Kind::CacheName,vec![value]) })? { Node::new(Kind::FlushKvCache,vec![Node::optional(name)]) }
         ) { value }
         rule alter_system() -> Node = kw("alter") kw("system") value:(
             flush_cache()
@@ -1726,7 +1767,7 @@ peg::parser! {
             let tables=tables.into_iter().reduce(|left,right| Node::new(Kind::Link,vec![left,right])).unwrap();
             Node::new(Kind::Analyze,vec![tables,Node::missing(),Node::missing()])
         }
-        rule explain() -> Node = (kw("explain") / kw("describe") / kw("desc"))
+        rule explain() -> Node = (kw("explain") / kw("describe") / kw("desc")) hints()?
             format:(kw("basic") { Kind::ExplainBasic } / kw("outline") { Kind::ExplainOutline }
                 / kw("extended") { Kind::ExplainExtended } / kw("extended_noaddr") { Kind::ExplainExtendedNoAddr }
                 / kw("partitions") { Kind::ExplainPartitions } / kw("planregress") { Kind::ExplainPlanRegress }

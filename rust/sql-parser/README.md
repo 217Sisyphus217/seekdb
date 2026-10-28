@@ -51,6 +51,8 @@ SHOW CHARSET／COLLATION、SET TRANSACTION 和 MAJOR／MINOR FREEZE。
 支持 WITH／WITH RECURSIVE、CALL 命名实参、CHAR／CHARACTER、SHOW PARAMETERS／PROCESSLIST，
 以及 SAMPLE 的行／块／混合采样、数据范围和 SEED。
 支持全文／向量索引、分词器属性、MATCH AGAINST、MEMBER OF 和回收站清理语句。
+支持 JSON 箭头表达式、多值索引的 CAST ARRAY、JSON_QUERY，以及表组织方式、
+ALTER CHECK、重新分区和 KVCACHE 清理。
 系统视图及统计采样支持 CAST 的 IGNORE 和 CHARSET 选项；未知优化器 hint 按原有规则忽略。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 

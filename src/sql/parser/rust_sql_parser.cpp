@@ -119,6 +119,9 @@ ObItemType node_type(const peg::Node &node)
     case Kind::TableDynamicSampling: return T_TABLE_DYNAMIC_SAMPLING;
     case Kind::Snapshot: return T_TABLE_SNAPSHOT_QUERY_SCN;
     case Kind::TableOptions: return T_TABLE_OPTION_LIST;
+    case Kind::Organization: return T_ORGANIZATION;
+    case Kind::OrganizationIndex: return T_ORGANIZATION_INDEX;
+    case Kind::OrganizationHeap: return T_ORGANIZATION_HEAP;
     case Kind::TableCharset: return T_CHARSET;
     case Kind::Collation: return T_COLLATION;
     case Kind::SetCollation: return T_FUN_SYS_SET_COLLATION;
@@ -326,6 +329,9 @@ ObItemType node_type(const peg::Node &node)
     case Kind::RenameTables: return T_RENAME_TABLE;
     case Kind::RenameTableAction: return T_RENAME_TABLE_ACTION;
     case Kind::AlterTable: return T_ALTER_TABLE;
+    case Kind::AlterCheckConstraint: return T_ALTER_CHECK_CONSTRAINT_OPTION;
+    case Kind::AlterPartition: return T_ALTER_PARTITION_OPTION;
+    case Kind::Repartition: return T_ALTER_PARTITION_PARTITIONED;
     case Kind::AlterTableActions: return T_ALTER_TABLE_ACTION_LIST;
     case Kind::AlterTableOption: return T_ALTER_TABLE_OPTION;
     case Kind::TableRename: return T_TABLE_RENAME;
@@ -410,6 +416,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Freeze: return T_FREEZE;
     case Kind::ResetConfig: return T_ALTER_SYSTEM_RESET_PARAMETER;
     case Kind::FlushCache: return T_FLUSH_CACHE;
+    case Kind::FlushKvCache: return T_FLUSH_KVCACHE;
+    case Kind::CacheName: return T_CACHE_NAME;
     case Kind::CacheType: return T_INT;
     case Kind::CacheNamespace: return T_NAMESPACE;
     case Kind::SqlId: return T_SQL_ID;
@@ -547,6 +555,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::WindowBound: return T_WIN_BOUND;
     case Kind::WindowInterval: return T_WIN_INTERVAL;
     case Kind::HiddenInt: return T_INT;
+    case Kind::HiddenString: return T_VARCHAR;
+    case Kind::JsonQuery: return T_FUN_SYS_JSON_QUERY;
     case Kind::DateUnit: return T_INT;
     case Kind::RowNumber: return T_WIN_FUN_ROW_NUMBER;
     case Kind::Rank: return T_WIN_FUN_RANK;
@@ -763,6 +773,7 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   const int16_t short_precision = std::min<int32_t>(precision, INT16_MAX);
   const int16_t scale = size < 2 ? 0 : std::min<uint64_t>(args[1].value, INT16_MAX);
   if (cast) {
+    node->is_hidden_const_ = source.start == source.end;
     node->int16_values_[OB_NODE_CAST_TYPE_IDX] = type;
     node->param_num_ = size;
     if (type == T_CHAR || type == T_VARCHAR) {
@@ -883,7 +894,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
   if (temporal) node->is_copy_raw_text_ = true;
   const bool literal = temporal || type == T_INT || type == T_UINT64 || type == T_NUMBER || type == T_DOUBLE
       || type == T_VARCHAR || type == T_HEX_STRING || type == T_BOOL || type == T_NULL || type == T_QUESTIONMARK;
-  if (literal && source.kind != Kind::HiddenInt && source.kind != Kind::HiddenNull && source.kind != Kind::CacheType && source.kind != Kind::DateUnit) {
+  if (literal && source.kind != Kind::HiddenInt && source.kind != Kind::HiddenNull && source.kind != Kind::HiddenString && source.kind != Kind::CacheType && source.kind != Kind::DateUnit) {
     node->raw_text_ = parse_strndup(raw, raw_length, pool);
     if (node->raw_text_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
     node->text_len_ = raw_length;
@@ -947,7 +958,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     node->param_num_ = 1;
     node->children_[1]->is_input_quoted_ = false;
   }
-  if (source.kind == Kind::HiddenInt || source.kind == Kind::HiddenNull || source.kind == Kind::CharsetName) node->is_hidden_const_ = true;
+  if (source.kind == Kind::HiddenInt || source.kind == Kind::HiddenNull || source.kind == Kind::HiddenString || source.kind == Kind::CharsetName) node->is_hidden_const_ = true;
   if (source.kind == Kind::DateUnit) {
     node->is_hidden_const_ = true;
     node->is_date_unit_ = source.start != source.end;

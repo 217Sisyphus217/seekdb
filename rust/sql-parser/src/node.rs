@@ -413,6 +413,44 @@ impl Node {
                     .is_some_and(|child| child.kind == Kind::Star))
     }
 
+    pub fn cast_array(
+        mut self,
+        target: Self,
+        start: usize,
+        end: usize,
+    ) -> Result<Self, &'static str> {
+        while self.kind == Kind::Parenthesized {
+            self = self.children.pop().unwrap();
+        }
+        if self.kind == Kind::Function
+            && self.children[0].text.eq_ignore_ascii_case("json_unquote")
+            && self.children[1].children.len() == 1
+        {
+            self = self.children.pop().unwrap().children.pop().unwrap();
+            while self.kind == Kind::Parenthesized {
+                self = self.children.pop().unwrap();
+            }
+        }
+        let mut children = if self.kind == Kind::Column {
+            vec![self, Self::new(Kind::HiddenString, vec![])]
+        } else if self.kind == Kind::Function
+            && self.children[0].text.eq_ignore_ascii_case("json_extract")
+            && self.children[1].children.len() == 2
+        {
+            self.children.pop().unwrap().children
+        } else {
+            return Err("CAST ARRAY requires a JSON column or extracted path");
+        };
+        children.push(target);
+        // JSON_QUERY: truncate, scalars, pretty, ascii, wrapper, asis, error, empty, mismatch, multivalue.
+        children.extend(
+            [0, 2, 0, 0, 1, 1, 0, 1, 1, 0]
+                .into_iter()
+                .map(|value| Self::new(Kind::HiddenInt, vec![]).value(value)),
+        );
+        Self::new(Kind::JsonQuery, children).expression(start, end)
+    }
+
     pub fn call(
         mut name: Vec<Name>,
         modifier: Option<Kind>,
