@@ -39,7 +39,7 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持生成列、CHECK 约束、LIST 分区、指定分区读写和表级索引 hint；
 支持 FIRST_VALUE／LAST_VALUE／NTH_VALUE／LEAD／LAG、NULL 处理选项、LIKE ESCAPE 和用户变量赋值。
 支持 DATE_ADD／DATE_SUB／ADDDATE／SUBDATE、TIMESTAMPADD／TIMESTAMPDIFF、EXTRACT 和 MySQL 可执行版本注释。
-支持日期时间字面量、REGEXP／RLIKE、SELECT ALL、RANGE 分区、ROW_FORMAT、数据库字符集选项、
+支持日期时间字面量、REGEXP／RLIKE、SELECT ALL／DISTINCTROW、整数类型别名、RANGE 分区、ROW_FORMAT、数据库字符集选项、
 SHOW CHARSET／COLLATION、SET TRANSACTION 和 MAJOR／MINOR FREEZE。
 支持模板和逐分区定义的二级分区、ANY／SOME／ALL 子查询、SQL_CALC_FOUND_ROWS，
 以及分布式扫描、聚合、集合运算、OR 展开和常用查询改写的 outline 提示。
@@ -57,6 +57,7 @@ ALTER CHECK、重新分区、增删／截断分区、OPTIMIZE TABLE 和 KVCACHE 
 以及触发器内部生成的行类型参数和 SQL 绑定。
 支持空间类型声明／构造／转换和 SRID、CONVERT USING、JSON 聚合、临时表声明，
 以及分区交换和 LOB 行内存储阈值；功能限制仍由现有执行层判断。
+可执行版本注释中的不支持语法按普通注释处理，保持原有 SQL 导入行为。
 系统视图及统计采样支持 CAST 的 IGNORE 和 CHARSET 选项；未知优化器 hint 按原有规则忽略。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 

@@ -20,17 +20,23 @@ const WEIGHT_STRING_PAD_WITH_SPACE: u64 = 0x40;
 pub(crate) fn executable_sql(
     sql: &str,
     mode: SqlMode,
+    execute: bool,
 ) -> Result<Cow<'_, str>, peg::error::ParseError<peg::str::LineCol>> {
     if !sql.contains("/*!") {
         return Ok(Cow::Borrowed(sql));
     }
-    let spans = sql::comment_delimiters(sql, mode)?;
+    let spans = sql::executable_comments(sql, mode)?;
     if spans.is_empty() {
         return Ok(Cow::Borrowed(sql));
     }
     let mut bytes = sql.as_bytes().to_vec();
-    for (start, end) in spans {
-        bytes[start..end].fill(b' ');
+    for (start, content, close, end) in spans {
+        if execute {
+            bytes[start..content].fill(b' ');
+            bytes[close..end].fill(b' ');
+        } else {
+            bytes[start + 2..close].fill(b' ');
+        }
     }
     Ok(Cow::Owned(String::from_utf8(bytes).unwrap()))
 }
@@ -39,6 +45,7 @@ fn reserved(word: &str) -> bool {
     [
         "select",
         "distinct",
+        "distinctrow",
         "all",
         "as",
         "from",
@@ -173,9 +180,9 @@ peg::parser! {
             / "`" ("``" / !"`" [_])* "`"
             / "/*" !"!" (!"*/" [_])* "*/"
             / ("--" &(space() / ![_]) / "#") (!"\n" [_])*
-        pub rule comment_delimiters() -> Vec<(usize,usize)> = spans:(
+        pub rule executable_comments() -> Vec<(usize,usize,usize,usize)> = spans:(
                 start:position!() "/*!" (['0'..='9']*<5>)? content:position!()
-                (opaque_comment_token() / !"*/" [_])* close:position!() "*/" end:position!() { vec![(start,content),(close,end)] }
+                (opaque_comment_token() / !"*/" [_])* close:position!() "*/" end:position!() { vec![(start,content,close,end)] }
                 / opaque_comment_token() { vec![] }
                 / ((!['\''|'"'|'`'|'/'|'-'|'#'] [_])+ / !"/*!" [_]) { vec![] }
             )* { spans.into_iter().flatten().collect() }
@@ -925,7 +932,7 @@ peg::parser! {
             Node::new(Kind::IntoVariables,vec![Node::new(Kind::IntoVariableList,variables)])
         }
         rule select_option() -> Node
-            = kind:((kw("distinct") / kw("unique")) { Kind::Distinct } / kw("all") { Kind::All }
+            = kind:((kw("distinct") / kw("distinctrow") / kw("unique")) { Kind::Distinct } / kw("all") { Kind::All }
                 / kw("sql_calc_found_rows") { Kind::FoundRows } / kw("straight_join") { Kind::StraightJoin }) { Node::new(kind,vec![]) }
             / (kw("sql_no_cache") / kw("sql_cache") / kw("high_priority") / kw("sql_small_result")
                 / kw("sql_big_result") / kw("sql_buffer_result")) { Node::missing() }
@@ -1022,8 +1029,9 @@ peg::parser! {
             Node::new(Kind::DataType,vec![]).text("geometry".into()).value(kind).at(start,end)
         }
         rule type_name() -> &'static str
-            = kw("tinyint") { "tinyint" } / kw("smallint") { "smallint" } / kw("mediumint") { "mediumint" }
-            / (kw("int") / kw("integer")) { "int" } / kw("bigint") { "bigint" }
+            = (kw("tinyint") / kw("int1")) { "tinyint" } / (kw("smallint") / kw("int2")) { "smallint" }
+            / (kw("mediumint") / kw("int3") / kw("middleint")) { "mediumint" }
+            / (kw("int") / kw("integer") / kw("int4")) { "int" } / (kw("bigint") / kw("int8")) { "bigint" }
             / kw("float") { "float" } / (kw("double") kw("precision")?) { "double" }
             / (kw("decimal") / kw("numeric") / kw("number")) { "decimal" }
             / kw("boolean") { "boolean" } / kw("bool") { "bool" }

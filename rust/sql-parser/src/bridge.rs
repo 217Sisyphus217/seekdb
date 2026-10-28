@@ -763,14 +763,19 @@ fn parse_sql(
         pipes_as_concat,
         high_not_precedence,
     };
-    let parsed = grammar::executable_sql(sql, mode).and_then(|sql| {
-        let parsed = match parse_mode {
-            ffi::ParseMode::Routine => grammar::sql::routine_body(&sql, mode),
-            ffi::ParseMode::Trigger => grammar::sql::trigger(&sql, mode),
-            ffi::ParseMode::Sql => grammar::sql::query(&sql, mode),
-            _ => unreachable!("unknown parser entry point"),
-        };
-        if let std::borrow::Cow::Owned(sql) = sql {
+    let parse = |text: &str| match parse_mode {
+        ffi::ParseMode::Routine => grammar::sql::routine_body(text, mode),
+        ffi::ParseMode::Trigger => grammar::sql::trigger(text, mode),
+        ffi::ParseMode::Sql => grammar::sql::query(text, mode),
+        _ => unreachable!("unknown parser entry point"),
+    };
+    let parsed = grammar::executable_sql(sql, mode, true).and_then(|mut text| {
+        let mut parsed = parse(&text);
+        if parsed.is_err() && matches!(text, std::borrow::Cow::Owned(_)) {
+            text = grammar::executable_sql(sql, mode, false)?;
+            parsed = parse(&text);
+        }
+        if let std::borrow::Cow::Owned(sql) = text {
             result.expanded_sql = sql;
         }
         parsed
