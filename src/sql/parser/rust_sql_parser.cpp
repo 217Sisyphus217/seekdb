@@ -577,8 +577,10 @@ ObItemType node_type(const peg::Node &node)
     case Kind::WindowBound: return T_WIN_BOUND;
     case Kind::WindowInterval: return T_WIN_INTERVAL;
     case Kind::HiddenInt: return T_INT;
+    case Kind::HiddenDouble: return T_SFU_DOUBLE;
     case Kind::HiddenString: return T_VARCHAR;
     case Kind::JsonQuery: return T_FUN_SYS_JSON_QUERY;
+    case Kind::JsonValue: return T_FUN_SYS_JSON_VALUE;
     case Kind::DateUnit: return T_INT;
     case Kind::RowNumber: return T_WIN_FUN_ROW_NUMBER;
     case Kind::Rank: return T_WIN_FUN_RANK;
@@ -906,7 +908,9 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     child->str_value_ = parse_strndup(expression_sql.ptr() + expression.start, child->str_len_, pool);
     if (child->str_value_ == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   }
-  if (type != T_FUN_SYS || source.kind == Kind::Cast) node->value_ = type == T_SELECT ? parameters : source.value;
+  if ((type != T_FUN_SYS && type != T_FUN_SYS_JSON_VALUE) || source.kind == Kind::Cast) {
+    node->value_ = type == T_SELECT ? parameters : source.value;
+  }
   if (type == T_TG_SIMPLE_DML) node->int16_values_[0] = source.value ? T_AFTER : T_BEFORE;
   if (type == T_REFERENCE_OPTION) {
     node->int32_values_[0] = source.value ? T_DELETE : T_UPDATE;
@@ -992,7 +996,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     node->param_num_ = 1;
     node->children_[1]->is_input_quoted_ = false;
   }
-  if (source.kind == Kind::HiddenInt || source.kind == Kind::HiddenNull || source.kind == Kind::HiddenString || source.kind == Kind::CharsetName) node->is_hidden_const_ = true;
+  if (source.kind == Kind::HiddenInt || source.kind == Kind::HiddenDouble || source.kind == Kind::HiddenNull || source.kind == Kind::HiddenString || source.kind == Kind::CharsetName) node->is_hidden_const_ = true;
   if (source.kind == Kind::DateUnit) {
     node->is_hidden_const_ = true;
     node->is_date_unit_ = source.start != source.end;

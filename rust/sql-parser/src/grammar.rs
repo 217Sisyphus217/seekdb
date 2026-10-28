@@ -295,7 +295,7 @@ peg::parser! {
             = depth(level) value:collection_expression(level+1) { value }
             / depth(level) value:date_function(level+1) { value }
             / depth(level) value:string_function(level+1) { value }
-            / depth(level) value:json_query(level+1) { value }
+            / depth(level) value:json_function(level+1) { value }
             / depth(level) start:position!() value:(kw("cast") "(" _ value:expr(level+1) kw("as") target:cast_type() array:kw("array")? ignore:kw("ignore")? { (value,target,ignore.is_some(),array.is_some()) }
                 / kw("convert") "(" _ value:expr(level+1) "," _ target:cast_type() { (value,target,false,false) }) ")" end:position!() _ {?
                 if value.3 { value.0.cast_array(value.1,start,end) }
@@ -352,7 +352,7 @@ peg::parser! {
                 value.expression(start,end)
             }
             / depth(level) start:position!() !(['x'|'X'] "'" hex_digit()* "'") parts:expression_name() tail:("." _ "*" end:position!() _ { (None, end) }
-                / enabled(parts.len()!=1 || parts[0].quoted || !["row","match","json_query","trim","position","weight_string","char","character","array","map","array_agg",
+                / enabled(parts.len()!=1 || parts[0].quoted || !["row","match","point","json_query","json_value","trim","position","weight_string","char","character","array","map","array_agg",
                     "array_map","array_filter","array_first","array_sortby","vector_distance","vector_similarity"].iter().any(|name| parts[0].text.eq_ignore_ascii_case(name)))
                     "(" _ modifier:((kw("distinct") / kw("unique")) { Kind::Distinct } / kw("all") { Kind::All })? args:expr_list(level+1)? ")" close:position!() _
                     window:(kw("over") value:window(level+1) { value })?
@@ -393,6 +393,7 @@ peg::parser! {
                     "(" _ left:expr(level) "," _ right:expr(level) metric:("," _ value:vector_metric() { value })? ")" {
                     let mut args=vec![left,right];args.extend(metric);Node::new(kind,args)
                 }
+                / kw("point") "(" _ x:expr(level) "," _ y:expr(level) ")" { Node::new(Kind::Point,vec![x,y]) }
             ) end:position!() _ {? value.expression(start,end) }
         rule charset_literal() -> Node = charset:((kw("_utf8") / kw("_utf8mb4") / kw("_utf8mb3")) { "utf8mb4" } / kw("_binary") { "binary" })
             value:(string() / binary_literal()) {
@@ -425,17 +426,24 @@ peg::parser! {
             / kw("with") conditional:(kw("unconditional") { false } / kw("conditional") { true })? array:kw("array")? kw("wrapper") {
                 match conditional { None => 2+u64::from(array.is_some()),Some(value) => 4+u64::from(value)+2*u64::from(array.is_some()) }
             }
-        rule json_query(level: usize) -> Node = start:position!() kw("json_query") "(" _ data:expr(level) "," _ path:string_expression()
-            target:(kw("returning") target:cast_type() { target })? truncate:kw("truncate")?
+        rule json_returning_type() -> Node = target:(kw("returning") target:cast_type() { target })? {
+            target.unwrap_or_else(|| Node::new(Kind::CastType,vec![Node::new(Kind::HiddenInt,vec![]).value(512)]).text("char".into()))
+        }
+        rule json_function(level: usize) -> Node = start:position!() kw("json_query") "(" _ data:expr(level) "," _ path:string_expression()
+            target:json_returning_type() truncate:kw("truncate")?
             scalars:(kw("allow") kw("scalars") { 0 } / kw("disallow") kw("scalars") { 1 })? pretty:kw("pretty")? ascii:kw("ascii")?
             wrapper:json_wrapper()? asis:kw("asis")? responses:json_query_responses() multivalue:kw("multivalue")? ")" end:position!() _ {?
-                let target=target.unwrap_or_else(|| Node::new(Kind::CastType,vec![Node::new(Kind::HiddenInt,vec![]).value(512)]).text("char".into()));
                 let mut children=vec![data,path,target];
                 children.extend([u64::from(truncate.is_some()),scalars.unwrap_or(2),u64::from(pretty.is_some()),u64::from(ascii.is_some()),wrapper.unwrap_or(8),u64::from(asis.is_some())]
                     .into_iter().map(|value| Node::new(Kind::HiddenInt,vec![]).value(value)));
                 children.extend(responses);children.push(Node::new(Kind::HiddenInt,vec![]).value(u64::from(multivalue.is_some())));
                 Node::new(Kind::JsonQuery,children).expression(start,end)
             }
+            / start:position!() kw("json_value") "(" _ data:expr(level) "," _ path:string_expression()
+                target:json_returning_type() truncate:kw("truncate")? ascii:kw("ascii")? options:json_options() ")" end:position!() _ {?
+                    let mut children=vec![data,path,target,Node::new(Kind::HiddenInt,vec![]).value(u64::from(truncate.is_some())),Node::new(Kind::HiddenInt,vec![]).value(u64::from(ascii.is_some()))];
+                    children.extend(options.children);Node::new(Kind::JsonValue,children).expression(start,end)
+                }
         rule fulltext_column() -> Node = start:position!() names:name() end:position!() {? Node::column(names,false,start,end) }
         rule fulltext_search(level: usize) -> Node = start:position!() kw("match") "(" _ columns:(fulltext_column() ++ ("," _)) ")" _ kw("against") "(" _ search:expr(level)
             search_mode:(kw("in") kw("natural") kw("language") kw("mode") expansion:(kw("with") kw("query") kw("expansion"))? { u64::from(expansion.is_some()) }
@@ -1846,8 +1854,10 @@ peg::parser! {
                 / kw("partitions") { Kind::ExplainPartitions } / kw("planregress") { Kind::ExplainPlanRegress }
                 / kw("format") "=" _ kind:(kw("traditional") { Kind::ExplainTraditional } / kw("json") { Kind::ExplainJson }) { kind })?
             display:(kw("pretty") { Kind::ExplainPretty } / kw("pretty_color") { Kind::ExplainPrettyColor })?
+            into:(enabled(format.is_none() && display.is_none()) kw("into") name:ident() { Node::name(name) })?
+            statement_id:(enabled(format.is_none() && display.is_none()) kw("set") kw("statement_id") "=" _ value:(string_expression() / number() / bool_null() / binary_literal() / temporal_literal()) { value })?
             value:(select(0) / insert() / update() / delete()) {
-                Node::new(Kind::Explain,vec![format.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),display.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),Node::missing(),Node::missing(),value])
+                Node::new(Kind::Explain,vec![format.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),display.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),Node::optional(into),Node::optional(statement_id),value])
         }
         rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / role_statement() / setting() / explain() / show() / alter_system() / prepared_statement() / diagnostics() / analyze() / kill() / purge()
         pub rule query() -> Node = _ value:(package_statement() / routine_statement() / pl_call() / sql_statement()) (";" _)* { value }

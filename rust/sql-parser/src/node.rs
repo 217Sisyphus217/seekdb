@@ -453,7 +453,7 @@ impl Node {
     pub fn call(
         mut name: Vec<Name>,
         modifier: Option<Kind>,
-        arguments: Vec<Self>,
+        mut arguments: Vec<Self>,
         window: Option<Self>,
         start: usize,
         end: usize,
@@ -512,7 +512,6 @@ impl Node {
                 .expression(start, end);
         }
         let geometry = match function.as_str() {
-            "point" => Some(Kind::Point),
             "linestring" => Some(Kind::LineString),
             "polygon" => Some(Kind::Polygon),
             "multipoint" => Some(Kind::MultiPoint),
@@ -524,17 +523,28 @@ impl Node {
         if let Some(kind) = geometry {
             if modifier.is_some()
                 || window.is_some()
-                || (kind == Kind::Point && arguments.len() != 2)
                 || (kind != Kind::GeometryCollection && arguments.is_empty())
             {
                 return Err("geometry constructor arguments");
             }
-            let children = if kind == Kind::Point {
-                arguments
-            } else {
-                vec![Self::list(Kind::ExprList, arguments)]
-            };
-            return Self::new(kind, children).expression(start, end);
+            return Self::new(kind, vec![Self::list(Kind::ExprList, arguments)])
+                .expression(start, end);
+        }
+        if matches!(function.as_str(), "ln" | "log") {
+            if modifier.is_some()
+                || window.is_some()
+                || arguments.is_empty()
+                || arguments.len() > if function == "ln" { 1 } else { 2 }
+            {
+                return Err("logarithm arguments");
+            }
+            name.text = "log".into();
+            if arguments.len() == 1 {
+                arguments.insert(
+                    0,
+                    Self::new(Kind::HiddenDouble, vec![]).text("2.718281828459045".into()),
+                );
+            }
         }
         let kind = match function.as_str() {
             "cast" => Kind::Cast,

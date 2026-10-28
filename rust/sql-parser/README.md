@@ -51,13 +51,14 @@ SHOW CHARSET／COLLATION、SET TRANSACTION 和 MAJOR／MINOR FREEZE。
 支持 WITH／WITH RECURSIVE、CALL 命名实参、CHAR／CHARACTER、SHOW PARAMETERS／PROCESSLIST，
 以及 SAMPLE 的行／块／混合采样、数据范围和 SEED。
 支持全文／向量索引、分词器属性、MATCH AGAINST、MEMBER OF 和回收站清理语句。
-支持 JSON 箭头表达式、多值索引的 CAST ARRAY、JSON_QUERY，以及表组织方式、
+支持 JSON 箭头表达式、多值索引的 CAST ARRAY、JSON_QUERY／JSON_VALUE，以及表组织方式、
 ALTER CHECK、重新分区、增删／截断分区、OPTIMIZE TABLE 和 KVCACHE 清理。
 支持 FORK TABLE／DATABASE、触发器创建／删除、执行顺序和 NEW／OLD 引用，
 以及触发器内部生成的行类型参数和 SQL 绑定。
 支持空间类型声明／构造／转换和 SRID、CONVERT USING、JSON 聚合、临时表声明，
 以及分区交换和 LOB 行内存储阈值；功能限制仍由现有执行层判断。
 可执行版本注释中的不支持语法按普通注释处理，保持原有 SQL 导入行为。
+支持 EXPLAIN 写入计划表、STATEMENT_ID、LN，以及 LOG 的单参数与双参数语法。
 系统视图及统计采样支持 CAST 的 IGNORE 和 CHARSET 选项；未知优化器 hint 按原有规则忽略。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
