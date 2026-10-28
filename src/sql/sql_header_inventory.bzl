@@ -345,6 +345,7 @@ SQL_INTERFACE_CLOSURE_HEADERS = [
     "optimizer/stat/ob_stat_item.h",
     "optimizer/stat/ob_stats_estimator.h",
     "parser/ob_char_type.h",
+    "parser/literal_token.h",
     "parser/ob_fast_parser.h",
     "parser/ob_item_type.h",
     "parser/ob_parser_utils.h",

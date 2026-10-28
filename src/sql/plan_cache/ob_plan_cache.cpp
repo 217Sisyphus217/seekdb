@@ -666,34 +666,34 @@ int ObPlanCache::restore_param_to_truncated_sql(ObPlanCacheCtx &pc_ctx)
     if (OB_ISNULL(pc_param = raw_params->at(i))) {
       ret = OB_ERR_UNEXPECTED;
     } else {
-      int32_t len = (int32_t)pc_param->node_->pos_ - idx;
-      LOG_TRACE("print raw_params", K(i), K(buff_len), K(len), K(idx), K(pc_param->node_->pos_),
-          K(ObString(pc_param->node_->text_len_, pc_param->node_->raw_text_)));
+      int32_t len = (int32_t)pc_param->sql_position_ - idx;
+      LOG_TRACE("print raw_params", K(i), K(buff_len), K(len), K(idx), K(pc_param->sql_position_),
+          K(ObString(pc_param->literal_->source.length(), pc_param->literal_->source.ptr())));
       if (len == 0) {
         // insert into t1 values(2-1,2-2); becomes insert into t1 values(??,??); after parameterization
         // So this scenario len == 0 is needed
-        if (pc_param->node_->text_len_ > buff_len - pos) {
+        if (pc_param->literal_->source.length() > buff_len - pos) {
           ret = OB_BUF_NOT_ENOUGH;
         } else {
-          MEMCPY(buf + pos, pc_param->node_->raw_text_, pc_param->node_->text_len_);
-          pos += (int32_t)pc_param->node_->text_len_;
-          idx = (int32_t)pc_param->node_->pos_ + 1;
+          MEMCPY(buf + pos, pc_param->literal_->source.ptr(), pc_param->literal_->source.length());
+          pos += (int32_t)pc_param->literal_->source.length();
+          idx = (int32_t)pc_param->sql_position_ + 1;
         }
       } else if (len > 0) {
         if (len > buff_len - pos) {
           ret = OB_BUF_NOT_ENOUGH;
-        } else if (pc_param->node_->text_len_ > (buff_len - pos - len)) {
+        } else if (pc_param->literal_->source.length() > (buff_len - pos - len)) {
           ret = OB_BUF_NOT_ENOUGH;
         } else {
           // copy sql text
           // insert into t1 values(?,?);
           // first times, it copy 'insert into t1 values('
           MEMCPY(buf + pos, no_param_sql.ptr() + idx, len);
-          idx = (int32_t)pc_param->node_->pos_ + 1;
+          idx = (int32_t)pc_param->sql_position_ + 1;
           pos += len;
           //copy raw param
-          MEMCPY(buf + pos, pc_param->node_->raw_text_, pc_param->node_->text_len_);
-          pos += (int32_t)pc_param->node_->text_len_;
+          MEMCPY(buf + pos, pc_param->literal_->source.ptr(), pc_param->literal_->source.length());
+          pos += (int32_t)pc_param->literal_->source.length();
         }
       }
     }
@@ -752,7 +752,7 @@ int ObPlanCache::rebuild_raw_params(common::ObIAllocator &allocator,
     ObPCParam *pc_param = fp_result.raw_params_.at(i);
     if (OB_ISNULL(pc_param)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (FALSE_IT(pc_param->node_->pos_ = pc_param->node_->pos_ - sql_delta_length)) {
+    } else if (FALSE_IT(pc_param->sql_position_ = pc_param->sql_position_ - sql_delta_length)) {
       // For the parameters of the update part, pos_ needs to subtract the length of the truncated part
     } else if (OB_FAIL(update_raw_params.push_back(pc_param))) {
     }

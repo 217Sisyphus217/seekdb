@@ -26,6 +26,7 @@
 #include "sql/plan_cache/ob_pcv_set.h"
 #include "sql/ob_sql_init.h"
 #include "sql/resolver/ob_resolver.h"
+#include "sql/resolver/expr/literal_decode_options.h"
 #include "sql/resolver/cmd/ob_variable_set_stmt.h"
 #include "sql/resolver/cmd/ob_call_procedure_stmt.h"
 #include "sql/resolver/cmd/ob_anonymous_block_stmt.h"
@@ -1587,8 +1588,6 @@ int ObSql::clac_fixed_param_store(const stmt::StmtType stmt_type,
                                          session.get_local_collation_connection());
   ObString literal_prefix;
   ObObjParam value;
-  const bool is_paramlize = false;
-  int64_t server_collation = CS_TYPE_INVALID;
   bool enable_decimal_int = false;
   bool enable_mysql_compatible_dates = false;
   if (raw_params.empty()) {
@@ -1604,30 +1603,23 @@ int ObSql::clac_fixed_param_store(const stmt::StmtType stmt_type,
   }
   for (int i = 0; OB_SUCC(ret) && i < raw_params.count(); ++i) {
     value.reset();
-    ParseNode *raw_param = NULL;;
-    if (OB_ISNULL(raw_params.at(i))) {
+    const ObPCParam *raw_param = raw_params.at(i);
+    if (OB_ISNULL(raw_param)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (OB_ISNULL(raw_param = raw_params.at(i)->node_)) {
+    } else if (OB_ISNULL(raw_param->literal_)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(ObResolverUtils::resolve_const(raw_param,
-                                                      stmt_type,
-                                                      allocator,
-                                                      collation_connection,
-                                                      session.get_nls_collation_nation(),
-                                                      session.get_timezone_info(),
-                                                      value,
-                                                      is_paramlize,
-                                                      literal_prefix,
-                                                      session.get_actual_length_semantics(),
-                                                      static_cast<ObCollationType>(server_collation),
-                                                      NULL, session.get_sql_mode(),
-                                                      enable_decimal_int,
-                                                      share::COMPAT_MYSQL57,
-                                                      enable_mysql_compatible_dates,
-                                                      session.get_min_const_integer_precision(),
-                                                      stmt::T_ANONYMOUS_BLOCK == stmt_type))) {
-    } else if (OB_FAIL(add_param_to_param_store(value, fixed_param_store))) {
     } else {
+      const NumericSignMode sign_mode = raw_param->flag_ == NEG_PARAM ? NumericSignMode::CompactNegative
+          : raw_param->flag_ == TRANS_NEG_PARAM ? NumericSignMode::PositiveOperand : NumericSignMode::Source;
+      const LiteralDecodeOptions options{
+          {stmt_type, enable_decimal_int, stmt::T_ANONYMOUS_BLOCK == stmt_type, false,
+           session.get_min_const_integer_precision()},
+          collation_connection, session.get_timezone_info(), session.get_sql_mode(),
+          share::COMPAT_MYSQL57, enable_mysql_compatible_dates, false, nullptr, sign_mode};
+      if (OB_FAIL(ObResolverUtils::resolve_literal(*raw_param->literal_, options,
+                                                 allocator, value, literal_prefix))) {
+      } else if (OB_FAIL(add_param_to_param_store(value, fixed_param_store))) {
+      }
     }
   }
   return ret;

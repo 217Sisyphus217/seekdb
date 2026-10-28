@@ -25,29 +25,8 @@ using namespace oceanbase::sql;
 using namespace oceanbase::common;
 
 namespace {
-ObItemType literal_type(peg::LiteralKind kind)
-{
-  switch (kind) {
-    case peg::LiteralKind::Integer: return T_INT;
-    case peg::LiteralKind::Unsigned: return T_UINT64;
-    case peg::LiteralKind::Decimal: return T_NUMBER;
-    case peg::LiteralKind::Float: return T_DOUBLE;
-    case peg::LiteralKind::String: return T_VARCHAR;
-    case peg::LiteralKind::NationalString: return T_NCHAR;
-    case peg::LiteralKind::Binary: return T_HEX_STRING;
-    case peg::LiteralKind::Boolean: return T_BOOL;
-    case peg::LiteralKind::Null: return T_NULL;
-    case peg::LiteralKind::Date: return T_DATE;
-    case peg::LiteralKind::Time: return T_TIME;
-    case peg::LiteralKind::Timestamp: return T_TIMESTAMP;
-    case peg::LiteralKind::Placeholder: return T_QUESTIONMARK;
-  }
-  return T_INVALID;
-}
-
 int scan(const ObString &stmt, const FPContext &context, ObIAllocator &allocator,
-         char *&sql, int64_t &length, ParamList *&params, int64_t &count,
-         ObFastParserResult *result, int64_t &values)
+         ObFastParserResult &result)
 {
   peg::ScanOptions options{
       peg::SqlMode{bool(context.sql_mode_ & SMO_ANSI_QUOTES), bool(context.sql_mode_ & SMO_NO_BACKSLASH_ESCAPES),
@@ -68,57 +47,44 @@ int scan(const ObString &stmt, const FPContext &context, ObIAllocator &allocator
     if (owned != nullptr) { MEMCPY(owned, text, size); owned[size] = '\0'; }
     return owned;
   };
-  sql = copy(scanned.sql.data(), scanned.sql.size());
+  char *sql = copy(scanned.sql.data(), scanned.sql.size());
   if (sql == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
-  length = scanned.sql.size();
-  values = scanned.insert_values_offset;
-  count = context.parameterize_ ? scanned.literals.size() : 0;
-  params = nullptr;
+  result.pc_key_.name_.assign_ptr(sql, scanned.sql.size());
+  result.values_token_pos_ = scanned.insert_values_offset;
+  const int64_t count = context.parameterize_ ? scanned.literals.size() : 0;
+  result.raw_params_.reset();
   if (count > 0) {
-    params = static_cast<ParamList *>(allocator.alloc(sizeof(ParamList) * count));
-    auto *nodes = static_cast<ParseNode *>(allocator.alloc(sizeof(ParseNode) * count));
-    if (params == nullptr || nodes == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+    auto *tokens = static_cast<LiteralToken *>(allocator.alloc(sizeof(LiteralToken) * count));
+    auto *params = static_cast<ObPCParam *>(allocator.alloc(sizeof(ObPCParam) * count));
+    if (tokens == nullptr || params == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+    if (OB_FAIL(result.raw_params_.reserve(count))) return ret;
     const char *text = nullptr;
     if (!scanned.literal_text.empty()) {
       text = copy(reinterpret_cast<const char *>(scanned.literal_text.data()), scanned.literal_text.size());
       if (text == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
     }
-    MEMSET(nodes, 0, sizeof(ParseNode) * count);
     int64_t i = 0;
     for (const auto &literal : scanned.literals) {
-      auto &node = nodes[i];
-      params[i] = ParamList{&node, i + 1 < count ? params + i + 1 : nullptr};
-      node.type_ = literal_type(literal.kind);
-      node.value_ = literal.value;
-      node.raw_text_ = stmt.ptr() + literal.start;
-      node.text_len_ = literal.end - literal.start;
-      node.raw_sql_offset_ = literal.start;
-      node.pos_ = literal.sql_offset;
-      node.is_copy_raw_text_ = node.type_ == T_HEX_STRING || node.type_ == T_DATE || node.type_ == T_TIME || node.type_ == T_TIMESTAMP;
-      if (node.type_ == T_INT || node.type_ == T_UINT64 || node.type_ == T_NUMBER || node.type_ == T_DOUBLE) {
-        node.str_value_ = node.raw_text_;
-        node.str_len_ = node.text_len_;
+      auto *token = new (tokens + i) LiteralToken{
+          literal.kind, literal.value, ObString(),
+          ObString(literal.end - literal.start, stmt.ptr() + literal.start),
+          literal.concatenated, static_cast<int32_t>(literal.first_part_length)};
+      if (token->is_numeric()) {
+        token->text = token->source;
       } else if (literal.content_start != literal.content_end) {
-        node.str_value_ = text + literal.content_start;
-        node.str_len_ = literal.content_end - literal.content_start;
+        token->text.assign_ptr(text + literal.content_start, literal.content_end - literal.content_start);
       }
-      if (literal.concatenated) {
-        auto *child = static_cast<ParseNode *>(allocator.alloc(sizeof(ParseNode)));
-        node.children_ = static_cast<ParseNode **>(allocator.alloc(sizeof(ParseNode *)));
-        if (child == nullptr || node.children_ == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
-        MEMSET(child, 0, sizeof(ParseNode));
-        child->type_ = T_CONCAT_STRING;
-        child->str_value_ = node.str_value_;
-        child->str_len_ = literal.first_part_length;
-        node.num_child_ = 1;
-        node.children_[0] = child;
-      }
+      auto *param = new (params + i) ObPCParam();
+      param->literal_ = token;
+      param->source_offset_ = literal.start;
+      param->sql_position_ = literal.sql_offset;
+      if (OB_FAIL(result.raw_params_.push_back(param))) return ret;
       ++i;
     }
   }
-  if (result != nullptr) {
-    auto &placeholders = result->question_mark_ctx_;
-    result->reset_question_mark_ctx();
+  {
+    auto &placeholders = result.question_mark_ctx_;
+    result.reset_question_mark_ctx();
     placeholders.by_ordinal_ = scanned.ordinal_parameters > 0;
     placeholders.by_name_ = !scanned.parameter_names.empty();
     placeholders.count_ = scanned.ordinal_parameters + scanned.parameter_names.size();
@@ -133,7 +99,7 @@ int scan(const ObString &stmt, const FPContext &context, ObIAllocator &allocator
       }
     }
     for (const auto &position : scanned.values) {
-      if (OB_FAIL(result->values_tokens_.push_back(ObValuesTokenPos(position.sql_offset, position.literal_index)))) break;
+      if (OB_FAIL(result.values_tokens_.push_back(ObValuesTokenPos(position.sql_offset, position.literal_index)))) break;
     }
   }
   return ret;
@@ -141,28 +107,11 @@ int scan(const ObString &stmt, const FPContext &context, ObIAllocator &allocator
 }
 
 int ObFastParser::parse(const common::ObString &stmt,
-                        const FPContext &fp_ctx,
+                        const FPContext &context,
                         common::ObIAllocator &allocator,
-                        char *&no_param_sql,
-                        int64_t &no_param_sql_len,
-                        ParamList *&param_list,
-                        int64_t &param_num)
+                        ObFastParserResult &result)
 {
-  int64_t values_token_pos = 0;
-  return scan(stmt, fp_ctx, allocator, no_param_sql, no_param_sql_len, param_list, param_num, nullptr, values_token_pos);
-}
-
-int ObFastParser::parse(const common::ObString &stmt,
-                        const FPContext &fp_ctx,
-                        common::ObIAllocator &allocator,
-                        char *&no_param_sql,
-                        int64_t &no_param_sql_len,
-                        ParamList *&param_list,
-                        int64_t &param_num,
-                        ObFastParserResult &fp_result,
-                        int64_t &values_token_pos)
-{
-  return scan(stmt, fp_ctx, allocator, no_param_sql, no_param_sql_len, param_list, param_num, &fp_result, values_token_pos);
+  return scan(stmt, context, allocator, result);
 }
 
 namespace {

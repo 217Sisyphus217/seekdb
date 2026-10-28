@@ -50,6 +50,8 @@ class ObPLRoutineInfo;
 }
 namespace sql
 {
+struct LiteralToken;
+struct LiteralDecodeOptions;
 struct NumericLiteral;
 struct NumericLiteralOptions;
 class ObRawExprUtils;
@@ -343,6 +345,11 @@ public:
    */
   static int resolve_stmt_type(const ParseResult &result, stmt::StmtType &type);
   static stmt::StmtType get_stmt_type_by_item_type(const ObItemType item_type);
+  static int resolve_literal(const LiteralToken &literal,
+                             const LiteralDecodeOptions &options,
+                             common::ObIAllocator &allocator,
+                             common::ObObjParam &val,
+                             common::ObString &literal_prefix);
   static int resolve_numeric_literal(const NumericLiteral &literal,
                                      const NumericLiteralOptions &options,
                                      common::ObIAllocator &allocator,
@@ -827,10 +834,6 @@ private:
   static int check_partition_range_value_result_type(const share::schema::ObPartitionFuncType part_type,
                                                      const ObColumnRefRawExpr &part_column_expr,
                                                      ObRawExpr &part_value_expr);
-  static int rm_space_for_neg_num(ParseNode *param_node, ObIAllocator &allocator);
-  static int handle_varchar_charset(ObCharsetType charset_type,
-                                    ObIAllocator &allocator,
-                                    ParseNode *&node);
 
   static int calc_unistr(const common::ObString &src,
                           const common::ObCollationType src_cs_type,

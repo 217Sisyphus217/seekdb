@@ -160,7 +160,6 @@ public:
   static int formalize_sql_text(ObIAllocator &allocator, const ObString &src_sql,
                                 ObString &fmt_sql, const SqlInfo &sql_info,
                                 const FPContext &fp_ctx);
-  static int transform_neg_param(ObIArray<ObPCParam *> &pc_params);
   static int construct_not_param(const ObString &no_param_sql,
                                   ObPCParam *pc_param,
                                   char *buf,

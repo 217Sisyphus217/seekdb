@@ -25,44 +25,6 @@
 #include "sql/executor/ob_memory_tracker_wrapper.h"
 extern const char *get_type_name(int type);
 
-int get_deep_copy_size(const ParseNode *node, int64_t *size)
-{
-  int ret = OB_PARSER_SUCCESS;
-  if (OB_UNLIKELY(NULL == node)) {
-    ret = OB_PARSER_ERR_UNEXPECTED;
-    (void)fprintf(stderr, "ERROR node is null\n");
-  } else if (OB_UNLIKELY(NULL == size)) {
-    ret = OB_PARSER_ERR_UNEXPECTED;
-    (void)fprintf(stderr, "ERROR size is null\n");
-  } else {
-    *size += sizeof(ParseNode);
-    if (node->str_len_ > 0 && node->str_value_ != NULL) {
-      *size += node->str_len_ + 1;
-    }
-    if (node->text_len_ > 0 && node->raw_text_ != NULL) {
-      *size += node->text_len_ + 1;
-    }
-    if (node->num_child_ > 0) {
-      if (OB_UNLIKELY(NULL == node->children_)) {
-        ret = OB_PARSER_ERR_UNEXPECTED;
-        (void)fprintf(stderr, "ERROR children is null\n");
-      } else {
-        *size += (sizeof(ParseNode*) * node->num_child_);
-      }
-      for (int64_t i = 0; OB_PARSER_SUCCESS == ret && i < node->num_child_; ++i) {
-        ParseNode *child_node = node->children_[i];
-        if (OB_UNLIKELY(NULL == child_node)) {
-          ret = OB_PARSER_ERR_UNEXPECTED;
-          (void)fprintf(stderr, "ERROR child node is null\n");
-        } else if (OB_PARSER_SUCCESS != (ret = get_deep_copy_size(child_node, size))) {
-          (void)fprintf(stderr, "ERROR failed to get deep copy size\n");
-        }
-      }
-    }
-  }
-  return ret;
-}
-
 int deep_copy_parse_node_base(void *malloc_pool, const ParseNode *src_node, ParseNode *dst_node)
 {
   int ret = OB_PARSER_SUCCESS;
@@ -104,40 +66,6 @@ int deep_copy_parse_node_base(void *malloc_pool, const ParseNode *src_node, Pars
         MEMCPY(buf, src_node->raw_text_, dst_node->text_len_);
         buf[dst_node->text_len_] = '\0';
         dst_node->raw_text_ = buf;
-      }
-    }
-  }
-  return ret;
-}
-
-int deep_copy_parse_node(void *malloc_pool, const ParseNode *src_node, ParseNode *dst_node)
-{
-  int ret = OB_PARSER_SUCCESS;
-  if (OB_UNLIKELY(OB_PARSER_SUCCESS != (ret = deep_copy_parse_node_base(malloc_pool, src_node, dst_node)))) {
-    (void)fprintf(stderr, "ERROR failed to copy parse node base\n");
-  } else if (src_node->num_child_ > 0) {
-    if (OB_UNLIKELY(NULL == src_node->children_)) {
-      ret = OB_PARSER_ERR_UNEXPECTED;
-      (void)fprintf(stderr, "ERROR children is null\n");
-    } else if (OB_UNLIKELY(NULL == (dst_node->children_ = (ParseNode **)parser_alloc(
-                                    malloc_pool, sizeof(ParseNode*) * src_node->num_child_)))) {
-      ret = OB_PARSER_ERR_NO_MEMORY;
-      (void)fprintf(stderr, "ERROR failed to allocate memory\n");
-    }
-    for (int64_t i = 0; OB_PARSER_SUCCESS == ret && i < src_node->num_child_; ++i) {
-      ParseNode *tmp_node = NULL;
-      ParseNode *child_node = src_node->children_[i];
-      if (OB_UNLIKELY(NULL == child_node)) {
-        ret = OB_PARSER_ERR_UNEXPECTED;
-        (void)fprintf(stderr, "ERROR child node is null\n");
-      } else if (OB_UNLIKELY(NULL == (tmp_node =
-                (ParseNode *)parser_alloc(malloc_pool, sizeof(ParseNode))))) {
-        ret = OB_PARSER_ERR_NO_MEMORY;
-        (void)fprintf(stderr, "ERROR failed to allocate memory\n");
-      } else if (OB_PARSER_SUCCESS != (ret = deep_copy_parse_node(malloc_pool, child_node, tmp_node))) {
-        (void)fprintf(stderr, "ERROR failed to deep copy parse node\n");
-      } else {
-        dst_node->children_[i] = tmp_node;
       }
     }
   }

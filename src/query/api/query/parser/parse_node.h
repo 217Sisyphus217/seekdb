@@ -128,7 +128,6 @@ typedef struct _ParseNode
     struct {
       uint32_t is_hidden_const_ : 1; // 1 indicates that a certain constant can be recognized by normal parse but not by fast parse, 0 indicates that both can recognize it.
       uint32_t length_semantics_  :2; // length semantics for char/varbinary declarations
-      uint32_t is_copy_raw_text_ : 1; // Whether to refill the raw_text_ of constant nodes, used for parameterization of constant parameters in select items
       uint32_t is_assigned_from_child_: 1; // Is the constant node assigned from a child node, used for handling int64_min
       uint32_t is_date_unit_ : 1; // 1 indicates it is a date unit constant, which needs to be reversed to a string during reverse parsing
       uint32_t is_empty_ : 1; // indicates whether the node is default, 1 means default, 0 means not default, used in opt_asc_desc node
@@ -221,7 +220,6 @@ typedef struct ObParseResult
 {
   const char *input_sql_;
   int input_sql_len_;
-  int param_node_num_;
   void *malloc_pool_; // ObIAllocator
   ObQuestionMarkCtx question_mark_ctx_;
   ObSQLMode sql_mode_;
@@ -262,9 +260,7 @@ extern ParseNode *new_terminal_node(void *malloc_pool, ObItemType type);
 extern int check_mem_status();
 extern int try_check_mem_status(int64_t check_try_times);
 
-int get_deep_copy_size(const ParseNode *node, int64_t *size);
 int deep_copy_parse_node_base(void *malloc_pool, const ParseNode *src_node, ParseNode *dst_node);
-int deep_copy_parse_node(void *malloc_pool, const ParseNode *src, ParseNode *dst);
 
 /// convert x'42ab' to binary string
 void ob_parse_binary(const char *src, int64_t len, char* dest);

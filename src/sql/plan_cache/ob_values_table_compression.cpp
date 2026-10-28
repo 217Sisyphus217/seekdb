@@ -203,12 +203,12 @@ int ObValuesTableCompression::rebuild_new_raw_sql(ObPlanCacheCtx &pc_ctx,
   } else {
     for (int64_t i = begin_idx; OB_SUCC(ret) && i < begin_idx + param_cnt; i++) {
       const ObPCParam *pc_param = raw_params.at(i);
-      if (OB_ISNULL(pc_param) || OB_ISNULL(pc_param->node_)) {
+      if (OB_ISNULL(pc_param) || OB_ISNULL(pc_param->literal_)) {
         ret = OB_ERR_UNEXPECTED;
       } else {
-        int64_t param_pos = pc_param->node_->pos_ - delta_length; // get pos is in new no param sql
-        int64_t param_raw_offset = pc_param->node_->raw_sql_offset_;
-        int64_t param_len = pc_param->node_->text_len_;
+        int64_t param_pos = pc_param->sql_position_ - delta_length; // get pos is in new no param sql
+        int64_t param_raw_offset = pc_param->source_offset_;
+        int64_t param_len = pc_param->literal_->source.length();
         len = param_pos - no_param_sql_pos;
         if (OB_UNLIKELY(len < 0) || OB_UNLIKELY(new_raw_pos + len + param_len > buff_len)) {
           ret = OB_ERR_UNEXPECTED;
@@ -222,7 +222,7 @@ int ObValuesTableCompression::rebuild_new_raw_sql(ObPlanCacheCtx &pc_ctx,
           if (param_pos == no_param_sql_pos) {
             //copy raw param
             param_raw_offset = new_raw_pos;
-            MEMCPY(buff + new_raw_pos, pc_param->node_->raw_text_, param_len);
+            MEMCPY(buff + new_raw_pos, pc_param->literal_->source.ptr(), param_len);
             new_raw_pos += param_len;
             no_param_sql_pos += 1;
           }
@@ -358,8 +358,8 @@ int ObValuesTableCompression::try_batch_exec_params(ObIAllocator &allocator,
       fp_result.raw_params_.reset();
       for (int64_t i = 0; i < temp_store.count(); i++) {
         // checked null before
-        temp_store.at(i)->node_->pos_ = no_param_pos.at(i);
-        temp_store.at(i)->node_->raw_sql_offset_ = raw_sql_offset.at(i);
+        temp_store.at(i)->sql_position_ = no_param_pos.at(i);
+        temp_store.at(i)->source_offset_ = raw_sql_offset.at(i);
       }
       if (OB_FAIL(fp_result.raw_params_.assign(temp_store))) {
       }

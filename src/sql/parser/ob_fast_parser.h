@@ -55,22 +55,10 @@ public:
 struct ObFastParser final
 {
 public:
-	static int parse(const common::ObString &stmt,
-									 const FPContext &fp_ctx,
-									 common::ObIAllocator &allocator,
-			 						 char *&no_param_sql,
-			 						 int64_t &no_param_sql_len,
-			 						 ParamList *&param_list,
-			 						 int64_t &param_num);
-	static int parse(const common::ObString &stmt,
-									 const FPContext &fp_ctx,
-									 common::ObIAllocator &allocator,
-			 						 char *&no_param_sql,
-			 						 int64_t &no_param_sql_len,
-			 						 ParamList *&param_list,
-			 						 int64_t &param_num,
-									 ObFastParserResult &fp_result,
-									 int64_t &values_token_pos);
+  static int parse(const common::ObString &stmt,
+                   const FPContext &context,
+                   common::ObIAllocator &allocator,
+                   ObFastParserResult &result);
   static int compress_insert(common::ObIAllocator &allocator,
                                         int64_t values_token_pos,
                                         const ObString &old_no_param_sql,

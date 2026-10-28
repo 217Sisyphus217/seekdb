@@ -939,7 +939,6 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
   const char *raw = (pl ? expression_sql : sql).ptr() + source.start;
   const size_t raw_length = source.end - source.start;
   const bool temporal = type == T_DATE || type == T_TIME || type == T_TIMESTAMP;
-  if (temporal) node->is_copy_raw_text_ = true;
   const bool literal = temporal || type == T_INT || type == T_UINT64 || type == T_NUMBER || type == T_DOUBLE
       || type == T_VARCHAR || type == T_HEX_STRING || type == T_BOOL || type == T_NULL || type == T_QUESTIONMARK;
   if (literal && source.kind != Kind::HiddenInt && source.kind != Kind::HiddenNull && source.kind != Kind::HiddenString && source.kind != Kind::CacheType && source.kind != Kind::DateUnit) {

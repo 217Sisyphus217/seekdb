@@ -20,6 +20,7 @@
 #include "lib/json/ob_json_print_utils.h"
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/resolver/expr/numeric_literal.h"
+#include "sql/resolver/expr/literal_decode_options.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -533,14 +534,11 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
       ObAccuracy tmp_accuracy;
       if (ctx.is_fast_parse_const_) { // Here we need to obtain all information identified as constants by fast parse
         if (!is_node_not_param(ctx)) { // determine whether it is a constant that can be parameterized
-          ParseNode* node = NULL;
-          if (OB_NOT_NULL(ctx.raw_params_) &&
-              ctx.tree_->value_ < ctx.raw_params_->count() &&
-              T_QUESTIONMARK == ctx.tree_->type_ &&
-              !is_prepare_mode(ctx.mode_)) {
-            node = ctx.raw_params_->at(ctx.tree_->value_)->node_;
-          } else {
-            node = ctx.tree_;
+          const ParseNode *node = ctx.tree_;
+          const LiteralToken *raw_literal = nullptr;
+          if (OB_NOT_NULL(ctx.raw_params_) && ctx.tree_->value_ < ctx.raw_params_->count()
+              && T_QUESTIONMARK == ctx.tree_->type_ && !is_prepare_mode(ctx.mode_)) {
+            raw_literal = ctx.raw_params_->at(ctx.tree_->value_)->literal_;
           }
           if (T_QUESTIONMARK == ctx.tree_->type_) {
             ctx.paramlized_questionmask_count_++;
@@ -549,7 +547,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
           bool fmt_int_or_ch_decint =
             (ctx.value_father_level_ < VALUE_VECTOR_LEVEL
              && ctx.assign_father_level_ < ASSIGN_ITEM_LEVEL)
-            && (node->type_ == T_INT)
+            && (raw_literal != nullptr ? raw_literal->kind == peg::LiteralKind::Integer : node->type_ == T_INT)
             && (ctx.parent_type_ == T_OP_DIV
                 || ctx.parent_type_ == T_OP_MUL
                 || ctx.parent_type_ == T_OP_ADD
@@ -565,7 +563,16 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
                           NumericLiteralOptions{stmt::T_NONE, enable_decimal_int, ctx.is_from_pl_,
                                                 fmt_int_or_ch_decint, session_info.get_min_const_integer_precision()},
                           *ctx.allocator_, value, literal_prefix))) {
-          } else if (numeric == nullptr && OB_FAIL(ObResolverUtils::resolve_const(node,
+          } else if (numeric == nullptr && raw_literal != nullptr
+                     && OB_FAIL(ObResolverUtils::resolve_literal(*raw_literal,
+                          LiteralDecodeOptions{
+                            NumericLiteralOptions{stmt::T_NONE, enable_decimal_int, ctx.is_from_pl_,
+                              fmt_int_or_ch_decint, session_info.get_min_const_integer_precision()},
+                            ctx.collation_type_, ctx.tz_info_, session_info.get_sql_mode(),
+                            share::COMPAT_MYSQL57, enable_mysql_compatible_dates,
+                            ctx.is_transform_outline_, nullptr, NumericSignMode::Source},
+                          *ctx.allocator_, value, literal_prefix))) {
+          } else if (numeric == nullptr && raw_literal == nullptr && OB_FAIL(ObResolverUtils::resolve_const(node,
                               stmt::T_NONE, // Parameters use execution precision, including SQL inside outline DDL.
                               *(ctx.allocator_),
                               ctx.collation_type_,
@@ -643,9 +650,9 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
                 raw_token_index >= 0 &&
                 raw_token_index < ctx.raw_params_->count() &&
                 OB_NOT_NULL(ctx.raw_params_->at(raw_token_index))) {
-              const ParseNode *node = ctx.raw_params_->at(raw_token_index)->node_;
-              value.set_raw_text_info(static_cast<int32_t>(node->raw_sql_offset_),
-                                      static_cast<int32_t>(node->text_len_));
+              const auto &parameter = *ctx.raw_params_->at(raw_token_index);
+              value.set_raw_text_info(static_cast<int32_t>(parameter.source_offset_),
+                                      parameter.literal_->source.length());
               if (ctx.sql_info_->need_check_fp_) {
                 ObPCParseInfo p_info;
                 p_info.param_idx_ = ctx.sql_info_->total_ - 1;
@@ -902,16 +909,16 @@ int ObSqlParameterization::check_and_generate_param_info(const ObIArray<ObPCPara
       if (OB_ISNULL(pc_param)) {
         ret = OB_INVALID_ARGUMENT;
         SQL_PC_LOG(WARN, "invalid argument", K(ret));
-      } else if (OB_ISNULL(pc_param->node_)) {
+      } else if (OB_ISNULL(pc_param->literal_)) {
         ret = OB_INVALID_ARGUMENT;
-        SQL_PC_LOG(WARN, "invalid argument", K(pc_param->node_), K(ret));
+        SQL_PC_LOG(WARN, "invalid argument", K(pc_param->literal_), K(ret));
       } else if (sql_info.not_param_index_.has_member(i)) { //not param
         pc_param->flag_ = NOT_PARAM;
         if (OB_FAIL(special_params.push_back(pc_param))) {
         }
       } else if (sql_info.neg_param_index_.has_member(i)) {//neg param
         // If it is T_VARCHAR then there is no need to record as a negative number, ?sql also does not need to be merged-?
-        if (T_VARCHAR == pc_param->node_->type_) {
+        if (peg::LiteralKind::String == pc_param->literal_->kind) {
           //do nothing
         } else {
           pc_param->flag_ = NEG_PARAM;
@@ -1070,8 +1077,6 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
                                                   pc_ctx.sql_ctx_.plan_key_.format_sql_,
                                                   sql_info, fp_ctx))) {
         SQL_PC_LOG(WARN, "fail to formalize sql text", K(ret), K(pc_ctx.raw_sql_));
-      } else if (is_prepare_mode(mode) && OB_FAIL(transform_neg_param(pc_ctx.fp_result_.raw_params_))) {
-        SQL_PC_LOG(WARN, "fail to transform_neg_param", K(ret));
       } else {
         pc_ctx.sql_ctx_.plan_key_.constructed_sql_.assign_ptr(buf, pos);
         pc_ctx.ps_need_parameterized_ = sql_info.ps_need_parameterized_;
@@ -1090,19 +1095,19 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
 int ObSqlParameterization::gen_special_param_info(SqlInfo &sql_info, ObPlanCacheCtx &pc_ctx)
 {
   int ret = OB_SUCCESS;
-  ParseNode *raw_param = NULL;
+  const LiteralToken *raw_param = NULL;
   NotParamInfo np_info;
   pc_ctx.not_param_info_.set_capacity(sql_info.not_param_index_.num_members());
   for (int32_t i = 0; OB_SUCC(ret) && i < pc_ctx.fp_result_.raw_params_.count(); i ++) {
     if (OB_ISNULL(pc_ctx.fp_result_.raw_params_.at(i))) {
       ret = OB_INVALID_ARGUMENT;
-    } else if (NULL == (raw_param = pc_ctx.fp_result_.raw_params_.at(i)->node_)) {
+    } else if (NULL == (raw_param = pc_ctx.fp_result_.raw_params_.at(i)->literal_)) {
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid argument", K(ret));
     } else if (sql_info.not_param_index_.has_member(i)) { //not param
       np_info.reset();
       np_info.idx_ = i;
-      np_info.raw_text_ = ObString(raw_param->text_len_, raw_param->raw_text_);
+      np_info.raw_text_ = raw_param->source;
       if (OB_FAIL(pc_ctx.not_param_info_.push_back(np_info))) {
       }
     }
@@ -1166,42 +1171,6 @@ int ObSqlParameterization::construct_no_check_type_params(const ObIArray<int64_t
   return ret;
 }
 
-int ObSqlParameterization::transform_neg_param(ObIArray<ObPCParam *> &pc_params)
-{
-  int ret = OB_SUCCESS;
-  ObPCParam *pc_param = NULL;
-  for (int64_t i = 0; OB_SUCC(ret) && i < pc_params.count(); i ++) {
-    pc_param = pc_params.at(i);
-    if (OB_ISNULL(pc_param)) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid argument", K(ret));
-    } else if (TRANS_NEG_PARAM == pc_param->flag_) {
-      int64_t tmp_pos = 0;
-      for (; tmp_pos < pc_param->node_->str_len_ && isspace(pc_param->node_->str_value_[tmp_pos]); tmp_pos++);
-      if (OB_UNLIKELY(tmp_pos >= pc_param->node_->str_len_)) {
-        int ret = OB_ERR_UNEXPECTED;
-      } else {
-        if ('-' != pc_param->node_->str_value_[tmp_pos]) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("expected neg sign here", K(tmp_pos), K(ObString(pc_param->node_->str_len_,
-                                                                    pc_param->node_->str_value_)));
-        } else {
-          tmp_pos += 1;
-          for (; tmp_pos < pc_param->node_->str_len_ && isspace(pc_param->node_->str_value_[tmp_pos]); tmp_pos++);
-        }
-        if (OB_SUCC(ret)) {
-          pc_param->node_->str_value_ += tmp_pos;
-          pc_param->node_->str_len_ -= tmp_pos;
-          if (T_NUMBER != pc_param->node_->type_ && pc_param->node_->value_ < 0) {
-            pc_param->node_->value_ = 0 - pc_param->node_->value_;
-          }
-        }
-      }
-    }
-  }
-  return ret;
-}
-
 int ObSqlParameterization::construct_not_param(const ObString &no_param_sql,
                                                 ObPCParam *pc_param,
                                                 char *buf,
@@ -1214,18 +1183,18 @@ int ObSqlParameterization::construct_not_param(const ObString &no_param_sql,
     ret = OB_INVALID_ARGUMENT;
     SQL_PC_LOG(WARN, "invalid argument", K(ret));
   } else {
-    int32_t len = (int32_t)pc_param->node_->pos_ - idx;
+    int32_t len = (int32_t)pc_param->sql_position_ - idx;
     if (len > buf_len - pos) {
       ret = OB_BUF_NOT_ENOUGH;
-      LOG_WARN("buffer not enough", K(pos), K(buf_len), K(len), K(pc_param->node_->pos_), K(idx));
+      LOG_WARN("buffer not enough", K(pos), K(buf_len), K(len), K(pc_param->sql_position_), K(idx));
     } else if (len > 0) {
       //copy text
       MEMCPY(buf + pos, no_param_sql.ptr() + idx, len);
-      idx = (int32_t)pc_param->node_->pos_ + 1;
+      idx = (int32_t)pc_param->sql_position_ + 1;
       pos += len;
       //copy raw param
-      MEMCPY(buf + pos, pc_param->node_->raw_text_, pc_param->node_->text_len_);
-      pos += (int32_t)pc_param->node_->text_len_;
+      MEMCPY(buf + pos, pc_param->literal_->source.ptr(), pc_param->literal_->source.length());
+      pos += (int32_t)pc_param->literal_->source.length();
     }
   }
   return ret;
@@ -1243,16 +1212,16 @@ int ObSqlParameterization::construct_neg_param(const ObString &no_param_sql,
     ret = OB_INVALID_ARGUMENT;
     SQL_PC_LOG(WARN, "invalid argument", K(ret));
   } else {
-    int32_t len = (int32_t)pc_param->node_->pos_ - idx;
+    int32_t len = (int32_t)pc_param->sql_position_ - idx;
     if (len > buf_len - pos) {
       ret = OB_BUF_NOT_ENOUGH;
-      LOG_WARN("buffer not enough", K(pos), K(buf_len), K(len), K(pc_param->node_->pos_), K(idx));
+      LOG_WARN("buffer not enough", K(pos), K(buf_len), K(len), K(pc_param->sql_position_), K(idx));
     } else if (len > 0) {
       MEMCPY(buf + pos, no_param_sql.ptr() + idx, len);
       pos += len;
     }
     if (OB_SUCC(ret)) {
-      idx = (int32_t)pc_param->node_->pos_ + 1;
+      idx = (int32_t)pc_param->sql_position_ + 1;
       buf[pos++] = '?';
     }
   }
@@ -1271,10 +1240,10 @@ int ObSqlParameterization::construct_trans_neg_param(const ObString &no_param_sq
     ret = OB_INVALID_ARGUMENT;
     SQL_PC_LOG(WARN, "invalid argument", K(ret));
   } else {
-    int32_t len = (int32_t)pc_param->node_->pos_ - idx;
+    int32_t len = (int32_t)pc_param->sql_position_ - idx;
     if (len > buf_len - pos) {
       ret = OB_BUF_NOT_ENOUGH;
-      LOG_WARN("buffer not enough", K(pos), K(buf_len), K(len), K(pc_param->node_->pos_), K(idx));
+      LOG_WARN("buffer not enough", K(pos), K(buf_len), K(len), K(pc_param->sql_position_), K(idx));
     } else if (len > 0) {
       MEMCPY(buf + pos, no_param_sql.ptr() + idx, len);
       pos += len;
@@ -1284,23 +1253,23 @@ int ObSqlParameterization::construct_trans_neg_param(const ObString &no_param_sq
       // so we need fill spaces between '-' and '?', so here it is
       buf[pos++] = '-';
       int64_t tmp_pos = 0;
-      for (; tmp_pos < pc_param->node_->str_len_ && isspace(pc_param->node_->str_value_[tmp_pos]); tmp_pos++);
-      if (OB_UNLIKELY(tmp_pos >= pc_param->node_->str_len_)) {
+      for (; tmp_pos < pc_param->literal_->text.length() && isspace(pc_param->literal_->text.ptr()[tmp_pos]); tmp_pos++);
+      if (OB_UNLIKELY(tmp_pos >= pc_param->literal_->text.length())) {
         int ret = OB_ERR_UNEXPECTED;
       } else {
-        if ('-' != pc_param->node_->str_value_[tmp_pos]) {
+        if ('-' != pc_param->literal_->text.ptr()[tmp_pos]) {
           ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("expected neg sign here", K(tmp_pos), K(ObString(pc_param->node_->str_len_,
-                                                                    pc_param->node_->str_value_)));
+          LOG_WARN("expected neg sign here", K(tmp_pos), K(ObString(pc_param->literal_->text.length(),
+                                                                    pc_param->literal_->text.ptr())));
         } else {
           tmp_pos += 1;
-          for (; tmp_pos < pc_param->node_->str_len_ && isspace(pc_param->node_->str_value_[tmp_pos]); tmp_pos++) {
+          for (; tmp_pos < pc_param->literal_->text.length() && isspace(pc_param->literal_->text.ptr()[tmp_pos]); tmp_pos++) {
             buf[pos++] = ' ';
           }
         }
         if (OB_SUCC(ret)) {
           buf[pos++] = '?';
-          idx = pc_param->node_->pos_ + 1;
+          idx = pc_param->sql_position_ + 1;
         }
       }
     }
@@ -1507,11 +1476,11 @@ int ObSqlParameterization::construct_sql_for_pl(const ObString &no_param_sql,
       ret = OB_INVALID_ARGUMENT;
       SQL_PC_LOG(WARN, "invalid argument", K(ret));
     } else if (NOT_PARAM == pc_param->flag_) {
-      int32_t len = (int32_t)pc_param->node_->pos_ - idx;
+      int32_t len = (int32_t)pc_param->sql_position_ - idx;
       if (0 == len) {
-        MEMCPY(buf + pos, pc_param->node_->raw_text_, pc_param->node_->text_len_);
-        pos += (int32_t)pc_param->node_->text_len_;
-        idx = (int32_t)pc_param->node_->pos_ + 1;
+        MEMCPY(buf + pos, pc_param->literal_->source.ptr(), pc_param->literal_->source.length());
+        pos += (int32_t)pc_param->literal_->source.length();
+        idx = (int32_t)pc_param->sql_position_ + 1;
       } else {
         OZ (construct_not_param(no_param_sql, pc_param, buf, buf_len, pos, idx));
       }
@@ -1557,157 +1526,71 @@ bool ObSqlParameterization::need_fast_parser(const ObString &sql)
 }
 
 int ObSqlParameterization::formalize_fast_parameter_sql(ObIAllocator &allocator,
-                                                        const ObString &src_sql,
-                                                        ObString &dest_sql,
-                                                        ObIArray<ObPCParam *> &raw_params,
-                                                        const FPContext &fp_ctx)
+                                          const ObString &src_sql,
+                                          ObString &dest_sql,
+                                          ObIArray<ObPCParam *> &raw_params,
+                                          const FPContext &fp_ctx)
 {
   int ret = OB_SUCCESS;
-  int64_t param_num = 0;
-  char *format_sql_ptr = NULL;
-  int64_t format_sql_len = 0;
-  ObFastParserResult fp_result;
-  ParamList *p_list = NULL;
   bool is_call_procedure = false;
-  ObSQLSessionInfo *session = NULL;
-  ObArenaAllocator alloc(ObModIds::OB_SQL_PARSER);
-  bool is_contain_select = (src_sql.length() > 6 && 0 == STRNCASECMP(src_sql.ptr(), "select", 6));
-  FPContext fp_ctx_format = fp_ctx;
-  fp_ctx_format.is_format_ = true;
-
-  if (OB_FAIL(ret)) {
-    // do nothing
-  } else if (!is_contain_select && (!need_fast_parser(src_sql)
-      || (ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
-    // do nothing
-  } else {
-    if (OB_FAIL(ObFastParser::parse(src_sql, fp_ctx_format, allocator, format_sql_ptr, format_sql_len,
-                                    p_list, param_num, fp_result, fp_result.values_token_pos_))) {
-    } else if (OB_ISNULL(p_list)) {
-      dest_sql.assign_ptr(format_sql_ptr, format_sql_len); 
+  const bool is_contain_select = src_sql.length() > 6 && 0 == STRNCASECMP(src_sql.ptr(), "select", 6);
+  if (is_contain_select || (need_fast_parser(src_sql)
+      && (!ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) || is_call_procedure))) {
+    FPContext context = fp_ctx;
+    context.is_format_ = true;
+    ObFastParserResult result;
+    if (OB_FAIL(ObFastParser::parse(src_sql, context, allocator, result))) {
     } else {
-      dest_sql.assign_ptr(format_sql_ptr, format_sql_len); 
-      if (OB_SUCC(ret)) {
-        if (param_num > 0) {
-          ObPCParam *pc_param = NULL;
-          char *ptr = (char *)allocator.alloc(param_num * sizeof(ObPCParam));
-          if (OB_ISNULL(ptr)) {
-            ret = OB_ALLOCATE_MEMORY_FAILED;
-            SQL_PC_LOG(WARN, "fail to alloc memory for pc param", K(ret), K(ptr));
-          }
-          raw_params.reset();
-          for (int64_t i = 0; OB_SUCC(ret) && i < param_num && NULL != p_list; i++) {
-            pc_param = new(ptr)ObPCParam();
-            ptr += sizeof(ObPCParam);
-            pc_param->node_ = p_list->node_;
-            if (OB_FAIL(raw_params.push_back(pc_param))) {
-            } else {
-              p_list = p_list->next_;
-            }
-          } // for end
-        } else { /*do nothing*/}
-      }
+      dest_sql = result.pc_key_.name_;
+      ret = raw_params.assign(result.raw_params_);
     }
   }
   return ret;
 }
 
 int ObSqlParameterization::formalize_sql_filter_hint(ObIAllocator &allocator,
-                                                        const ObString &src_sql,
-                                                        ObString &dest_sql,
-                                                        ObIArray<ObPCParam *> &raw_params)
+                                                      const ObString &src_sql,
+                                                      ObString &dest_sql,
+                                                      ObIArray<ObPCParam *> &raw_params)
 {
   int ret = OB_SUCCESS;
-  int64_t param_num = 0;
-  char *format_sql_ptr = NULL;
-  int64_t format_sql_len = 0;
-  ObFastParserResult fp_result;
-  FPContext fp_ctx;
-  ParamList *p_list = NULL;
   bool is_call_procedure = false;
-  fp_ctx.is_format_ = true;
-  ObArenaAllocator alloc(ObModIds::OB_SQL_PARSER);
-  bool is_contain_select = (src_sql.length() > 6 && 0 == STRNCASECMP(src_sql.ptr(), "select", 6));
-  if (!is_contain_select && (!need_fast_parser(src_sql)
-      || (ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
-    // do nothing
-  } else {
-    if (OB_FAIL(ObFastParser::parse(src_sql, fp_ctx, allocator, format_sql_ptr, format_sql_len,
-                                    p_list, param_num, fp_result, fp_result.values_token_pos_))) {
-    } else if (param_num != raw_params.count()) {
+  const bool is_contain_select = src_sql.length() > 6 && 0 == STRNCASECMP(src_sql.ptr(), "select", 6);
+  if (is_contain_select || (need_fast_parser(src_sql)
+      && (!ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) || is_call_procedure))) {
+    FPContext context;
+    context.is_format_ = true;
+    ObFastParserResult result;
+    if (OB_FAIL(ObFastParser::parse(src_sql, context, allocator, result))) {
+    } else if (result.raw_params_.count() != raw_params.count()) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("invalid param_num", K(param_num), K(raw_params.count()));
-    } else if (OB_ISNULL(p_list)) {
-      dest_sql.assign_ptr(format_sql_ptr, format_sql_len); 
     } else {
-      dest_sql.assign_ptr(format_sql_ptr, format_sql_len); 
-      if (OB_SUCC(ret)) {
-        if (param_num > 0) {
-          for (int64_t i = 0; OB_SUCC(ret) && i < param_num && NULL != p_list; i++) {
-            if (OB_ISNULL(raw_params.at(i)) || OB_ISNULL(raw_params.at(i)->node_)) {
-              // do nothing
-            } else {
-              raw_params.at(i)->node_->pos_ = p_list->node_->pos_;
-            }
-            p_list = p_list->next_;
-          } // for end
-        } else { /*do nothing*/}
+      dest_sql = result.pc_key_.name_;
+      for (int64_t i = 0; i < raw_params.count(); ++i) {
+        if (raw_params.at(i) != nullptr) {
+          raw_params.at(i)->sql_position_ = result.raw_params_.at(i)->sql_position_;
+        }
       }
     }
   }
   return ret;
 }
 
-
-
-
 int ObSqlParameterization::fast_parser(ObIAllocator &allocator,
                                        const FPContext &fp_ctx,
                                        const ObString &sql,
                                        ObFastParserResult &fp_result)
 {
-  //UNUSED(sql_mode);
-  int ret = OB_SUCCESS;
-  int64_t param_num = 0;
-  char *no_param_sql_ptr = NULL;
-  int64_t no_param_sql_len = 0;
-  ParamList *p_list = NULL;
   bool is_call_procedure = false;
-  bool is_contain_select = (sql.length() > 6 && 0 == STRNCASECMP(sql.ptr(), "select", 6));
+  const bool is_contain_select = sql.length() > 6 && 0 == STRNCASECMP(sql.ptr(), "select", 6);
   if (!is_contain_select && (!need_fast_parser(sql)
-    || (ObParser::is_pl_stmt(sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
-    (void)fp_result.pc_key_.name_.assign_ptr(sql.ptr(), sql.length());
-  } else {
-    if (OB_FAIL(ObFastParser::parse(sql, fp_ctx, allocator, no_param_sql_ptr, no_param_sql_len,
-                                    p_list, param_num, fp_result, fp_result.values_token_pos_))) {
-    }
-
-    if (OB_SUCC(ret)) {
-      (void)fp_result.pc_key_.name_.assign_ptr(no_param_sql_ptr, no_param_sql_len);
-      if (param_num > 0) {
-        ObPCParam *pc_param = NULL;
-        char *ptr = (char *)allocator.alloc(param_num * sizeof(ObPCParam));
-        fp_result.raw_params_.reset();
-        if (OB_ISNULL(ptr)) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-          SQL_PC_LOG(WARN, "fail to alloc memory for pc param", K(ret), K(ptr));
-        }
-        for (int64_t i = 0; OB_SUCC(ret) && i < param_num && NULL != p_list; i++) {
-          pc_param = new(ptr)ObPCParam();
-          ptr += sizeof(ObPCParam);
-          pc_param->node_ = p_list->node_;
-          if (OB_FAIL(fp_result.raw_params_.push_back(pc_param))) {
-          } else {
-            p_list = p_list->next_;
-          }
-        } // for end
-      } else { /*do nothing*/}
-    }
+      || (ObParser::is_pl_stmt(sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
+    fp_result.pc_key_.name_ = sql;
+    return OB_SUCCESS;
   }
-  return ret;
+  return ObFastParser::parse(sql, fp_ctx, allocator, fp_result);
 }
 
-//used for outline
 int ObSqlParameterization::raw_fast_parameterize_sql(ObIAllocator &allocator,
                                                      const ObSQLSessionInfo &session,
                                                      const ObString &sql,
@@ -1716,39 +1599,26 @@ int ObSqlParameterization::raw_fast_parameterize_sql(ObIAllocator &allocator,
                                                      ParseMode parse_mode)
 {
   int ret = OB_SUCCESS;
-  ObParser parser(allocator, session.get_sql_mode(), session.get_charsets4parser());
-  ParseResult parse_result;
-
+  int64_t length = sql.length();
+  while (length > 0 && SPACE_FLAGS[static_cast<uint8_t>(sql[length - 1])]) --length;
+  if (length > 0 && sql[length - 1] == '\0') --length;
+  while (length > 0 && SPACE_FLAGS[static_cast<uint8_t>(sql[length - 1])]) --length;
+  FPContext context(session.get_charsets4parser());
+  context.sql_mode_ = session.get_sql_mode();
+  context.parameterize_ = parse_mode == FP_MODE || parse_mode == FP_PARAMERIZE_AND_FILTER_HINT_MODE;
+  context.ignore_hint_ = parse_mode == FP_PARAMERIZE_AND_FILTER_HINT_MODE
+      || parse_mode == FP_NO_PARAMERIZE_AND_FILTER_HINT_MODE;
+  ObFastParserResult result;
   NG_TRACE(pc_fast_parse_start);
-  if (OB_FAIL(parser.parse(sql,
-                           parse_result,
-                           parse_mode,
-                           false))) {
+  if (length == 0) {
+    ret = OB_ERR_EMPTY_QUERY;
+  } else if (OB_FAIL(ObFastParser::parse(ObString(length, sql.ptr()), context, allocator, result))) {
+    if (ret == OB_ERR_PARSER_SYNTAX) ret = OB_ERR_PARSE_SQL;
+  } else {
+    no_param_sql = result.pc_key_.name_;
+    ret = raw_params.assign(result.raw_params_);
   }
   NG_TRACE(pc_fast_parse_end);
-  if (OB_SUCC(ret)) {
-    no_param_sql.assign(parse_result.no_param_sql_, parse_result.no_param_sql_len_);
-  }
-  if (OB_SUCC(ret)) {
-    ParamList *param = parse_result.param_nodes_;
-    for (int32_t i = 0;
-         OB_SUCC(ret) && i < parse_result.param_node_num_ && NULL != param;//When param = NULL, it indicates the end of the list
-         i ++) {
-      void *ptr = allocator.alloc(sizeof(ObPCParam));
-      if (OB_ISNULL(ptr)) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        SQL_PC_LOG(ERROR, "fail to alloc memory for pc param", K(ret), K(ptr));
-      } else {
-        ObPCParam *pc_param = new(ptr)ObPCParam();
-        pc_param->node_ = param->node_;
-        if (OB_FAIL(raw_params.push_back(pc_param))) {
-        } else {
-          param = param->next_;
-        }
-      }
-    } // for end
-  }
-
   return ret;
 }
 
@@ -2195,9 +2065,9 @@ int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObP
     if (idx >= raw_params.count()) {
       ret = OB_INVALID_ARGUMENT;
       LOG_WARN("invalid index", K(idx), K(raw_params.count()));
-    } else if (OB_ISNULL(raw_params.at(idx)) || OB_ISNULL(raw_params.at(idx)->node_)) {
+    } else if (OB_ISNULL(raw_params.at(idx)) || OB_ISNULL(raw_params.at(idx)->literal_)) {
       ret = OB_INVALID_ARGUMENT;
-    } else if (T_NULL == raw_params.at(idx)->node_->type_) {
+    } else if (peg::LiteralKind::Null == raw_params.at(idx)->literal_->kind) {
       param_info.null_literal_ = true;
     }
   }
@@ -2217,24 +2087,25 @@ int ObSqlParameterization::resolve_paramed_const(SelectItemTraverseCtx &ctx)
   if (idx >= ctx.raw_params_.count()) {
     ret = OB_INVALID_ARGUMENT;
     SQL_PC_LOG(WARN, "invalid argument", K(ret), K(idx), K(ctx.raw_params_.count()));
-  } else if (OB_ISNULL(ctx.raw_params_.at(idx)) || OB_ISNULL(ctx.raw_params_.at(idx)->node_)) {
+  } else if (OB_ISNULL(ctx.raw_params_.at(idx)) || OB_ISNULL(ctx.raw_params_.at(idx)->literal_)) {
     ret = OB_INVALID_ARGUMENT;
     SQL_PC_LOG(WARN, "invalid argument", K(ret));
   } else {
-    const ParseNode *param_node = ctx.raw_params_.at(idx)->node_;
-    int64_t tmp_len = std::min(ctx.buf_len_ - ctx.param_info_.name_len_, param_node->raw_sql_offset_ - ctx.expr_pos_);
+    const auto &parameter = *ctx.raw_params_.at(idx);
+    const LiteralToken &literal = *parameter.literal_;
+    int64_t tmp_len = std::min(ctx.buf_len_ - ctx.param_info_.name_len_, parameter.source_offset_ - ctx.expr_pos_);
     // In the case of select _binary 'abc';, special processing is required, because the value of
     // org_expr_name_ is the same as that of raw param in this scenario.
-    // So it is judged here that if org_expr_name_ is the same as param_node->str_value_ value
+    // If the original name equals the decoded literal text,
     // there is no need to copy it. paramed_field_name_ should be replaced with '?'
-    if (0 == ctx.org_expr_name_.case_compare(ObString(param_node->str_len_, param_node->str_value_))) {
+    if (0 == ctx.org_expr_name_.case_compare(literal.text)) {
       // do nothing
     } else if (tmp_len > 0 && ctx.org_expr_name_.length() > 0) {
       int32_t len = static_cast<int64_t>(tmp_len);
       MEMCPY(ctx.param_info_.paramed_field_name_ + ctx.param_info_.name_len_, ctx.org_expr_name_.ptr() + ctx.expr_pos_ - ctx.expr_start_pos_, len);
       ctx.param_info_.name_len_ += len;
     }
-    ctx.expr_pos_ = param_node->raw_sql_offset_ + param_node->text_len_;
+    ctx.expr_pos_ = parameter.source_offset_ + literal.source.length();
     if (OB_FAIL(ctx.param_info_.questions_pos_.push_back(ctx.param_info_.name_len_))) {
     } else if (OB_FAIL(ctx.param_info_.params_idx_.push_back(idx))) {
     } else {

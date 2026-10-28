@@ -26,6 +26,8 @@
 #include "sql/resolver/cmd/ob_load_data_stmt.h"
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/resolver/expr/numeric_literal.h"
+#include "sql/resolver/expr/literal_decode_options.h"
+#include "sql/parser/literal_token.h"
 #include "sql/code_generator/ob_column_index_provider.h"
 #include "query/resolver/ob_partition_type_policy.h"
 #include "sql/resolver/cmd/ob_load_data_stmt.h"
@@ -2032,6 +2034,241 @@ int ObResolverUtils::resolve_numeric_literal(const NumericLiteral &literal,
   return ret;
 }
 
+namespace {
+int decode_string_literal(const ObString &text, ObObjType value_type,
+                          ObCollationType connection_collation, const ObString *charset,
+                          bool binary_introducer, ObIAllocator &allocator, ObObjParam &val)
+{
+  int ret = OB_SUCCESS;
+  val.set_string(value_type, text);
+  if (text.length() > OB_MAX_LONGTEXT_LENGTH) {
+    ret = OB_ERR_INVALID_INPUT_ARGUMENT;
+  } else if (charset == nullptr) {
+    val.set_collation_type(connection_collation);
+  } else {
+    ObString charset_name = *charset;
+    ObObj result_val;
+    ret = ObResolverUtils::set_string_val_charset(allocator, val, charset_name, result_val,
+                                                 false, binary_introducer);
+  }
+  val.set_collation_level(CS_LEVEL_COERCIBLE);
+  if (OB_SUCC(ret)) {
+    val.set_length(static_cast<ObLength>(ObCharset::strlen_char(val.get_collation_type(),
+        val.get_string_ptr(), val.get_string_len())));
+    val.set_length_semantics(LS_CHAR);
+  }
+  val.set_param_meta(val.get_meta());
+  return ret;
+}
+
+int interpret_numeric_sign(NumericLiteral &literal, NumericSignMode mode, ObIAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  const ObString &text = literal.text;
+  if (mode == NumericSignMode::Source) {
+  } else if (mode == NumericSignMode::PositiveOperand) {
+    int64_t offset = 0;
+    while (offset < text.length() && isspace(text.ptr()[offset])) ++offset;
+    if (offset >= text.length() || text.ptr()[offset] != '-') {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      ++offset;
+      while (offset < text.length() && isspace(text.ptr()[offset])) ++offset;
+      literal.text.assign_ptr(text.ptr() + offset, text.length() - offset);
+      if (literal.kind != NumericKind::Decimal && static_cast<int64_t>(literal.integer) < 0) {
+        literal.integer = uint64_t(0) - literal.integer;
+      }
+    }
+  } else if (mode == NumericSignMode::CompactNegative) {
+    if (!text.empty() && text.ptr()[0] == '-') {
+      char *buffer = static_cast<char *>(allocator.alloc(text.length()));
+      if (buffer == nullptr) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        int64_t offset = 1;
+        while (offset < text.length() && isspace(text.ptr()[offset])) ++offset;
+        buffer[0] = '-';
+        const int32_t remaining = text.length() - offset;
+        if (remaining > 0) MEMCPY(buffer + 1, text.ptr() + offset, remaining);
+        literal.text.assign_ptr(buffer, remaining + 1);
+      }
+    }
+  }
+  return ret;
+}
+}
+
+int ObResolverUtils::resolve_literal(const LiteralToken &literal,
+                                     const LiteralDecodeOptions &options,
+                                     ObIAllocator &allocator, ObObjParam &val,
+                                     ObString &literal_prefix)
+{
+  int ret = OB_SUCCESS;
+  int16_t scale = SCALE_UNKNOWN_YET;
+  val.set_result_flag(NOT_NULL_FLAG);
+  switch (literal.kind) {
+    case peg::LiteralKind::Integer:
+    case peg::LiteralKind::Unsigned:
+    case peg::LiteralKind::Decimal:
+    case peg::LiteralKind::Float: {
+      NumericLiteral numeric{
+          literal.kind == peg::LiteralKind::Integer ? NumericKind::Integer
+          : literal.kind == peg::LiteralKind::Unsigned ? NumericKind::Unsigned
+          : literal.kind == peg::LiteralKind::Decimal ? NumericKind::Decimal : NumericKind::Double,
+          literal.integer, literal.text};
+      if (OB_FAIL(interpret_numeric_sign(numeric, options.numeric_sign, allocator))) {
+      } else {
+        ret = resolve_numeric_literal(numeric, options.numeric, allocator, val, literal_prefix);
+      }
+      break;
+    }
+    case peg::LiteralKind::String:
+    case peg::LiteralKind::NationalString: {
+      ObString national_charset = ObString::make_string("utf8mb4");
+      const ObString *charset = options.charset;
+      if (charset == nullptr && literal.kind == peg::LiteralKind::NationalString
+          && !literal.concatenated) {
+        charset = &national_charset;
+      }
+      ret = decode_string_literal(literal.text, ObVarcharType, options.connection_collation,
+                                  charset, false, allocator, val);
+      break;
+    }
+    case peg::LiteralKind::Binary: {
+      if (options.charset != nullptr) {
+        ret = decode_string_literal(literal.text, ObVarcharType, options.connection_collation,
+                                    options.charset, true, allocator, val);
+      } else if (literal.text.length() > OB_MAX_LONGTEXT_LENGTH) {
+        ret = OB_ERR_INVALID_INPUT_ARGUMENT;
+      } else {
+        ObString str_val;
+        str_val.assign_ptr(const_cast<char *>(literal.text.ptr()), static_cast<int32_t>(literal.text.length()));
+        val.set_hex_string(str_val);
+        val.set_collation_level(CS_LEVEL_COERCIBLE);
+        val.set_scale(0);
+        val.set_length(static_cast<int32_t>(literal.text.length()));
+        val.set_param_meta(val.get_meta());
+      }
+      break;
+    }
+    case peg::LiteralKind::Placeholder: {
+      if (!options.placeholder_as_int) {
+        val.set_unknown(literal.integer);
+      } else {
+        // Use a typed placeholder while parameterizing a syntax tree.
+        val.set_int(0);
+        val.set_scale(0);
+        val.set_precision(1);
+        val.set_length(1);
+      }
+      val.set_param_meta(val.get_meta());
+      break;
+    }
+    case peg::LiteralKind::Boolean: {
+      val.set_is_boolean(true);
+      val.set_bool(literal.integer == 1 ? true : false);
+      val.set_scale(0);
+      val.set_precision(1);
+      val.set_length(1);
+      val.set_param_meta(val.get_meta());
+      break;
+    }
+    case peg::LiteralKind::Date: {
+      ObString time_str(static_cast<int32_t>(literal.text.length()), literal.text.ptr());
+      ObDateSqlMode date_sql_mode;
+      ObCStringHelper helper;
+      if (FALSE_IT(date_sql_mode.init(options.sql_mode))) {
+      } else if (options.mysql_dates) {
+        ObMySQLDate mdate;
+        if (OB_FAIL(ObTimeConverter::str_to_mdate(time_str, mdate, date_sql_mode))) {
+          ret = OB_ERR_WRONG_VALUE;
+          LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "DATE", helper.convert(time_str));
+        } else {
+          val.set_mysql_date(mdate);
+        }
+      } else {
+        int32_t time_val = 0;
+        if (OB_FAIL(ObTimeConverter::str_to_date(time_str, time_val, date_sql_mode))) {
+          ret = OB_ERR_WRONG_VALUE;
+          LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "DATE", helper.convert(time_str));
+        } else {
+          val.set_date(time_val);
+        }
+      }
+      if (OB_SUCC(ret)) {
+        val.set_scale(0);
+        val.set_param_meta(val.get_meta());
+        literal_prefix = ObString::make_string(LITERAL_PREFIX_DATE);
+      }
+      break;
+    }
+    case peg::LiteralKind::Time: {
+      ObString time_str(static_cast<int32_t>(literal.text.length()), literal.text.ptr());
+      int64_t time_val = 0;
+      ObCStringHelper helper;
+      if (OB_FAIL(ObTimeConverter::str_to_time(time_str, time_val, &scale))) {
+        ret = OB_ERR_WRONG_VALUE;
+        LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "TIME", helper.convert(time_str));
+      } else {
+        val.set_time(time_val);
+        val.set_scale(scale);
+        val.set_param_meta(val.get_meta());
+        literal_prefix = ObString::make_string(MYSQL_LITERAL_PREFIX_TIME);
+      }
+      break;
+    }
+    case peg::LiteralKind::Timestamp: {
+      ObString time_str(static_cast<int32_t>(literal.text.length()), literal.text.ptr());
+      ObDateSqlMode date_sql_mode;
+      ObTimeConvertCtx cvrt_ctx(options.time_zone, false);
+      if (FALSE_IT(date_sql_mode.init(options.sql_mode))) {
+      } else if (FALSE_IT(date_sql_mode.allow_invalid_dates_ = false)) {
+      } else if (options.mysql_dates) {
+        ObMySQLDateTime mdt;
+        ObCStringHelper helper;
+        if( OB_FAIL(ObTimeConverter::str_to_mdatetime(time_str, cvrt_ctx, mdt, &scale, date_sql_mode))) {
+          ret = OB_ERR_WRONG_VALUE;
+          LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "DATETIME", helper.convert(time_str));
+        } else {
+          val.set_mysql_datetime(mdt);
+        }
+      } else {
+        int64_t time_val = 0;
+        ObCStringHelper helper;
+        if (OB_FAIL(ObTimeConverter::str_to_datetime(time_str, cvrt_ctx, time_val, &scale, date_sql_mode))) {
+          ret = OB_ERR_WRONG_VALUE;
+          LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "DATETIME", helper.convert(time_str));
+        } else {
+          val.set_datetime(time_val);
+        }
+      }
+      if (OB_SUCC(ret)) {
+        val.set_scale(scale);
+        val.set_param_meta(val.get_meta());
+        literal_prefix = ObString::make_string(LITERAL_PREFIX_TIMESTAMP);
+      }
+      break;
+    }
+    case peg::LiteralKind::Null: {
+      if (OB_UNLIKELY(share::COMPAT_MYSQL8 == options.compat_type && literal.integer == 1)) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "\\N in MySQL8");
+      } else {
+        val.set_null();
+        val.unset_result_flag(NOT_NULL_FLAG);
+        val.set_length(0);
+        val.set_param_meta(val.get_meta());
+      }
+      break;
+    }
+    default: {
+      ret = OB_ERR_UNEXPECTED;
+      break;
+    }
+  }
+  return ret;
+}
+
 int ObResolverUtils::resolve_const(const ParseNode *node,
                                    const stmt::StmtType stmt_type,
                                    ObIAllocator &allocator,
@@ -2058,92 +2295,28 @@ int ObResolverUtils::resolve_const(const ParseNode *node,
     LOG_WARN("parse node is invalid", K(node));
   } else {
     LOG_DEBUG("resolve item", "item_type", get_type_name(static_cast<int>(node->type_)), K(stmt_type));
-    int16_t scale = SCALE_UNKNOWN_YET;
     // const value contains NOT_NULL flag
     val.set_result_flag(NOT_NULL_FLAG);
     switch (node->type_) {
-    case T_HEX_STRING: {
-      if (node->str_len_ > OB_MAX_LONGTEXT_LENGTH) {
-        ret = OB_ERR_INVALID_INPUT_ARGUMENT;
-      } else {
-        ObString str_val;
-        str_val.assign_ptr(const_cast<char *>(node->str_value_), static_cast<int32_t>(node->str_len_));
-        val.set_hex_string(str_val);
-        val.set_collation_level(CS_LEVEL_COERCIBLE);
-        val.set_scale(0);
-        val.set_length(static_cast<int32_t>(node->str_len_));
-        val.set_param_meta(val.get_meta());
-      }
-      break;
-    }
     case T_VARCHAR:
     case T_NCHAR:
     case T_CHAR: {
-      ObString str_val;
-      ObObj result_val;
-      bool is_nchar = T_NVARCHAR2 == node->type_ || T_NCHAR == node->type_;
-      str_val.assign_ptr(const_cast<char *>(node->str_value_), static_cast<int32_t>(node->str_len_));
-      val.set_string(is_nchar ?
-                          ObVarcharType : static_cast<ObObjType>(node->type_), str_val);
-      // decide collation
-      /*
-        MySQL determines a literal's character set and collation in the following manner:
-
-        If both _X and COLLATE Y are specified, character set X and collation Y are used.
-
-        If _X is specified but COLLATE is not specified, character set X and its default collation
-        are used. To see the default collation for each character set, use the SHOW COLLATION statement.
-
-        Otherwise, the character set and collation given by the character_set_connection and
-        collation_connection system variables are used.
-        */
-      if (node->str_len_ > OB_MAX_LONGTEXT_LENGTH) {
-        ret = OB_ERR_INVALID_INPUT_ARGUMENT;
-      } else if (0 == node->num_child_) {
-        // for STRING without collation, e.g. show tables like STRING;
-        if (is_nchar) {
-          ObString charset(strlen("utf8mb4"), "utf8mb4");
-          if (OB_FAIL(set_string_val_charset(allocator, val, charset, result_val, false, false))) {
-          }
-        } else {
-          val.set_collation_type(connection_collation);
-        }
-      } else {
-        // STRING in SQL expression
-        ParseNode *charset_node = NULL;
-        if (NULL != node->children_[0] && T_CHARSET == node->children_[0]->type_) {
-          charset_node = node->children_[0];
-        }
-
-        if (NULL == charset_node) {
-          val.set_collation_type(connection_collation);
-        } else {
-          ObCharsetType charset_type = CHARSET_INVALID;
-          ObCollationType collation_type = CS_TYPE_INVALID;
-          bool is_hex_string = node->num_child_ == 1 ? true : false;
-          if (charset_node != NULL) {
-            ObString charset(charset_node->str_len_, charset_node->str_value_);
-            if (OB_FAIL(set_string_val_charset(allocator, val, charset, result_val, false, is_hex_string))) {
-            }
-          }
-        }
+      ObString text(static_cast<int32_t>(node->str_len_), node->str_value_);
+      ObString charset_name;
+      const ObString *charset = nullptr;
+      bool binary_introducer = false;
+      if (node->num_child_ == 0 && node->type_ == T_NCHAR) {
+        charset_name = ObString::make_string("utf8mb4");
+        charset = &charset_name;
+      } else if (node->num_child_ > 0 && node->children_[0] != nullptr
+                 && node->children_[0]->type_ == T_CHARSET) {
+        charset_name.assign_ptr(node->children_[0]->str_value_, node->children_[0]->str_len_);
+        charset = &charset_name;
+        binary_introducer = node->num_child_ == 1;
       }
-      val.set_collation_level(CS_LEVEL_COERCIBLE);
-      ObLengthSemantics length_semantics = LS_DEFAULT;
-      if (OB_SUCC(ret)) {
-        ObLength length = static_cast<ObLength>(ObCharset::strlen_char(val.get_collation_type(),
-                                                                        val.get_string_ptr(),
-                                                                        val.get_string_len()));
-        val.set_length(length);
-        val.set_length_semantics(LS_CHAR);
-      }
-      // Validate characters with the resolved collation; literals without an
-      // explicit charset introducer use the connection collation.
-      // To be consistent with error reporting, check whether the string is valid
-      // here; if invalid, report an error and do not perform other operations.
-      // check_well_formed_str's ret_error parameter is true, so the is_strict_mode
-      // parameter is ignored and passed as true here.
-      val.set_param_meta(val.get_meta());
+      ret = decode_string_literal(text, node->type_ == T_NCHAR ? ObVarcharType
+                                  : static_cast<ObObjType>(node->type_), connection_collation,
+                                  charset, binary_introducer, allocator, val);
       break;
     }
     case T_IEEE754_NAN: {
@@ -2185,28 +2358,6 @@ int ObResolverUtils::resolve_const(const ParseNode *node,
       }
       break;
     }
-    case T_QUESTIONMARK: {
-      if (!is_paramlize) {
-        val.set_unknown(node->value_);
-      } else {
-        // Use a typed placeholder while parameterizing a syntax tree.
-        val.set_int(0);
-        val.set_scale(0);
-        val.set_precision(1);
-        val.set_length(1);
-      }
-      val.set_param_meta(val.get_meta());
-      break;
-    }
-    case T_BOOL: {
-      val.set_is_boolean(true);
-      val.set_bool(node->value_ == 1 ? true : false);
-      val.set_scale(0);
-      val.set_precision(1);
-      val.set_length(1);
-      val.set_param_meta(val.get_meta());
-      break;
-    }
     case T_YEAR: {
       ObString time_str(static_cast<int32_t>(node->str_len_), node->str_value_);
       uint8_t time_val = 0;
@@ -2215,50 +2366,6 @@ int ObResolverUtils::resolve_const(const ParseNode *node,
         val.set_year(time_val);
         val.set_scale(0);
         val.set_param_meta(val.get_meta());
-      }
-      break;
-    }
-    case T_DATE: {
-      ObString time_str(static_cast<int32_t>(node->str_len_), node->str_value_);
-      ObDateSqlMode date_sql_mode;
-      ObCStringHelper helper;
-      if (FALSE_IT(date_sql_mode.init(sql_mode))) {
-      } else if (enable_mysql_compatible_dates) {
-        ObMySQLDate mdate;
-        if (OB_FAIL(ObTimeConverter::str_to_mdate(time_str, mdate, date_sql_mode))) {
-          ret = OB_ERR_WRONG_VALUE;
-          LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "DATE", helper.convert(time_str));
-        } else {
-          val.set_mysql_date(mdate);
-        }
-      } else {
-        int32_t time_val = 0;
-        if (OB_FAIL(ObTimeConverter::str_to_date(time_str, time_val, date_sql_mode))) {
-          ret = OB_ERR_WRONG_VALUE;
-          LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "DATE", helper.convert(time_str));
-        } else {
-          val.set_date(time_val);
-        }
-      }
-      if (OB_SUCC(ret)) {
-        val.set_scale(0);
-        val.set_param_meta(val.get_meta());
-        literal_prefix = ObString::make_string(LITERAL_PREFIX_DATE);
-      }
-      break;
-    }
-    case T_TIME: {
-      ObString time_str(static_cast<int32_t>(node->str_len_), node->str_value_);
-      int64_t time_val = 0;
-      ObCStringHelper helper;
-      if (OB_FAIL(ObTimeConverter::str_to_time(time_str, time_val, &scale))) {
-        ret = OB_ERR_WRONG_VALUE;
-        LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "TIME", helper.convert(time_str));
-      } else {
-        val.set_time(time_val);
-        val.set_scale(scale);
-        val.set_param_meta(val.get_meta());
-        literal_prefix = ObString::make_string(MYSQL_LITERAL_PREFIX_TIME);
       }
       break;
     }
@@ -2272,38 +2379,6 @@ int ObResolverUtils::resolve_const(const ParseNode *node,
         val.set_scale(OB_MAX_DATE_PRECISION);
         val.set_param_meta(val.get_meta());
         literal_prefix = ObString::make_string(LITERAL_PREFIX_DATE);
-      }
-      break;
-    }
-    case T_TIMESTAMP: {
-      ObString time_str(static_cast<int32_t>(node->str_len_), node->str_value_);
-      ObDateSqlMode date_sql_mode;
-      ObTimeConvertCtx cvrt_ctx(tz_info, false);
-      if (FALSE_IT(date_sql_mode.init(sql_mode))) {
-      } else if (FALSE_IT(date_sql_mode.allow_invalid_dates_ = false)) {
-      } else if (enable_mysql_compatible_dates) {
-        ObMySQLDateTime mdt;
-        ObCStringHelper helper;
-        if( OB_FAIL(ObTimeConverter::str_to_mdatetime(time_str, cvrt_ctx, mdt, &scale, date_sql_mode))) {
-          ret = OB_ERR_WRONG_VALUE;
-          LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "DATETIME", helper.convert(time_str));
-        } else {
-          val.set_mysql_datetime(mdt);
-        }
-      } else {
-        int64_t time_val = 0;
-        ObCStringHelper helper;
-        if (OB_FAIL(ObTimeConverter::str_to_datetime(time_str, cvrt_ctx, time_val, &scale, date_sql_mode))) {
-          ret = OB_ERR_WRONG_VALUE;
-          LOG_USER_ERROR(OB_ERR_WRONG_VALUE, "DATETIME", helper.convert(time_str));
-        } else {
-          val.set_datetime(time_val);
-        }
-      }
-      if (OB_SUCC(ret)) {
-        val.set_scale(scale);
-        val.set_param_meta(val.get_meta());
-        literal_prefix = ObString::make_string(LITERAL_PREFIX_TIMESTAMP);
       }
       break;
     }
@@ -2323,16 +2398,27 @@ int ObResolverUtils::resolve_const(const ParseNode *node,
       }
       break;
     };
+    case T_HEX_STRING:
+    case T_QUESTIONMARK:
+    case T_BOOL:
+    case T_DATE:
+    case T_TIME:
+    case T_TIMESTAMP:
     case T_NULL: {
-      if (OB_UNLIKELY(share::COMPAT_MYSQL8 == compat_type && node->value_ == 1)) {
-        ret = OB_NOT_SUPPORTED;
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "\\N in MySQL8");
-      } else {
-        val.set_null();
-        val.unset_result_flag(NOT_NULL_FLAG);
-        val.set_length(0);
-        val.set_param_meta(val.get_meta());
-      }
+      const peg::LiteralKind kind = node->type_ == T_HEX_STRING ? peg::LiteralKind::Binary
+          : node->type_ == T_QUESTIONMARK ? peg::LiteralKind::Placeholder
+          : node->type_ == T_BOOL ? peg::LiteralKind::Boolean
+          : node->type_ == T_DATE ? peg::LiteralKind::Date
+          : node->type_ == T_TIME ? peg::LiteralKind::Time
+          : node->type_ == T_TIMESTAMP ? peg::LiteralKind::Timestamp : peg::LiteralKind::Null;
+      const LiteralToken literal{kind, static_cast<uint64_t>(node->value_),
+          ObString(static_cast<int32_t>(node->str_len_), node->str_value_),
+          ObString(static_cast<int32_t>(node->text_len_), node->raw_text_), false, 0};
+      const LiteralDecodeOptions options{{stmt_type, enable_decimal_int_type, is_from_pl,
+          fmt_int_or_ch_decint, min_const_integer_precision}, connection_collation, tz_info,
+          sql_mode, compat_type, enable_mysql_compatible_dates, is_paramlize, nullptr,
+          NumericSignMode::Source};
+      ret = resolve_literal(literal, options, allocator, val, literal_prefix);
       break;
     }
     default: {
@@ -6743,74 +6829,6 @@ int ObResolverUtils::resolve_file_format_string_value(const ParseNode *node,
   return ret;
 }
 
-int ObResolverUtils::rm_space_for_neg_num(ParseNode *param_node, ObIAllocator &allocator)
-{
-  int ret = OB_SUCCESS;
-  char *buf = NULL;
-  int64_t pos = 0;
-  int64_t idx = 0;
-  if (param_node->str_len_ <= 0) {
-    // do nothing
-  } else if ('-' != param_node->str_value_[idx]) {
-     // 'select - 1.2 from dual' and 'select 1.2 from dual' will hit the same plan, the key is
-     // select ? from dual, so '- 1.2' and '1.2' will all go here, if '-' is not presented,
-     // do nothing
-    LOG_TRACE("rm space for neg num", K(idx), K(ObString(param_node->str_len_, param_node->str_value_)));
-  } else if (OB_ISNULL(buf = (char *)allocator.alloc(param_node->str_len_))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else {
-    buf[pos++] =  '-';
-    idx += 1;
-    for (; idx < param_node->str_len_ && isspace(param_node->str_value_[idx]); idx++);
-    int32_t len = (int32_t)(param_node->str_len_ - idx);
-    if (len > 0) {
-      MEMCPY(buf + pos, param_node->str_value_ + idx, len);
-    }
-    pos += len;
-    param_node->str_value_ = buf;
-    param_node->str_len_ = pos;
-    LOG_TRACE("rm space for neg num", K(idx), K(ObString(param_node->str_len_, param_node->str_value_)));
-  }
-  return ret;
-}
-
-int ObResolverUtils::handle_varchar_charset(ObCharsetType charset_type,
-                                            ObIAllocator &allocator,
-                                            ParseNode *&node)
-{
-  int ret = OB_SUCCESS;
-  if ((T_HEX_STRING == node->type_ || T_VARCHAR == node->type_)
-      && CHARSET_INVALID != charset_type) {
-    ParseNode *charset_node = new_node(&allocator, T_CHARSET, 0);
-    ParseNode *varchar_node = NULL;
-    if (T_HEX_STRING == node->type_) {
-      varchar_node = new_non_terminal_node(&allocator, T_VARCHAR, 1, charset_node);
-    } else if (T_VARCHAR == node->type_) {
-      varchar_node = new_non_terminal_node(&allocator, T_VARCHAR, 2, charset_node, node);
-    }
-
-    if (OB_ISNULL(charset_node) || OB_ISNULL(varchar_node)) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
-    } else {
-      const char *name = ObCharset::charset_name(charset_type);
-      charset_node->str_value_ = parse_strdup(name, &allocator, &(charset_node->str_len_));
-      if (NULL == charset_node->str_value_) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-      } else {
-        varchar_node->str_value_ = node->str_value_;
-        varchar_node->str_len_ = node->str_len_;
-        varchar_node->raw_text_ = node->raw_text_;
-        varchar_node->text_len_ = node->text_len_;
-        varchar_node->type_ = T_VARCHAR;
-
-        node = varchar_node;
-      }
-    }
-  }
-
-  return ret;
-}
-
 int ObResolverUtils::resolver_param(ObPlanCacheCtx &pc_ctx,
                                     ObSQLSessionInfo &session,
                                     const ParamStore &phy_ctx_params,
@@ -6828,68 +6846,47 @@ int ObResolverUtils::resolver_param(ObPlanCacheCtx &pc_ctx,
                                     const bool enable_decimal_int)
 {
   int ret = OB_SUCCESS;
-  ParseNode *raw_param = NULL;
+  const LiteralToken *literal = nullptr;
   ObString literal_prefix;
-  const bool is_paramlize = false;
-  int64_t server_collation = CS_TYPE_INVALID;
-  share::ObCompatType compat_type = share::COMPAT_MYSQL57;
   obj_param.reset();
-  if (OB_ISNULL(pc_param) || OB_ISNULL(raw_param = pc_param->node_)) {
+  if (OB_ISNULL(pc_param) || OB_ISNULL(literal = pc_param->literal_)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (not_param_index.has_member(param_idx)) {
-    /* do nothing */
     is_param = false;
-    SQL_PC_LOG(TRACE, "not_param", K(param_idx), K(raw_param->type_), K(raw_param->value_),
-                      "str_value", ObString(raw_param->str_len_, raw_param->str_value_));
+    SQL_PC_LOG(TRACE, "not_param", K(param_idx), K(literal->text));
   } else {
-          // select -  1.2 from dual
-          // "-  1.2" will be treated as a const node with neg sign
-          // however, ObNumber::from("-  1.2") will throw a error, for there are spaces between neg sign and num
-          // so remove spaces before resolve_const is called
-    if (neg_param_index.has_member(param_idx) &&
-        OB_FAIL(rm_space_for_neg_num(raw_param, pc_ctx.allocator_))) {
-      SQL_PC_LOG(WARN, "fail to remove spaces for neg node", K(ret));
-    } else if (OB_FAIL(handle_varchar_charset(param_charset_type, pc_ctx.allocator_, raw_param))) {
-    } else if (T_QUESTIONMARK == raw_param->type_) {
-      int64_t idx = raw_param->value_;
+    ObString charset_name;
+    const ObString *charset = nullptr;
+    if ((literal->kind == peg::LiteralKind::Binary || literal->kind == peg::LiteralKind::String)
+        && param_charset_type != CHARSET_INVALID) {
+      charset_name = ObString::make_string(ObCharset::charset_name(param_charset_type));
+      charset = &charset_name;
+    }
+    if (literal->kind == peg::LiteralKind::Placeholder) {
+      const int64_t idx = static_cast<int64_t>(literal->integer);
       CK (idx >= 0 && idx < phy_ctx_params.count());
       OX (obj_param.set_is_boolean(phy_ctx_params.at(idx).is_boolean()));
     }
+    const LiteralDecodeOptions options{{stmt_type, enable_decimal_int, false,
+        fmt_int_or_ch_decint_idx.has_member(param_idx), session.get_min_const_integer_precision()},
+        static_cast<ObCollationType>(session.get_local_collation_connection()),
+        session.get_timezone_info(), session.get_sql_mode(), share::COMPAT_MYSQL57,
+        enable_mysql_compatible_dates, false, charset,
+        neg_param_index.has_member(param_idx) ? NumericSignMode::CompactNegative : NumericSignMode::Source};
     if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(ObResolverUtils::resolve_const(raw_param, stmt_type, pc_ctx.allocator_,
-                       static_cast<ObCollationType>(session.get_local_collation_connection()),
-                       session.get_nls_collation_nation(), session.get_timezone_info(),
-                       obj_param, is_paramlize, literal_prefix,
-                       session.get_actual_length_semantics(),
-                       static_cast<ObCollationType>(server_collation), NULL,
-                       session.get_sql_mode(),
-                       enable_decimal_int,
-                       compat_type,
-                       enable_mysql_compatible_dates,
-                       session.get_min_const_integer_precision(),
-                       false, /* is_from_pl */
-                       fmt_int_or_ch_decint_idx.has_member(param_idx)))) {
-    } else if (FALSE_IT(obj_param.set_raw_text_info(static_cast<int32_t>(raw_param->raw_sql_offset_),
-                                                    static_cast<int32_t>(raw_param->text_len_)))) {
-      /* nothing */
-    } else if (ob_is_numeric_type(obj_param.get_type())) {
-      // -0 is also counted as negative
-      bool is_neg = false, is_zero = false;
-      if (must_be_positive_idx.has_member(param_idx)) {
-        if (obj_param.is_boolean()) {
-          // boolean will skip this check
-        } else {
-          if (obj_param.is_integer_type() &&
-              (obj_param.get_int() < 0 || (0 == obj_param.get_int() && '-' == raw_param->str_value_[0]))) {
-            ret = OB_ERR_UNEXPECTED;
-            pc_ctx.should_add_plan_ = false;
-          }
-        }
-      }
+    } else if (OB_FAIL(resolve_literal(*literal, options, pc_ctx.allocator_, obj_param, literal_prefix))) {
+    } else if (FALSE_IT(obj_param.set_raw_text_info(static_cast<int32_t>(pc_param->source_offset_),
+                                                   literal->source.length()))) {
+    } else if (ob_is_numeric_type(obj_param.get_type()) && must_be_positive_idx.has_member(param_idx)
+               && !obj_param.is_boolean() && obj_param.is_integer_type()
+               && (obj_param.get_int() < 0
+                   || (obj_param.get_int() == 0 && !literal->text.empty() && literal->text.ptr()[0] == '-'))) {
+      // A lexical -0 must not reuse a nonnegative LIMIT plan.
+      ret = OB_ERR_UNEXPECTED;
+      pc_ctx.should_add_plan_ = false;
     }
     is_param = true;
-    LOG_DEBUG("is_param", K(param_idx), K(obj_param), K(raw_param->type_), K(raw_param->value_),
-              "str_value", ObString(raw_param->str_len_, raw_param->str_value_));
+    LOG_DEBUG("is_param", K(param_idx), K(obj_param), K(literal->text));
   }
   return ret;
 }

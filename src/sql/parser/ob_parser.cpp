@@ -622,13 +622,9 @@ int ObParser::parse_sql(const ObString &stmt,
   context.parameterize_ = parse_result.need_parameterize_;
   context.ignore_hint_ = parse_result.is_ignore_hint_;
   ObFastParserResult fast;
-  int64_t parameters = 0;
-  int64_t sql_length = 0;
-  int ret = ObFastParser::parse(stmt, context, *allocator_, parse_result.no_param_sql_,
-                              sql_length, parse_result.param_nodes_, parameters,
-                              fast, fast.values_token_pos_);
-  parse_result.no_param_sql_len_ = sql_length;
-  parse_result.param_node_num_ = parameters;
+  int ret = ObFastParser::parse(stmt, context, *allocator_, fast);
+  parse_result.no_param_sql_ = fast.pc_key_.name_.ptr();
+  parse_result.no_param_sql_len_ = fast.pc_key_.name_.length();
   parse_result.question_mark_ctx_ = fast.question_mark_ctx_;
   parse_result.input_sql_ = stmt.ptr();
   parse_result.input_sql_len_ = stmt.length();
