@@ -26,6 +26,7 @@ pub(crate) struct Name {
 
 #[derive(Default)]
 pub(crate) struct Select {
+    pub with: Option<Node>,
     pub parenthesized: bool,
     pub set: Option<Node>,
     pub options: Vec<Node>,
@@ -46,6 +47,37 @@ pub(crate) struct Select {
 }
 
 impl Select {
+    pub fn into_cte(
+        mut self,
+        name: Name,
+        columns: Vec<Name>,
+        recursive: bool,
+    ) -> Result<Node, &'static str> {
+        if recursive {
+            if let Some(set) = &mut self.set {
+                if set.children.len() > 2 {
+                    let right = set.children.pop().unwrap();
+                    let left = Node::select(Self {
+                        set: Some(Node::new(set.kind, std::mem::take(&mut set.children))),
+                        ..Self::default()
+                    })?;
+                    set.children = vec![left, right];
+                }
+            }
+        }
+        Ok(Node::new(
+            Kind::CommonTable,
+            vec![
+                Node::name(name),
+                Node::list(
+                    Kind::ColumnList,
+                    columns.into_iter().map(Node::name).collect(),
+                ),
+                Node::select(self)?,
+            ],
+        ))
+    }
+
     pub fn combine(self, kind: Kind, right: Self) -> Result<Self, &'static str> {
         let right = Node::select(right)?;
         let flatten = matches!(kind, Kind::Union | Kind::UnionAll)
@@ -725,6 +757,7 @@ impl Node {
                 Self::optional(query.into_end),
                 Self::optional(query.approximate),
                 Self::optional(query.vector_parameters),
+                Self::optional(query.with),
             ],
         )
         .expression(0, 0)

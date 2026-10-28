@@ -331,7 +331,7 @@ peg::parser! {
                 }
             / charset_literal() / temporal_literal() / binary_literal() / number() / string_expression() / bool_null() / parameter()
             / depth(level) start:position!() !(['x'|'X'] "'" hex_digit()* "'") parts:expression_name() tail:("." _ "*" end:position!() _ { (None, end) }
-                / enabled(parts.len()!=1 || parts[0].quoted || !["row","trim","position","weight_string","array","map","array_agg",
+                / enabled(parts.len()!=1 || parts[0].quoted || !["row","trim","position","weight_string","char","character","array","map","array_agg",
                     "array_map","array_filter","array_first","array_sortby","vector_distance","vector_similarity"].iter().any(|name| parts[0].text.eq_ignore_ascii_case(name)))
                     "(" _ modifier:((kw("distinct") / kw("unique")) { Kind::Distinct } / kw("all") { Kind::All })? args:expr_list(level+1)? ")" close:position!() _
                     window:(kw("over") value:window(level+1) { value })?
@@ -389,6 +389,9 @@ peg::parser! {
             }
         rule string_function(level: usize) -> Node = start:position!() function:(
                 kw("position") "(" _ needle:bit_or(level) kw("in") haystack:expr(level) { ("position",vec![needle,haystack]) }
+                / (kw("char") / kw("character")) "(" _ args:expr_list(level) charset:(kw("using") value:charset_name() { value })? {
+                    let mut args=args;args.push(charset.unwrap_or_else(|| Node::new(Kind::CharsetName,vec![]).text("binary".into())));("char",args)
+                }
                 / kw("trim") "(" _ args:trim_arguments(level) { ("trim",args) }
                 / kw("weight_string") "(" _ value:expr(level)
                     args:("," _ length:type_size() "," _ weights:type_size() "," _ flags:type_size() "," _ binary:type_size() { vec![length,weights,flags,binary] }
@@ -436,13 +439,23 @@ peg::parser! {
                 {? ops.into_iter().rev().try_fold(value, |value, (start, op)| {
                     Node::unary(op, value, start)
                 }) }
-        rule concat(level: usize) -> Node = left:unary(level) rest:(enabled(mode.pipes_as_concat) "||" _ right:unary(level) { ("concat".into(), right) })* {? chain(left, rest) }
-        rule bit_xor(level: usize) -> Node = left:concat(level) rest:("^" _ right:concat(level) { ("^".into(), right) })* {? chain(left, rest) }
-        rule product(level: usize) -> Node = left:bit_xor(level) rest:(op:(s:$("*" / "/" / "%") _ { s } / kw("div") { "div" } / kw("mod") { "mod" }) right:bit_xor(level) { (op.into(), right) })* {? chain(left, rest) }
-        rule sum(level: usize) -> Node = left:product(level) rest:(op:$("+" / "-") _ right:product(level) { (op.into(), right) })* {? chain(left, rest) }
-        rule shift(level: usize) -> Node = left:sum(level) rest:(op:$("<<" / ">>") _ right:sum(level) { (op.into(), right) })* {? chain(left, rest) }
-        rule bit_and(level: usize) -> Node = left:shift(level) rest:("&" !"&" _ right:shift(level) { ("&".into(), right) })* {? chain(left, rest) }
-        rule bit_or(level: usize) -> Node = left:bit_and(level) rest:("|" !"|" _ right:bit_and(level) { ("|".into(), right) })* {? chain(left, rest) }
+        rule bit_or(level: usize) -> Node = value:precedence!{
+            left:(@) "|" !"|" _ right:@ { Node::binary("|".into(),left?,right?) }
+            --
+            left:(@) "&" !"&" _ right:@ { Node::binary("&".into(),left?,right?) }
+            --
+            left:(@) op:$("<<" / ">>") _ right:@ { Node::binary(op.into(),left?,right?) }
+            --
+            left:(@) op:$("+" / "-") _ right:@ { Node::binary(op.into(),left?,right?) }
+            --
+            left:(@) op:(s:$("*" / "/" / "%") _ { s } / kw("div") { "div" } / kw("mod") { "mod" }) right:@ { Node::binary(op.into(),left?,right?) }
+            --
+            left:(@) "^" _ right:@ { Node::binary("^".into(),left?,right?) }
+            --
+            left:(@) enabled(mode.pipes_as_concat) "||" _ right:@ { Node::binary("concat".into(),left?,right?) }
+            --
+            value:unary(level) { Ok(value) }
+        } {? value }
         rule tail(level: usize) -> Tail
             = op:$("<=>" / "<=" / ">=" / "<>" / "!=" / "=" / "<" / ">") _
                 right:(enabled(op!="<=>") start:position!() kind:(kw("all") { Kind::All } / (kw("any") / kw("some")) { Kind::Any })
@@ -514,16 +527,17 @@ peg::parser! {
             Node::new(Kind::TableCollection,vec![value,alias.map(Node::name).unwrap_or_else(Node::missing)])
         }
         rule relation(level: usize) -> Node = json_table(level) / table_collection(level) / lateral:kw("lateral")? source:("(" _ query:select(level+1) ")" _ { query }
-            / name:name() {? Node::relation(name) }) partition:use_partition()? snapshot:snapshot(level)?
+            / name:name() {? Node::relation(name) }) partition:use_partition()? sample:sample()? snapshot:snapshot(level)?
             alias:table_alias()?
             columns:("(" _ names:(ident() ++ ("," _)) ")" _ { names })? indexes:table_index_hint()* {?
                 if (lateral.is_some() || columns.is_some()) && source.kind!=Kind::Select { return Err("derived table"); }
-                if (partition.is_some() || !indexes.is_empty()) && source.kind==Kind::Select { return Err("base table"); }
+                if (partition.is_some() || sample.is_some() || !indexes.is_empty()) && source.kind==Kind::Select { return Err("base table"); }
                 let mut table=Node::table(source,alias)?;
-                if partition.is_some() || !indexes.is_empty() {
+                if partition.is_some() || sample.is_some() || !indexes.is_empty() {
                     let offset=usize::from(table.kind==Kind::Alias);
                     table.children[1+offset]=Node::list(Kind::TableIndexHints,indexes);
                     table.children[2+offset]=Node::optional(partition);
+                    table.children[3+offset]=Node::optional(sample);
                 }
                 if let Some(snapshot)=snapshot {
                     table.children.resize_with(if table.kind==Kind::Alias { 5 } else { 4 },Node::missing);
@@ -540,6 +554,15 @@ peg::parser! {
         rule snapshot(level: usize) -> Node = kw("as") kw("of") kw("snapshot") value:expr(level) {
             Node::new(Kind::Snapshot,vec![value,Node::new(Kind::Ident,vec![])])
         }
+        rule sample_number(integer: bool) -> Node = value:number() {?
+            let kind=match value.kind { Kind::Int => Kind::SampleInt,Kind::Number | Kind::Double if !integer => Kind::SampleDecimal,_ => return Err("sample value") };
+            Ok(Node { kind,..value })
+        }
+        rule sample() -> Node = kw("sample") method:(kw("block") { 2 } / kw("hybrid") { 3 })?
+            scope:(kw("all") { Kind::All } / kw("base") { Kind::SampleBase } / kw("incr") { Kind::SampleIncremental })?
+            "(" _ percent:sample_number(false) ")" _ seed:(kw("seed") "(" _ value:sample_number(true) ")" _ { value })? {
+                Node::new(Kind::Sample,vec![Node::new(Kind::DefaultInt,vec![]).value(method.unwrap_or(1)),percent,Node::optional(seed),Node::new(scope.unwrap_or(Kind::All),vec![])])
+            }
         rule use_partition() -> Node = kw("partition") "(" _ names:(ident() ++ ("," _)) ")" _ {
             Node::new(Kind::UsePartition,vec![Node::new(Kind::Names,names.into_iter().map(Node::name).collect())])
         }
@@ -813,17 +836,26 @@ peg::parser! {
             options.into_iter().filter(|value| value.kind!=Kind::Missing).collect()
         }
         rule select(level: usize) -> Node = value:query_expression(level) {? Node::select(value) }
+        rule with_clause(level: usize) -> Node = kw("with") recursive:kw("recursive")?
+            tables:(common_table(level,recursive.is_some()) ++ ("," _)) {
+                Node::new(Kind::WithClause,tables).value(u64::from(recursive.is_some()))
+            }
+        rule common_table(level: usize,recursive: bool) -> Node = name:ident()
+            columns:("(" _ names:(ident() ++ ("," _)) ")" _ { names })? kw("as") "(" _ query:query_expression(level+1) ")" _ {?
+                query.into_cte(name,columns.unwrap_or_default(),recursive)
+            }
         rule set_operator() -> Kind
             = kw("union") modifier:(kw("all") { Kind::UnionAll } / (kw("distinct") / kw("unique")) { Kind::Union })? { modifier.unwrap_or(Kind::Union) }
             / kw("intersect") { Kind::Intersect }
             / (kw("except") / kw("minus")) { Kind::Except }
-        rule query_expression(level: usize) -> Select = depth(level) first:query_term(level)
+        rule query_expression(level: usize) -> Select = depth(level) with:with_clause(level)? first:query_term(level)
             rest:((kind:set_operator() right:query_term(level) { (kind,right) })*)
             order:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })?
             approximate:((kw("approx") / kw("approximate")) { Node::new(Kind::Approximate,vec![]) })?
             limit:limit()? parameters:(enabled(approximate.is_some()) value:vector_parameters() { value })? lock:lock()? into:select_into()? {?
                 let value=rest.into_iter().try_fold(first,|left,(kind,right)| left.combine(kind,right))?;
-                value.finish(order.unwrap_or_default(),limit,lock,into,approximate,parameters)
+                let mut value=value.finish(order.unwrap_or_default(),limit,lock,into,approximate,parameters)?;
+                value.with=with.or(value.with);Ok(value)
             }
         rule vector_parameter_value() -> Node
             = value:number() {? if value.kind==Kind::Double { Err("decimal vector query parameter") } else { Ok(Node { kind:Kind::Number,..value }) } }
@@ -884,12 +916,12 @@ peg::parser! {
                     Ok(Node::insert(replace, ignore.is_some(), table, columns.unwrap_or_default(), values, duplicate.unwrap_or_default(), hints.unwrap_or_default()))
                 }
             }
-        rule update() -> Node = kw("update") hints:hints()? kw("low_priority")? ignore:kw("ignore")?
+        rule update() -> Node = with:with_clause(0)? kw("update") hints:hints()? kw("low_priority")? ignore:kw("ignore")?
             tables:(table(0) ++ ("," _)) kw("set") values:assignments()
             filter:(kw("where") value:expr(0) { value })?
             order:(kw("order") kw("by") values:(order_item(0) ++ ("," _)) { values })?
             limit:limit()? {
-                Node::new(Kind::Update, vec![Node::missing(), Node::new(Kind::TableReferences, tables),
+                Node::new(Kind::Update, vec![Node::optional(with), Node::new(Kind::TableReferences, tables),
                     Node::new(Kind::AssignList, values), Node::where_clause(filter), Node::order_clause(order.unwrap_or_default()),
                     Node::optional(limit), Node::missing(), Node::list(Kind::Hints,hints.unwrap_or_default()),
                     if ignore.is_some() { Node::new(Kind::Ignore, vec![]) } else { Node::missing() }, Node::missing(), Node::missing()])
@@ -903,11 +935,11 @@ peg::parser! {
                 Node::new(Kind::DeleteTables,vec![Node::new(Kind::TableReferences,targets),Node::new(Kind::TableReferences,tables)])
             }
             / kw("from") table:relation(0) { Node::new(Kind::DeleteTables,vec![Node::missing(),Node::new(Kind::TableReferences,vec![table])]) }
-        rule delete() -> Node = kw("delete") hints:hints()? ignore:kw("ignore")? (kw("low_priority") / kw("quick"))*
+        rule delete() -> Node = with:with_clause(0)? kw("delete") hints:hints()? ignore:kw("ignore")? (kw("low_priority") / kw("quick"))*
             tables:delete_tables() filter:(kw("where") value:expr(0) { value })?
             order:(enabled(tables.children[0].kind==Kind::Missing) kw("order") kw("by") values:(order_item(0) ++ ("," _)) { values })?
             limit:(enabled(tables.children[0].kind==Kind::Missing) value:limit() { value })? {
-                Node::new(Kind::Delete, vec![Node::missing(), tables, Node::where_clause(filter),
+                Node::new(Kind::Delete, vec![Node::optional(with), tables, Node::where_clause(filter),
                     Node::order_clause(order.unwrap_or_default()), Node::optional(limit),
                     Node::missing(), Node::list(Kind::Hints,hints.unwrap_or_default()), Node::missing(), Node::missing(),
                     if ignore.is_some() { Node::new(Kind::Ignore,vec![]) } else { Node::missing() }])
@@ -1296,6 +1328,8 @@ peg::parser! {
         }
         rule show_body() -> Node
             = kw("grants") user:(kw("for") value:(kw("current_user") ("(" _ ")" _)? { Node::missing() } / account()) { value })? { Node::new(Kind::ShowGrants,vec![Node::optional(user),Node::missing()]) }
+            / kw("parameters") condition:show_condition()? { Node::new(Kind::ShowParameters,vec![Node::optional(condition),Node::missing()]) }
+            / full:kw("full")? kw("processlist") { Node::new(Kind::ShowProcesslist,vec![Node::new(Kind::HiddenInt,vec![]).value(u64::from(full.is_some()))]) }
             / kind:(charset_keyword() { Kind::ShowCharset } / kw("collation") { Kind::ShowCollation })
                 condition:show_condition()? { Node::new(kind,vec![Node::optional(condition)]) }
             / extended:kw("extended")? (kw("index") / kw("indexes") / kw("keys")) (kw("from") / kw("in")) table:name() database:show_database()? filter:(kw("where") value:expr(0) { value })? {?
@@ -1566,8 +1600,11 @@ peg::parser! {
                 Node::new(Kind::VariableValue,vec![variable,value]).value(2)
             }
         ) ++ ("," _)) { Node::new(Kind::VariableSet,assignments) }
+        rule call_argument() -> Node = start:position!() first:expr(0) second:("=>" _ value:expr(0) { value })? end:position!() {?
+            match second { Some(value) => Node::new(Kind::PlNamedArgument,vec![first,value]).expression(start,end),None => Ok(first) }
+        }
         rule pl_call() -> Node = start:position!() kw("call") names:name()
-            arguments:("(" _ values:(expr(0) ** ("," _)) ")" _ { values })? end:position!() {?
+            arguments:("(" _ values:(call_argument() ** ("," _)) ")" _ { values })? end:position!() {?
                 if names.len()>3 { return Err("routine name has at most three parts"); }
                 let mut parts:Vec<_>=(names.len()..3).map(|_| Node::missing()).collect();parts.extend(names.into_iter().map(Node::name));
                 Ok(Node::new(Kind::PlCall,vec![Node::new(Kind::PlCallName,parts),Node::list(Kind::PlCallArguments,arguments.unwrap_or_default())]).at(start,end))

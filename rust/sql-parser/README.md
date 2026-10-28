@@ -47,10 +47,12 @@ SHOW CHARSET／COLLATION、SET TRANSACTION 和 MAJOR／MINOR FREEZE。
 支持外键声明、增删约束和引用动作，以及 STRING、TINY／MEDIUM 文本和二进制大对象类型。
 支持数组、向量、MAP 和稀疏向量类型，数组字面量、lambda、集合聚合与向量距离函数；
 支持 APPROX LIMIT 和查询参数、函数索引、括号 JOIN，以及标准差、方差和位聚合。
+支持 WITH／WITH RECURSIVE、CALL 命名实参、CHAR／CHARACTER、SHOW PARAMETERS／PROCESSLIST，
+以及 SAMPLE 的行／块／混合采样、数据范围和 SEED。
 系统视图及统计采样支持 CAST 的 IGNORE 和 CHARSET 选项；未知优化器 hint 按原有规则忽略。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 
-其他聚合函数和特殊函数语法、CTE、其他窗口函数、其他 DDL、完整 hint 语法、
+其他聚合函数和特殊函数语法、其他窗口函数、其他 DDL、完整 hint 语法、
 其余 PL 语法尚未迁移。系统包和 mysqltest 初始化已通过，全量用例尚未通过；
 当前不是默认解析器的全量替换。
 

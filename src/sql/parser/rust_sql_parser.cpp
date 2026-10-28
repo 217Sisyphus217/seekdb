@@ -85,6 +85,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::TopFreHist: return T_FUN_TOP_FRE_HIST;
     case Kind::HybridHist: return T_FUN_HYBRID_HIST;
     case Kind::Select: return T_SELECT;
+    case Kind::WithClause: return T_WITH_CLAUSE_LIST;
+    case Kind::CommonTable: return T_WITH_CLAUSE_AS;
     case Kind::SelectOptions: return T_QEURY_EXPRESSION_LIST;
     case Kind::FoundRows: return T_FOUND_ROWS;
     case Kind::StraightJoin: return T_STRAIGHT_JOIN;
@@ -146,6 +148,11 @@ ObItemType node_type(const peg::Node &node)
     case Kind::FromList: return T_FROM_LIST;
     case Kind::Relation: return T_RELATION_FACTOR;
     case Kind::Table: return T_ORG;
+    case Kind::Sample: return T_SAMPLE_SCAN;
+    case Kind::SampleInt: return T_SFU_INT;
+    case Kind::SampleDecimal: return T_SFU_DECIMAL;
+    case Kind::SampleBase: return T_BASE;
+    case Kind::SampleIncremental: return T_INCR;
     case Kind::Ident: return T_IDENT;
     case Kind::Column: return T_COLUMN_REF;
     case Kind::Star: return T_STAR;
@@ -362,6 +369,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::ShowTables: return T_SHOW_TABLES;
     case Kind::ShowColumns: return T_SHOW_COLUMNS;
     case Kind::ShowVariables: return T_SHOW_VARIABLES;
+    case Kind::ShowParameters: return T_SHOW_PARAMETERS;
+    case Kind::ShowProcesslist: return T_SHOW_PROCESSLIST;
     case Kind::ShowCreateTable: return T_SHOW_CREATE_TABLE;
     case Kind::ShowCreateDatabase: return T_SHOW_CREATE_DATABASE;
     case Kind::ShowWarnings: return T_SHOW_WARNINGS;
@@ -602,6 +611,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::PlCall: return T_SP_CALL_STMT;
     case Kind::PlCallName: return T_SP_ACCESS_NAME;
     case Kind::PlCallArguments: return T_SP_CPARAM_LIST;
+    case Kind::PlNamedArgument: return T_SP_CPARAM;
     case Kind::Diagnostics: return T_DIAGNOSTICS;
     case Kind::PlSignal: return T_SP_SIGNAL;
     case Kind::PlResignal: return T_SP_RESIGNAL;
@@ -800,7 +810,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
                              PARSE_SELECT_WHERE, PARSE_SELECT_DYNAMIC_GROUP, PARSE_SELECT_DYNAMIC_HAVING,
                              PARSE_SELECT_NAMED_WINDOWS, PARSE_SELECT_SET, PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT,
                              PARSE_SELECT_FOR_UPD, PARSE_SELECT_HINTS, PARSE_SELECT_INTO_EXTRA,
-                             PARSE_SELECT_APPROX, PARSE_SELECT_VECTOR_INDEX_PARAMS};
+                             PARSE_SELECT_APPROX, PARSE_SELECT_VECTOR_INDEX_PARAMS, PARSE_SELECT_WITH};
   for (size_t child = 0; child < source.children.size(); ++child) {
     const size_t slot = type == T_SELECT ? select_slots[child] : child;
     const int ret = build_node(sql, expression_sql, source.children[child], parameters, pool, node->children_[slot], pl);
