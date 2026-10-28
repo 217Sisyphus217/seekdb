@@ -1007,7 +1007,8 @@ int ObParser::parse_(const ObString &query,
               "connection charset", ObCharset::charset_name(charsets4parser_.string_collation_));
   }
 #ifdef ENABLE_RUST_PARSER
-  if (OB_SUCC(ret) && (parse_mode == STD_MODE || parse_mode == DYNAMIC_SQL_MODE || parse_mode == TRIGGER_MODE)) {
+  if (OB_SUCC(ret) && (parse_mode == STD_MODE || parse_mode == DYNAMIC_SQL_MODE
+      || parse_mode == TRIGGER_MODE || parse_mode == METHOD_OPT_MODE)) {
     return parse_rust_sql(stmt, parse_result);
   }
 #endif

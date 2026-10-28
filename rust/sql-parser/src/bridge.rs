@@ -653,6 +653,12 @@ pub(crate) mod ffi {
         HiddenNull,
         NullClause,
         Analyze,
+        StatsOptions,
+        StatsAll,
+        StatsColumns,
+        StatsColumn,
+        StatsExtension,
+        StatsBucketCount,
         DbmsStats,
         FullScan,
         IndexScan,
@@ -689,6 +695,7 @@ pub(crate) mod ffi {
         Sql,
         Routine,
         Trigger,
+        Statistics,
     }
 
     extern "Rust" {
@@ -768,6 +775,7 @@ fn parse_sql(
     let parse = |text: &str| match parse_mode {
         ffi::ParseMode::Routine => grammar::sql::routine_body(text, mode),
         ffi::ParseMode::Trigger => grammar::sql::trigger(text, mode),
+        ffi::ParseMode::Statistics => grammar::sql::statistics_options(text, mode),
         ffi::ParseMode::Sql => grammar::sql::query(text, mode),
         _ => unreachable!("unknown parser entry point"),
     };

@@ -10,6 +10,7 @@
 ```
 
 启用后，普通 SQL 和内部 SQL 的完整解析阶段使用 Rust，解析失败直接报错。
+统计采集的 `METHOD_OPT`（`FOR ALL COLUMNS SIZE AUTO` 等）也由 Rust 解析。
 快速参数化、多语句切分和 PL SQL 预处理仍沿用旧实现。
 实验开关和旧解析链路在全量验证通过后删除。
 

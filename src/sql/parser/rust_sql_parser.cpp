@@ -581,6 +581,11 @@ ObItemType node_type(const peg::Node &node)
     case Kind::HiddenString: return T_VARCHAR;
     case Kind::JsonQuery: return T_FUN_SYS_JSON_QUERY;
     case Kind::JsonValue: return T_FUN_SYS_JSON_VALUE;
+    case Kind::StatsOptions: return T_METHOD_OPT_LIST;
+    case Kind::StatsAll: return T_FOR_ALL;
+    case Kind::StatsColumns: return T_FOR_COLUMNS;
+    case Kind::StatsColumn: return T_FOR_COLUMN_ITEM;
+    case Kind::StatsExtension: return T_EXTENSION;
     case Kind::DateUnit: return T_INT;
     case Kind::RowNumber: return T_WIN_FUN_ROW_NUMBER;
     case Kind::Rank: return T_WIN_FUN_RANK;
@@ -868,10 +873,11 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
   node = nullptr;
   if (source.kind == Kind::Missing) return common::OB_SUCCESS;
   if (source.kind == Kind::DataType || source.kind == Kind::CastType) return build_type(source, pool, node);
-  if (source.kind == Kind::Parenthesized) {
+  if (source.kind == Kind::Parenthesized || source.kind == Kind::StatsBucketCount) {
     const int ret = build_node(sql, expression_sql, source.children[0], parameters, pool, node, pl);
     if (ret != common::OB_SUCCESS) return ret;
-    node->is_assigned_from_child_ = true;
+    if (source.kind == Kind::StatsBucketCount) node->reserved_ = 1;
+    else node->is_assigned_from_child_ = true;
     return common::OB_SUCCESS;
   }
   const ObItemType type = node_type(source);
@@ -1138,7 +1144,8 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
       reinterpret_cast<const uint8_t *>(sql.ptr()), sql.length()),
       result.sql_mode_ & SMO_ANSI_QUOTES, result.sql_mode_ & SMO_NO_BACKSLASH_ESCAPES,
       result.sql_mode_ & SMO_PIPES_AS_CONCAT, result.sql_mode_ & SMO_HIGH_NOT_PRECEDENCE,
-      routine_body ? peg::ParseMode::Routine : result.is_for_trigger_ ? peg::ParseMode::Trigger : peg::ParseMode::Sql);
+      routine_body ? peg::ParseMode::Routine : result.is_for_trigger_ ? peg::ParseMode::Trigger
+      : result.is_method_opt_parser_ ? peg::ParseMode::Statistics : peg::ParseMode::Sql);
   if (!parsed.error.empty()) {
     snprintf(error, sizeof(error), "rust-peg: %s", parsed.error.c_str());
     result.start_col_ = parsed.error_offset + 1;

@@ -1848,6 +1848,28 @@ peg::parser! {
             let tables=tables.into_iter().reduce(|left,right| Node::new(Kind::Link,vec![left,right])).unwrap();
             Node::new(Kind::Analyze,vec![tables,Node::missing(),Node::missing()])
         }
+        rule stats_size() -> Node = kw("size") value:(
+                value:(kw("auto") { 0 } / kw("repeat") { 1 } / kw("skewonly") { 2 }) { Node::new(Kind::HiddenInt,vec![]).value(value) }
+                / value:number() { Node::new(Kind::StatsBucketCount,vec![value]) }
+            ) { value }
+        rule stats_column() -> Node
+            = column:("(" _ names:(ident() ++ ("," _)) ")" _ {
+                    Node::new(Kind::StatsExtension,vec![Node::new(Kind::ColumnList,names.into_iter().map(Node::name).collect()),Node::missing()])
+                } / !kw("size") !kw("for") name:ident() { Node::new(Kind::Column,vec![Node::missing(),Node::name(name),Node::missing()]) }) size:stats_size()? {
+                Node::new(Kind::StatsColumn,vec![column,Node::optional(size)])
+            }
+            / size:stats_size() { Node::new(Kind::StatsColumn,vec![Node::missing(),size]) }
+        rule stats_method() -> Node = kw("for") method:(
+                kw("all") scope:(kw("indexed") { 1 } / kw("hidden") { 2 })? kw("columns") size:stats_size()? {
+                    Node::new(Kind::StatsAll,vec![Node::new(Kind::HiddenInt,vec![]).value(scope.unwrap_or(0)),Node::optional(size)])
+                }
+                / kw("columns") columns:(first:stats_column() rest:(("," _)? value:stats_column() { value })* {
+                    let mut columns=vec![first];columns.extend(rest);columns
+                })? {
+                    Node::new(Kind::StatsColumns,columns.unwrap_or_else(|| vec![Node::new(Kind::StatsColumn,vec![Node::missing(),Node::missing()])]))
+                }
+            ) { method }
+        pub rule statistics_options() -> Node = _ methods:stats_method()+ (";" _)* { Node::new(Kind::StatsOptions,methods) }
         rule explain() -> Node = (kw("explain") / kw("describe") / kw("desc")) hints()?
             format:(kw("basic") { Kind::ExplainBasic } / kw("outline") { Kind::ExplainOutline }
                 / kw("extended") { Kind::ExplainExtended } / kw("extended_noaddr") { Kind::ExplainExtendedNoAddr }
