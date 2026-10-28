@@ -325,8 +325,8 @@ struct SelectItemParamInfo
 };
 
 // Projection identities are borrowed only during this compilation, never stored in the plan cache.
-using SelectItemParamInfoMap = common::hash::ObHashMap<const ParseNode *, SelectItemParamInfo,
-    common::hash::NoPthreadDefendMode, SyntaxIdentityHash, std::equal_to<const ParseNode *>>;
+using SelectItemParamInfoMap = common::hash::ObHashMap<const peg::Node *, SelectItemParamInfo,
+    common::hash::NoPthreadDefendMode, SyntaxIdentityHash, std::equal_to<const peg::Node *>>;
 
 typedef common::ObFixedArray<ObPCParam *, common::ObIAllocator> ObRawParams;
 typedef common::ObFixedArray<ObRawParams *, common::ObIAllocator> ObRawParams2DArray;

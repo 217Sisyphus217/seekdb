@@ -25,7 +25,6 @@ OBSERVER_UNITY_GROUPS = [
         name = "ob_server_common_0",
         language = "c++",
         srcs = [
-            "src/observer/ob_dump_task_generator.cpp",
             "src/observer/ob_inner_sql_connection.cpp",
             "src/observer/ob_inner_connection_lock_util.cpp",
             "src/observer/ob_inner_sql_read_context.cpp",

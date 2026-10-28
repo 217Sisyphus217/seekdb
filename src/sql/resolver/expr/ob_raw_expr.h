@@ -59,6 +59,7 @@ class ObPLBuilder;
 }
 namespace sql
 {
+namespace peg { struct Node; }
 class ObStmt;
 class ObCallProcedureInfo;
 class ObSQLSessionInfo;
@@ -1577,7 +1578,7 @@ struct ObSubQueryInfo
   }
   TO_STRING_KV(K_(ref_expr));
 
-  const ParseNode *sub_query_;
+  const peg::Node *sub_query_;
   ObQueryRefRawExpr *ref_expr_;
   ObExprInfo parents_expr_info_;
 };
@@ -1641,6 +1642,7 @@ struct ObResolveContext
   }
 
   ExprFactoryT &expr_factory_;
+  common::ObString syntax_source_;
   ObStmt *stmt_;
   common::ObCharsetType connection_charset_;
   common::ObCollationType dest_collation_;

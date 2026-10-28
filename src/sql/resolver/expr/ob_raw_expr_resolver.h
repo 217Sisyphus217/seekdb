@@ -32,7 +32,7 @@ public:
 
   virtual ~ObRawExprResolver() {}
 
-  virtual int resolve(const ParseNode *node,
+  virtual int resolve(const peg::Node &node,
                       ObRawExpr *&expr,
                       common::ObIArray<ObQualifiedName> &columns,
                       common::ObIArray<ObVarInfo> &sys_vars,

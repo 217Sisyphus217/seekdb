@@ -19,13 +19,11 @@
 
 namespace oceanbase::pl
 {
-int ObPLParser::parse(const common::ObString &source, ObStmtNodeTree *&tree)
+int ObPLParser::parse(const common::ObString &source, sql::ParsedSql &syntax)
 {
-  ParseResult result{};
+  auto &result = syntax.metadata();
   result.malloc_pool_ = &allocator_;
   result.sql_mode_ = sql_mode_;
-  const int ret = sql::parse_rust_sql(source, result, true);
-  tree = result.result_tree_;
-  return ret;
+  return sql::parse_rust_sql(source, result, true, &syntax);
 }
 }  // namespace oceanbase::pl

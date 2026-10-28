@@ -217,7 +217,7 @@ peg::parser! {
             else {
                 let (start,end)=(first.start,rest.last().unwrap().end);
                 let mut args=vec![first];args.extend(rest);
-                Node::new(Kind::StringConcat,vec![Node::new(Kind::Ident,vec![]).text("concat".into()),Node::new(Kind::ExprList,args)]).expression(start,end)
+                Node::named_call(Kind::StringConcat,Node::new(Kind::Ident,vec![]).text("concat".into()),args).expression(start,end)
             }
         }
         rule bool_null() -> Node
@@ -312,14 +312,17 @@ peg::parser! {
                 separator:(kw("separator") value:string() { Node::new(Kind::Separator,vec![value]) })? ")" close:position!() _
                 window:(kw("over") value:window(level+1) { value })? {?
                     let end=window.as_ref().map_or(close,|value| value.end);
-                    let value=Node::new(Kind::GroupConcat,vec![Node::optional(modifier),Node::new(Kind::ExprList,arguments),Node::order_clause(order.unwrap_or_default()),Node::optional(separator)]);
+                    let mut value=Node::callable(Kind::GroupConcat,arguments);
+                    value.children.extend(modifier);
+                    if let Some(order)=order { value.children.push(Node::new(Kind::Order,order)); }
+                    value.children.extend(separator);
                     match window { Some(window) => Node::new(Kind::WindowFunction,vec![value,window]),None => value }.expression(start,end)
                 }
             / charset_literal() / temporal_literal() / binary_literal() / number() / string_expression() / bool_null() / parameter()
             / depth(level) start:position!() names:name() column_end:position!() op:$("->>" / "->") _ path:string_expression() {?
                 let end=path.end;
-                let value=Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text("JSON_EXTRACT".into()),Node::new(Kind::ExprList,vec![Node::column(names,false,start,column_end)?,path])]);
-                let value=if op=="->>" { Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text("JSON_UNQUOTE".into()),Node::new(Kind::ExprList,vec![value])]) } else { value };
+                let value=Node::named_call(Kind::Function,Node::new(Kind::Ident,vec![]).text("JSON_EXTRACT".into()),vec![Node::column(names,false,start,column_end)?,path]);
+                let value=if op=="->>" { Node::named_call(Kind::Function,Node::new(Kind::Ident,vec![]).text("JSON_UNQUOTE".into()),vec![value]) } else { value };
                 value.expression(start,end)
             }
             / depth(level) start:position!() !(['x'|'X'] "'" hex_digit()* "'") parts:expression_name() tail:("." _ "*" end:position!() _ { (None, end) }
@@ -348,23 +351,26 @@ peg::parser! {
             Node::new(Kind::HiddenInt,vec![]).value(value)
         }
         rule collection_expression(level: usize) -> Node = start:position!() value:(
-                "[" _ args:expr_list(level) "]" { Node::new(Kind::ArrayLiteral,vec![Node::new(Kind::ExprList,args)]) }
+                "[" _ args:expr_list(level) "]" { Node::callable(Kind::ArrayLiteral,args) }
                 / kind:(kw("array") { Kind::ArrayLiteral } / kw("map") { Kind::MapLiteral })
-                    "(" _ args:expr_list(level) ")" { Node::new(kind,vec![Node::new(Kind::ExprList,args)]) }
+                    "(" _ args:expr_list(level) ")" { Node::callable(kind,args) }
                 / kw("array_agg") "(" _ distinct:kw("distinct")? value:expr(level)
                     order:(kw("order") kw("by") keys:(order_item(level) ++ ("," _)) { keys })? ")" {
-                    let mut args=vec![if distinct.is_some() { Node::new(Kind::Distinct,vec![]) } else { Node::missing() },value];
-                    if let Some(keys)=order { args.push(Node::order_clause(keys)); }
-                    Node::new(Kind::ArrayAgg,args)
+                    let mut result=Node::callable(Kind::ArrayAgg,vec![value]);
+                    if distinct.is_some() { result.children.push(Node::new(Kind::Distinct,vec![])); }
+                    if let Some(keys)=order { result.children.push(Node::new(Kind::Order,keys)); }
+                    result
                 }
                 / kind:(kw("array_map") { Kind::ArrayMap } / kw("array_filter") { Kind::ArrayFilter }
                     / kw("array_first") { Kind::ArrayFirst } / kw("array_sortby") { Kind::ArraySortBy })
-                    "(" _ function:lambda(level) "," _ args:expr_list(level) ")" { Node::new(kind,vec![function,Node::new(Kind::ExprList,args)]) }
+                    "(" _ function:lambda(level) "," _ args:expr_list(level) ")" {
+                    let mut result=Node::callable(kind,args);result.children.push(function);result
+                }
                 / kind:(kw("vector_distance") { Kind::VectorDistance } / kw("vector_similarity") { Kind::VectorSimilarity })
                     "(" _ left:expr(level) "," _ right:expr(level) metric:("," _ value:vector_metric() { value })? ")" {
-                    let mut args=vec![left,right];args.extend(metric);Node::new(kind,args)
+                    let mut result=Node::callable(kind,vec![left,right]);result.children.extend(metric);result
                 }
-                / kw("point") "(" _ x:expr(level) "," _ y:expr(level) ")" { Node::new(Kind::Point,vec![x,y]) }
+                / kw("point") "(" _ x:expr(level) "," _ y:expr(level) ")" { Node::callable(Kind::Point,vec![x,y]) }
             ) end:position!() _ {? value.expression(start,end) }
         rule charset_literal() -> Node = charset:((kw("_utf8") / kw("_utf8mb4") / kw("_utf8mb3")) { "utf8mb4" } / kw("_binary") { "binary" })
             value:(string() / binary_literal()) {
@@ -438,7 +444,7 @@ peg::parser! {
                             vec![Node::new(Kind::HiddenInt,vec![]),weights,Node::new(Kind::HiddenInt,vec![]).value(padding),Node::new(Kind::HiddenInt,vec![]).value(u64::from(binary))]
                         }) { let mut args=args;args.insert(0,value);("weight_string",args) }
             ) ")" end:position!() _ {?
-                Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text(function.0.into()),Node::new(Kind::ExprList,function.1)]).expression(start,end)
+                Node::named_call(Kind::Function,Node::new(Kind::Ident,vec![]).text(function.0.into()),function.1).expression(start,end)
             }
         rule date_unit() -> Node = start:position!() name:$(word()) end:position!() _ {?
             let name=name.to_ascii_lowercase();
@@ -453,19 +459,19 @@ peg::parser! {
                 / kw("adddate") { ("date_add",true) } / kw("subdate") { ("date_sub",true) }) "(" _ date:expr(level) "," _
                 interval:(kw("interval") value:expr(level) unit:date_unit() { (value,unit) }
                     / enabled(function.1) value:expr(level) { (value,Node::new(Kind::DateUnit,vec![]).text("day".into())) }) ")" end:position!() _ {?
-                Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text(function.0.into()),Node::new(Kind::ExprList,vec![date,interval.0,interval.1])]).expression(start,end)
+                Node::named_call(Kind::Function,Node::new(Kind::Ident,vec![]).text(function.0.into()),vec![date,interval.0,interval.1]).expression(start,end)
             }
             / start:position!() function:(kw("timestampadd") { "timestampadd" } / kw("timestampdiff") { "timestampdiff" })
                 "(" _ unit:date_unit() "," _ left:expr(level) "," _ right:expr(level) ")" end:position!() _ {?
-                Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text(function.into()),Node::new(Kind::ExprList,vec![unit,left,right])]).expression(start,end)
+                Node::named_call(Kind::Function,Node::new(Kind::Ident,vec![]).text(function.into()),vec![unit,left,right]).expression(start,end)
             }
             / start:position!() kw("extract") "(" _ unit:date_unit() kw("from") value:expr(level) ")" end:position!() _ {?
-                Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text("extract".into()),Node::new(Kind::ExprList,vec![unit,value])]).expression(start,end)
+                Node::named_call(Kind::Function,Node::new(Kind::Ident,vec![]).text("extract".into()),vec![unit,value]).expression(start,end)
             }
         rule collated(level: usize) -> Node = value:atom(level) collations:(kw("collate") value:collation_name() { Node { kind:Kind::Collation,..value } })* {?
             collations.into_iter().try_fold(value,|value,collation| {
                 let (start,end)=(value.start,collation.end);
-                Node::new(Kind::SetCollation,vec![Node::new(Kind::Ident,vec![]).text("set_collation".into()),Node::new(Kind::ExprList,vec![value,collation])]).expression(start,end)
+                Node::named_call(Kind::SetCollation,Node::new(Kind::Ident,vec![]).text("set_collation".into()),vec![value,collation]).expression(start,end)
             })
         }
         rule unary(level: usize) -> Node
@@ -526,7 +532,7 @@ peg::parser! {
                     },
                     Tail::Between(negated, low, high) => { let end=high.end; Node::new(Kind::Between, vec![value, low, high]).value(u64::from(negated)).expression(start, end) },
                     Tail::In(negated, right, end) => Node::new(Kind::In, vec![value, right]).value(u64::from(negated)).expression(start, end),
-                    Tail::Member(right,end) => Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text("JSON_MEMBER_OF".into()),Node::new(Kind::ExprList,vec![value,right])]).expression(start,end),
+                    Tail::Member(right,end) => Node::named_call(Kind::Function,Node::new(Kind::Ident,vec![]).text("JSON_MEMBER_OF".into()),vec![value,right]).expression(start,end),
                     Tail::Is(negated, test) => { let end=test.end; Node::new(Kind::Is, vec![value, test]).value(u64::from(negated)).expression(start, end) },
                 }
             })
@@ -559,10 +565,14 @@ peg::parser! {
                 Node::new(Kind::JsonColumn,vec![Node::name(name),data_type,Node::new(Kind::HiddenInt,vec![]),path,options]).value(if exists.is_some() { 2 } else { 4 })
             }
         rule json_table(level: usize) -> Node = kw("json_table") "(" _ document:expr(level+1) "," _ path:string() kw("columns") "(" _ columns:(json_column(level+1) ++ ("," _)) ")" _ ")" _ alias:table_alias()? {
-            Node::new(Kind::JsonTable,vec![document,path,Node::new(Kind::Link,vec![Node::new(Kind::HiddenInt,vec![]).value(3),Node::new(Kind::HiddenInt,vec![]).value(3)]),Node::new(Kind::ExprList,columns),alias.map(Node::name).unwrap_or_else(Node::missing)])
+            let mut children=vec![document,path,Node::new(Kind::Link,vec![Node::new(Kind::HiddenInt,vec![]).value(3),Node::new(Kind::HiddenInt,vec![]).value(3)]),Node::new(Kind::ExprList,columns)];
+            if let Some(alias)=alias { children.push(Node::new(Kind::TableAlias,vec![Node::name(alias)])); }
+            Node::new(Kind::JsonTable,children)
         }
         rule table_collection(level: usize) -> Node = kw("table") "(" _ value:expr(level+1) ")" _ alias:table_alias()? {
-            Node::new(Kind::TableCollection,vec![value,alias.map(Node::name).unwrap_or_else(Node::missing)])
+            let mut children=vec![value];
+            if let Some(alias)=alias { children.push(Node::new(Kind::TableAlias,vec![Node::name(alias)])); }
+            Node::new(Kind::TableCollection,children)
         }
         rule relation(level: usize) -> Node = json_table(level) / table_collection(level) / lateral:kw("lateral")? source:("(" _ query:select(level+1) ")" _ { query }
             / name:name() {? Node::relation(name) }) partition:use_partition()? sample:sample()? snapshot:snapshot(level)?
@@ -571,24 +581,19 @@ peg::parser! {
                 if (lateral.is_some() || columns.is_some()) && source.kind!=Kind::Select { return Err("derived table"); }
                 if (partition.is_some() || sample.is_some() || !indexes.is_empty()) && source.kind==Kind::Select { return Err("base table"); }
                 let mut table=Node::table(source,alias)?;
-                if partition.is_some() || sample.is_some() || !indexes.is_empty() {
-                    let offset=usize::from(table.kind==Kind::Alias);
-                    table.children[1+offset]=Node::list(Kind::TableIndexHints,indexes);
-                    table.children[2+offset]=Node::optional(partition);
-                    table.children[3+offset]=Node::optional(sample);
-                }
-                if let Some(snapshot)=snapshot {
-                    table.children.resize_with(if table.kind==Kind::Alias { 5 } else { 4 },Node::missing);
-                    table.children.push(snapshot);
-                }
+                if !indexes.is_empty() { table.children.push(Node::new(Kind::TableIndexHints,indexes)); }
+                table.children.extend(partition);
+                table.children.extend(sample);
+                table.children.extend(snapshot);
                 if let Some(columns)=columns {
-                    let alias=std::mem::replace(&mut table.children[1],Node::missing());
-                    table.children[1]=Node::new(Kind::Link,vec![alias,Node::new(Kind::ColumnList,columns.into_iter().map(Node::name).collect())]);
+                    table.children.push(Node::new(Kind::DerivedColumns,columns.into_iter().map(Node::name).collect()));
                 }
-                table.value=u64::from(lateral.is_some());
+                if lateral.is_some() { table.children.push(Node::new(Kind::Lateral,vec![])); }
                 Ok(table)
             }
-            / depth(level) "(" _ value:table(level+1) ")" _ { value.value(1) }
+            / depth(level) "(" _ value:table(level+1) ")" _ {
+                let mut value=value;value.children.push(Node::new(Kind::ParenthesizedTable,vec![]));value
+            }
         rule snapshot(level: usize) -> Node = kw("as") kw("of") kw("snapshot") value:expr(level) {
             Node::new(Kind::Snapshot,vec![value,Node::new(Kind::Ident,vec![])])
         }
@@ -614,7 +619,7 @@ peg::parser! {
             / (kw("right") kw("outer")?) { Kind::RightJoin } / (kw("full") kw("outer")?) { Kind::FullJoin }
             / kw("inner") { Kind::InnerJoin } / kw("cross") { Kind::InnerJoin })?
             kw("join") relation:relation(level)
-            condition:(kw("on") value:expr(level) { value }
+            condition:(kw("on") value:expr(level) { Node::new(Kind::JoinOn,vec![value]) }
                 / kw("using") "(" _ names:(ident() ++ ("," _)) ")" _ { Node::new(Kind::ColumnList, names.into_iter().map(Node::name).collect()) })? {?
                 let kind=kind.unwrap_or(Kind::InnerJoin);
                 if matches!(kind, Kind::LeftJoin | Kind::RightJoin | Kind::FullJoin) && condition.is_none() { Err("join condition") }
@@ -622,7 +627,9 @@ peg::parser! {
             }
         rule table(level: usize) -> Node = relation:relation(level) joins:join(level)* {?
             joins.into_iter().try_fold(relation, |left, (kind, right, condition)| {
-                Node::new(Kind::JoinedTable, vec![Node::new(kind, vec![]), left, right, condition, Node::missing()]).expression(0, 0)
+                let mut children=vec![Node::new(kind,vec![]),left,right];
+                if condition.kind!=Kind::Missing { children.push(condition); }
+                Node::new(Kind::JoinedTable,children).expression(0,0)
             })
         }
         rule order_item(level: usize) -> Node = expression:expr(level) direction:(kw("asc") { Kind::Asc } / kw("desc") { Kind::Desc })? {
@@ -632,18 +639,18 @@ peg::parser! {
         rule window_value(level: usize) -> Node
             = kind:(kw("first_value") { Kind::FirstValue } / kw("last_value") { Kind::LastValue }) "(" _ value:expr(level)
                 nulls:(value:null_treatment() ")" _ { Some(value) } / ")" _ value:null_treatment()? { value }) {
-                Node::new(kind,vec![value,Node::optional(nulls)])
+                let mut result=Node::callable(kind,vec![value]);result.children.extend(nulls);result
             }
             / kind:(kw("lead") { Kind::Lead } / kw("lag") { Kind::Lag }) "(" _ first:expr(level)
                 rest:(nulls:null_treatment() rest:("," _ values:expr_list(level) { values })? ")" _ { (rest.unwrap_or_default(),Some(nulls)) }
                     / rest:("," _ values:expr_list(level) { values })? ")" _ nulls:null_treatment()? { (rest.unwrap_or_default(),nulls) }) {
                 let mut arguments=vec![first]; arguments.extend(rest.0);
-                Node::new(kind,vec![Node::new(Kind::ExprList,arguments),Node::optional(rest.1)])
+                let mut result=Node::callable(kind,arguments);result.children.extend(rest.1);result
             }
             / kw("nth_value") "(" _ value:expr(level) "," _ nth:expr(level) ")" _
                 from:(kw("from") kind:(kw("first") { Kind::First } / kw("last") { Kind::Last }) { Node::new(kind,vec![]) })?
                 nulls:null_treatment()? {
-                Node::new(Kind::NthValue,vec![value,nth,Node::optional(from),Node::optional(nulls)])
+                let mut result=Node::callable(Kind::NthValue,vec![value,nth]);result.children.extend(from);result.children.extend(nulls);result
             }
         rule window_bound() -> Node
             = kw("current") kw("row") { Node::new(Kind::WindowBound,vec![]).value(1) }
@@ -667,13 +674,16 @@ peg::parser! {
             partition:(kw("partition") kw("by") values:expr_list(level) { values })?
             order:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })?
             frame:window_frame()? ")" end:position!() _ {
-                Node::new(Kind::Window,vec![Node::optional(name.map(Node::name)),
-                    Node::new(Kind::WindowSpec,vec![Node::list(Kind::ExprList,partition.unwrap_or_default()),
-                        Node::order_clause(order.unwrap_or_default()),Node::optional(frame)])]).at(start,end)
+                let mut spec=vec![];
+                if let Some(partition)=partition { spec.push(Node::new(Kind::ExprList,partition)); }
+                if let Some(order)=order { spec.push(Node::new(Kind::Order,order)); }
+                spec.extend(frame);
+                let mut children=vec![Node::new(Kind::WindowSpec,spec)];children.extend(name.map(Node::name));
+                Node::new(Kind::Window,children).at(start,end)
             }
         rule window(level: usize) -> Node = window_spec(level) / name:ident() {
             let (start,end)=(name.start,name.end);
-            Node::new(Kind::Window,vec![Node::name(name),Node::missing()]).at(start,end)
+            Node::new(Kind::Window,vec![Node::name(name)]).at(start,end)
         }
         rule named_window(level: usize) -> Node = name:ident() kw("as") window:window_spec(level) {
             Node::new(Kind::NamedWindow,vec![Node::name(name),window])
@@ -683,7 +693,7 @@ peg::parser! {
             match tail {
                 Some((true, count)) => Node::new(Kind::CommaLimit, vec![first, count]),
                 Some((false, offset)) => Node::new(Kind::Limit, vec![first, offset]),
-                None => Node::new(Kind::Limit, vec![first, Node::missing()]),
+                None => Node::new(Kind::Limit, vec![first]),
             }
         }
         rule lock_wait() -> Node
@@ -813,7 +823,7 @@ peg::parser! {
                 args:("(" _ qb:hint_qb()? groups:hint_qb_names()* ")" _ { (qb,groups) })? {
                     let (qb,groups)=args.unwrap_or_default();
                     let mut children=vec![Node::optional(qb)];
-                    if let Some(groups)=groups.into_iter().reduce(|left,right| Node::new(Kind::Link,vec![left,right])) { children.push(groups); }
+                    if !groups.is_empty() { children.push(Node::new(Kind::HintQbGroups,groups)); }
                     Node::new(kind,children)
                 }
             / kind:(kw("no_rewrite") { Kind::NoRewrite }
@@ -901,8 +911,8 @@ peg::parser! {
             / name:ident() { Node::name(name) }
         rule vector_parameters() -> Node = kw("parameters") value:vector_parameter_list() { value }
         rule vector_parameter_list() -> Node = "(" _ start:position!()
-            values:((name:ident() "=" _ value:vector_parameter_value() { vec![Node::name(name),value] }) ++ ("," _)) end:position!() ")" _ {
-                Node::new(Kind::VectorParameters,values.into_iter().flatten().collect()).at(start,end)
+            values:((name:ident() "=" _ value:vector_parameter_value() { Node::new(Kind::VectorParameter,vec![Node::name(name),value]) }) ++ ("," _)) end:position!() ")" _ {
+                Node::new(Kind::VectorParameters,values).at(start,end)
             }
         rule query_term(level: usize) -> Select
             = "(" _ value:query_expression(level+1) ")" _ { Select { parenthesized:true,..value } }
@@ -917,9 +927,10 @@ peg::parser! {
                 / kw("sql_big_result") / kw("sql_buffer_result")) { Node::missing() }
         rule group_by(level: usize) -> Node = kw("group") kw("by") keys:((value:expr(level)
                 direction:(kw("asc") { Kind::Asc } / kw("desc") { Kind::Desc })? {
-                    Node::new(Kind::SortKey,vec![value,direction.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing)])
+                    let mut children=vec![value];children.extend(direction.map(|kind| Node::new(kind,vec![])));
+                    Node::new(Kind::SortKey,children)
                 }) ++ ("," _)) rollup:(kw("with") kw("rollup") { Node::new(Kind::Rollup,vec![]) })? {
-                    Node::new(Kind::GroupBy,vec![Node::new(Kind::WithRollup,vec![Node::optional(rollup),Node::new(Kind::SortList,keys)])])
+                    let mut children=vec![Node::new(Kind::SortList,keys)];children.extend(rollup);Node::new(Kind::GroupBy,children)
                 }
         rule select_query(level: usize) -> Select = depth(level) kw("select") hints:hints()? options:select_option()* projection:(item(level) ++ ("," _)) into:select_into()?
             from:(kw("from") tables:(kw("dual") { vec![] } / tables:(table(level) ++ ("," _)) { tables }) { tables })?
@@ -932,14 +943,14 @@ peg::parser! {
         rule values_query(level: usize) -> Select = depth(level) kw("values") rows:((kw("row") value:row() { value }) ++ ("," _)) {
                 let values=Node::new(Kind::Values,vec![Node::new(Kind::ValuesRows,rows)]);
                 let projection=Node::new(Kind::Projection,vec![Node::new(Kind::Star,vec![])]);
-                Select { projection:vec![projection],from:vec![Node::new(Kind::Alias,vec![values,Node::missing()])],..Select::default() }
+                Select { projection:vec![projection],from:vec![Node::new(Kind::Table,vec![values])],..Select::default() }
             }
         rule column() -> Node = start:position!() names:name() {? let end = names.last().unwrap().end; Node::column(names, false, start, end) }
         rule expr_or_default() -> Node = kw("default") { Node::new(Kind::Default, vec![]) } / expr(0)
         rule assignment() -> Node = column:column() "=" _ value:expr_or_default() { Node::new(Kind::Assignment, vec![column, value]) }
         rule assignments() -> Vec<Node> = values:(assignment() ++ ("," _)) { values }
         rule row() -> Node = "(" _ values:(expr_or_default() ** ("," _)) ")" _ {
-            Node::new(Kind::ValueVector, if values.is_empty() { vec![Node::new(Kind::Empty, vec![])] } else { values })
+            Node::new(Kind::ValueVector,values)
         }
         rule insert() -> Node = replace:(kw("insert") { false } / kw("replace") { true }) hints:hints()?
             (kw("low_priority") / kw("high_priority"))? ignore:kw("ignore")? kw("into")? table:name() partition:use_partition()?
@@ -951,7 +962,8 @@ peg::parser! {
                 if replace && (ignore.is_some() || duplicate.is_some()) { Err("REPLACE does not accept IGNORE or ON DUPLICATE KEY UPDATE") }
                 else if values.kind == Kind::AssignList && columns.is_some() { Err("INSERT SET does not accept a column list") }
                 else {
-                    let table=Node::new(Kind::Table, vec![Node::relation(table)?, Node::missing(), Node::optional(partition)]);
+                    let mut children=vec![Node::relation(table)?];children.extend(partition);
+                    let table=Node::new(Kind::Table,children);
                     Ok(Node::insert(replace, ignore.is_some(), table, columns.unwrap_or_default(), values, duplicate.unwrap_or_default(), hints.unwrap_or_default()))
                 }
             }
@@ -960,28 +972,36 @@ peg::parser! {
             filter:(kw("where") value:expr(0) { value })?
             order:(kw("order") kw("by") values:(order_item(0) ++ ("," _)) { values })?
             limit:limit()? {
-                Node::new(Kind::Update, vec![Node::optional(with), Node::new(Kind::TableReferences, tables),
-                    Node::new(Kind::AssignList, values), Node::where_clause(filter), Node::order_clause(order.unwrap_or_default()),
-                    Node::optional(limit), Node::missing(), Node::list(Kind::Hints,hints.unwrap_or_default()),
-                    if ignore.is_some() { Node::new(Kind::Ignore, vec![]) } else { Node::missing() }, Node::missing(), Node::missing()])
+                let mut children=vec![Node::new(Kind::FromList,tables),Node::new(Kind::AssignList,values)];
+                children.extend(with);
+                if let Some(filter)=filter { children.push(Node::new(Kind::Where,vec![filter])); }
+                if let Some(order)=order { children.push(Node::new(Kind::Order,order)); }
+                children.extend(limit);
+                if let Some(hints)=hints { children.push(Node::new(Kind::Hints,hints)); }
+                if ignore.is_some() { children.push(Node::new(Kind::Ignore,vec![])); }
+                Node::new(Kind::Update,children)
             }
         rule delete_target() -> Node = name:name() ("." _ "*" _)? {? Node::relation(name) }
         rule delete_tables() -> Node
             = targets:(delete_target() ++ ("," _)) kw("from") tables:(table(0) ++ ("," _)) {
-                Node::new(Kind::DeleteTables,vec![Node::new(Kind::TableReferences,targets),Node::new(Kind::TableReferences,tables)])
+                Node::new(Kind::DeleteTables,vec![Node::new(Kind::DeleteTargets,targets),Node::new(Kind::FromList,tables)])
             }
             / kw("from") targets:(delete_target() ++ ("," _)) kw("using") tables:(table(0) ++ ("," _)) {
-                Node::new(Kind::DeleteTables,vec![Node::new(Kind::TableReferences,targets),Node::new(Kind::TableReferences,tables)])
+                Node::new(Kind::DeleteTables,vec![Node::new(Kind::DeleteTargets,targets),Node::new(Kind::FromList,tables)])
             }
-            / kw("from") table:relation(0) { Node::new(Kind::DeleteTables,vec![Node::missing(),Node::new(Kind::TableReferences,vec![table])]) }
+            / kw("from") table:relation(0) { Node::new(Kind::DeleteTables,vec![Node::new(Kind::FromList,vec![table])]) }
         rule delete() -> Node = with:with_clause(0)? kw("delete") hints:hints()? ignore:kw("ignore")? (kw("low_priority") / kw("quick"))*
             tables:delete_tables() filter:(kw("where") value:expr(0) { value })?
-            order:(enabled(tables.children[0].kind==Kind::Missing) kw("order") kw("by") values:(order_item(0) ++ ("," _)) { values })?
-            limit:(enabled(tables.children[0].kind==Kind::Missing) value:limit() { value })? {
-                Node::new(Kind::Delete, vec![Node::optional(with), tables, Node::where_clause(filter),
-                    Node::order_clause(order.unwrap_or_default()), Node::optional(limit),
-                    Node::missing(), Node::list(Kind::Hints,hints.unwrap_or_default()), Node::missing(), Node::missing(),
-                    if ignore.is_some() { Node::new(Kind::Ignore,vec![]) } else { Node::missing() }])
+            order:(enabled(tables.children.len()==1) kw("order") kw("by") values:(order_item(0) ++ ("," _)) { values })?
+            limit:(enabled(tables.children.len()==1) value:limit() { value })? {
+                let mut children=tables.children;
+                children.extend(with);
+                if let Some(filter)=filter { children.push(Node::new(Kind::Where,vec![filter])); }
+                if let Some(order)=order { children.push(Node::new(Kind::Order,order)); }
+                children.extend(limit);
+                if let Some(hints)=hints { children.push(Node::new(Kind::Hints,hints)); }
+                if ignore.is_some() { children.push(Node::new(Kind::Ignore,vec![])); }
+                Node::new(Kind::Delete,children)
             }
         rule transaction_access() -> Node
             = start:position!() kw("read") kind:(kw("only") { Kind::ReadOnly } / kw("write") { Kind::ReadWrite }) end:position!() {
@@ -1170,7 +1190,7 @@ peg::parser! {
         rule index_column(fulltext: bool) -> Node = value:(name:ident() prefix:("(" _ value:type_size() ")" _ { value })? { (Node::name(name),Node::optional(prefix)) }
                 / "(" _ start:position!() value:expr(0) end:position!() ")" _ { (value.at(start,end),Node::missing()) })
             direction:(start:position!() kind:(kw("asc") { Kind::Asc } / enabled(!fulltext) kw("desc") { Kind::Desc }) end:position!() { Node::new(kind,vec![]).at(start,end) })? {
-                let direction=if fulltext { direction.unwrap_or_else(|| Node::new(Kind::Asc,vec![])).value(2) } else { Node::optional(direction) };
+                let direction=Node::optional(direction);
                 Node::new(Kind::IndexColumn,vec![value.0,value.1,direction])
             }
         rule index_option() -> Node
@@ -1210,8 +1230,8 @@ peg::parser! {
                 if sub && kind==Kind::KeyPartition && expressions.is_empty() { return Err("subpartition key columns"); }
                 let hash=matches!(kind,Kind::KeyPartition|Kind::HashPartition);
                 let expression=if hash {
-                    Node::new(if kind==Kind::KeyPartition { Kind::PartitionKeyFunction } else { Kind::PartitionHashFunction },
-                        vec![Node::new(Kind::Ident,vec![]).text(if kind==Kind::KeyPartition { "partition_key" } else { "partition_hash" }.into()),Node::list(Kind::ExprList,expressions)])
+                    Node::named_call(if kind==Kind::KeyPartition { Kind::PartitionKeyFunction } else { Kind::PartitionHashFunction },
+                        Node::new(Kind::Ident,vec![]).text(if kind==Kind::KeyPartition { "partition_key" } else { "partition_hash" }.into()),expressions)
                 } else { Node::new(Kind::ExprList,expressions) };
                 let mut children=vec![expression,Node::missing(),Node::missing(),Node::missing(),Node::missing()];
                 if hash || !sub && matches!(kind,Kind::RangePartition|Kind::RangeColumnsPartition) { children.push(Node::missing()); }
@@ -1295,7 +1315,7 @@ peg::parser! {
             / kw("add") kw("partition") start:position!()
                 values:(value:partition_elements(Kind::RangePartition,Kind::Missing) { Node { kind:Kind::RangePartitions,..value } }
                     / partition_elements(Kind::ListPartition,Kind::Missing)) end:position!() {
-                Node::new(Kind::PartitionAdd,vec![Node::new(Kind::Partitions,vec![values])]).at(start,end)
+                Node::new(Kind::PartitionAdd,values.children).at(start,end)
             }
             / truncate:(kw("truncate") { true } / kw("drop") { false })
                 sub:(kw("subpartition") { true } / kw("partition") { false })
@@ -1307,21 +1327,21 @@ peg::parser! {
                 Node::new(kind,vec![names,Node::missing()])
             }
         rule alter_action() -> Node
-            = value:alter_partition() { Node::new(Kind::AlterPartition,vec![value]) }
-            / kw("add") value:check_constraint() { Node::new(Kind::AlterCheckConstraint,vec![value]) }
-            / kw("drop") kw("check") name:ident() { Node::new(Kind::AlterCheckConstraint,vec![Node::new(Kind::CheckConstraint,vec![Node::name(name)])]) }
+            = alter_partition()
+            / kw("add") value:check_constraint() { value }
+            / kw("drop") kw("check") name:ident() { Node::new(Kind::CheckConstraintDrop,vec![Node::name(name)]) }
             / value:(kw("add") value:foreign_key() { value }
                 / kw("drop") kw("foreign") kw("key") name:ident() { Node::new(Kind::ForeignKeyDrop,vec![Node::name(name)]) }) {
-                Node::new(Kind::AlterForeignKey,vec![value])
+                value
             }
             / kw("drop") kw("constraint") name:ident() { Node::new(Kind::DropConstraint,vec![Node::name(name)]) }
-            / value:alter_index() { Node::new(Kind::AlterIndexOption,vec![value]) }
-            / value:alter_column() { Node::new(Kind::AlterColumnOption,vec![value]) }
+            / alter_index()
+            / alter_column()
             / kw("convert") kw("to") (kw("character") / kw("char")) kw("set") !kw("default")
                 charset:charset_name() collation:(kw("collate") value:collation_name() { value })? {
                 Node::new(Kind::ConvertTableCharset,vec![charset,Node::optional(collation)])
             }
-            / kw("rename") kw("to")? name:name() {? Ok(Node::new(Kind::AlterTableOption,vec![Node::new(Kind::TableRename,vec![Node::relation(name)?])])) }
+            / kw("rename") kw("to")? name:name() {? Ok(Node::new(Kind::TableRename,vec![Node::relation(name)?])) }
             / kw("set")? options:table_option()+ { Node::new(Kind::TableOptions,options) }
             / kw("algorithm") ("=" _)? (kw("default") / kw("inplace") / kw("copy") / kw("instant")) { Node::missing() }
             / kw("lock") ("=" _)? (kw("default") / kw("none") / kw("shared") / kw("exclusive")) { Node::missing() }
@@ -1862,8 +1882,7 @@ peg::parser! {
             }
             / (kw("deallocate") / kw("drop")) kw("prepare") name:ident() { Node::new(Kind::Deallocate,vec![]).text(name.text) }
         rule analyze() -> Node = kw("analyze") kw("table") tables:((names:name() {? Node::relation(names) }) ++ ("," _)) {
-            let tables=tables.into_iter().reduce(|left,right| Node::new(Kind::Link,vec![left,right])).unwrap();
-            Node::new(Kind::Analyze,vec![tables,Node::missing(),Node::missing()])
+            Node::new(Kind::Analyze,vec![Node::new(Kind::TableList,tables)])
         }
         rule stats_size() -> Node = kw("size") value:(
                 value:(kw("auto") { 0 } / kw("repeat") { 1 } / kw("skewonly") { 2 }) { Node::new(Kind::HiddenInt,vec![]).value(value) }
@@ -1897,7 +1916,13 @@ peg::parser! {
             into:(enabled(format.is_none() && display.is_none()) kw("into") name:ident() { Node::name(name) })?
             statement_id:(enabled(format.is_none() && display.is_none()) kw("set") kw("statement_id") "=" _ value:(string_expression() / number() / bool_null() / binary_literal() / temporal_literal()) { value })?
             value:(select(0) / insert() / update() / delete()) {
-                Node::new(Kind::Explain,vec![format.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),display.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),Node::optional(into),Node::optional(statement_id),value])
+                let mut children=vec![];
+                children.extend(format.map(|kind| Node::new(kind,vec![])));
+                children.extend(display.map(|kind| Node::new(kind,vec![])));
+                if let Some(into)=into { children.push(Node::new(Kind::ExplainIntoTable,vec![into])); }
+                if let Some(statement_id)=statement_id { children.push(Node::new(Kind::ExplainStatementId,vec![statement_id])); }
+                children.push(value);
+                Node::new(Kind::Explain,children)
         }
         rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / role_statement() / setting() / explain() / show() / alter_system() / prepared_statement() / diagnostics() / analyze() / kill() / purge()
         rule statement() -> Node = _ value:(package_statement() / routine_statement() / pl_call() / sql_statement()) { value }

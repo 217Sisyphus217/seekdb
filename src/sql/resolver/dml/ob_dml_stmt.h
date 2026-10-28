@@ -68,7 +68,7 @@ typedef struct ObJtColBaseInfo
   int32_t on_error_;
   int32_t on_mismatch_;
   int32_t on_mismatch_type_;
-  int64_t res_type_;
+  common::ObGeoType geometry_type_;
   ObDataType data_type_;
   int32_t parent_id_;
   int32_t id_;
@@ -145,7 +145,6 @@ struct TableItem
     for_update_ = false;
     for_update_wait_us_ = -1;
     skip_locked_ = false;
-    node_ = NULL;
     view_base_item_ = NULL;
     snapshot_query_expr_ = nullptr;
     snapshot_query_type_ = SnapshotQueryType::NOT_USING;
@@ -287,7 +286,6 @@ struct TableItem
   bool for_update_;
   int64_t for_update_wait_us_;//0 means nowait, -1 means infinite
   bool skip_locked_;
-  const ParseNode* node_;
   // base table item for updatable view, can not access after the resolve phase
   const TableItem *view_base_item_;
   ObRawExpr *snapshot_query_expr_;

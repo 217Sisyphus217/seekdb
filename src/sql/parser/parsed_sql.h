@@ -21,24 +21,40 @@
 
 namespace oceanbase::sql {
 struct ObSqlTraits;
+int statement_type(const peg::Node &statement, stmt::StmtType &type);
 
 class ParsedSql {
 public:
   ParsedSql() = default;
+  ParsedSql(ParsedSql &&) = default;
+  ParsedSql &operator=(ParsedSql &&) = default;
   ParsedSql(const ParsedSql &) = delete;
   ParsedSql &operator=(const ParsedSql &) = delete;
 
-  ParseResult &legacy() { return legacy_; }
-  const ParseResult &legacy() const { return legacy_; }
+  ParseResult &metadata() { return metadata_; }
+  const ParseResult &metadata() const { return metadata_; }
   const peg::Node *statement() const { return syntax_ ? &syntax_->root : nullptr; }
+  common::ObString source() const
+  {
+    return syntax_ && !syntax_->expanded_sql.empty()
+        ? common::ObString(syntax_->expanded_sql.size(), syntax_->expanded_sql.data())
+        : original_source_;
+  }
+  common::ObString original_source() const { return original_source_; }
+  common::ObString source(const peg::Node &node) const
+  {
+    return common::ObString(node.end - node.start, source().ptr() + node.start);
+  }
+  int preserve_source(common::ObIAllocator &allocator);
   int statement_type(stmt::StmtType &type) const;
   void sql_traits(ObSqlTraits &traits);
   bool is_end_transaction() const;
-  void reset() { syntax_.reset(); legacy_ = {}; }
+  void reset() { syntax_.reset(); original_source_.reset(); metadata_ = {}; }
 
 private:
   friend int parse_rust_sql(const common::ObString &, ParseResult &, bool, ParsedSql *);
-  ParseResult legacy_{};
+  ParseResult metadata_{};
+  common::ObString original_source_;
   std::optional<peg::ParseTree> syntax_;
 };
 }

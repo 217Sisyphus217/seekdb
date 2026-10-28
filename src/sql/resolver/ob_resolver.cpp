@@ -37,14 +37,10 @@
 #include "sql/resolver/ddl/ob_create_index_resolver.h"
 #include "sql/resolver/ddl/ob_drop_index_resolver.h"
 #include "sql/resolver/ddl/ob_create_database_resolver.h"
-#include "sql/resolver/ddl/ob_alter_database_resolver.h"
 #include "sql/resolver/ddl/ob_use_database_resolver.h"
 #include "sql/resolver/ddl/ob_drop_database_resolver.h"
 #include "sql/resolver/ddl/ob_create_view_resolver.h"
 #include "sql/resolver/ddl/ob_explain_resolver.h"
-#include "sql/resolver/ddl/ob_create_outline_resolver.h"
-#include "sql/resolver/ddl/ob_alter_outline_resolver.h"
-#include "sql/resolver/ddl/ob_drop_outline_resolver.h"
 #include "sql/resolver/ddl/ob_drop_routine_resolver.h"
 #include "sql/resolver/ddl/ob_trigger_resolver.h"
 #include "sql/resolver/ddl/ob_optimize_resolver.h"
@@ -52,22 +48,16 @@
 #include "ddl/ob_alter_routine_resolver.h"
 #include "sql/resolver/ddl/ob_create_package_resolver.h"
 #include "sql/resolver/ddl/ob_drop_package_resolver.h"
-#include "sql/resolver/ddl/ob_recyclebin_restore_resolver.h"
 #include "sql/resolver/ddl/ob_purge_resolver.h"
 #include "sql/resolver/ddl/ob_analyze_stmt_resolver.h"
-#include "sql/resolver/ddl/ob_set_comment_resolver.h"
-#include "sql/resolver/ddl/ob_lock_table_resolver.h"
 #include "sql/resolver/cmd/ob_variable_set_resolver.h"
 #include "sql/resolver/cmd/ob_show_resolver.h"
-#include "sql/resolver/cmd/ob_diff_table_resolver.h"
-#include "sql/resolver/cmd/ob_merge_table_resolver.h"
 #include "sql/resolver/cmd/ob_kill_resolver.h"
 #include "sql/resolver/cmd/ob_set_names_resolver.h"
 #include "sql/resolver/cmd/ob_set_transaction_resolver.h"
 #include "sql/resolver/cmd/ob_empty_query_resolver.h"
 #include "sql/resolver/cmd/ob_anonymous_block_resolver.h"
 #include "sql/resolver/cmd/ob_call_procedure_resolver.h"
-#include "sql/resolver/cmd/ob_load_data_resolver.h"
 #include "sql/resolver/expr/ob_raw_expr_wrap_enum_set.h"
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
 #include "sql/pl/ob_pl_package.h"
@@ -88,8 +78,8 @@ ObResolver::~ObResolver()
 {
 }
 
-template <typename ResolverType>
-int ObResolver::stmt_resolver_func(ObResolverParams &params, const ParseNode &parse_tree, ObStmt *&stmt)
+template <typename ResolverType, typename Syntax>
+int ObResolver::stmt_resolver_func(ObResolverParams &params, const Syntax &parse_tree, ObStmt *&stmt)
 {
   int ret = OB_SUCCESS;
   HEAP_VAR(ResolverType, stmt_resolver, params) {
@@ -101,7 +91,7 @@ int ObResolver::stmt_resolver_func(ObResolverParams &params, const ParseNode &pa
 }
 
 template <typename SelectResolverType>
-int ObResolver::select_stmt_resolver_func(ObResolverParams &params, const ParseNode &parse_tree, ObStmt *&stmt)
+int ObResolver::select_stmt_resolver_func(ObResolverParams &params, const peg::Node &parse_tree, ObStmt *&stmt)
 {
   int ret = OB_SUCCESS;
   HEAP_VAR(SelectResolverType, stmt_resolver, params) {
@@ -116,9 +106,22 @@ int ObResolver::select_stmt_resolver_func(ObResolverParams &params, const ParseN
 
 int ObResolver::resolve(const ParsedSql &parsed, ObStmt *&stmt)
 {
-  if (parsed.statement() == nullptr) {
-    return resolve(IS_NOT_PREPARED_STMT, *parsed.legacy().result_tree_->children_[0], stmt);
-  }
+  if (parsed.statement() == nullptr) { return OB_ERR_UNEXPECTED; }
+  params_.syntax_ = &parsed;
+  return resolve(*parsed.statement(), stmt);
+}
+
+int ObResolver::resolve_anonymous(const ParsedSql &parsed, ObStmt *&stmt)
+{
+  params_.resolver_scope_stmt_type_ = T_SP_ANONYMOUS_BLOCK;
+  params_.session_info_->set_stmt_type(stmt::T_ANONYMOUS_BLOCK);
+  params_.syntax_ = &parsed;
+  const int ret = stmt_resolver_func<ObAnonymousBlockResolver>(params_, parsed, stmt);
+  return ret == OB_SUCCESS ? finish_resolution(stmt) : ret;
+}
+
+int ObResolver::resolve(const peg::Node &statement, ObStmt *&stmt)
+{
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_resolve);
   int ret = OB_SUCCESS;
   stmt::StmtType type = stmt::T_NONE;
@@ -126,19 +129,297 @@ int ObResolver::resolve(const ParsedSql &parsed, ObStmt *&stmt)
       || OB_ISNULL(params_.session_info_) || OB_ISNULL(params_.expr_factory_)
       || OB_ISNULL(params_.query_ctx_)) {
     ret = OB_NOT_INIT;
-  } else if (OB_FAIL(parsed.statement_type(type))) {
+  } else if (OB_FAIL(statement_type(statement, type))) {
   } else {
     params_.session_info_->set_stmt_type(type);
     ObExecContext *exec_ctx = params_.session_info_->get_cur_exec_ctx();
     if (exec_ctx != nullptr && exec_ctx->get_sql_ctx() != nullptr) {
       exec_ctx->get_sql_ctx()->stmt_type_ = type;
     }
-    switch (parsed.statement()->kind) {
+    switch (statement.kind) {
+      case peg::NodeKind::PlBlock:
+      case peg::NodeKind::PlLabeledBlock:
+        params_.resolver_scope_stmt_type_ = T_SP_ANONYMOUS_BLOCK;
+        ret = stmt_resolver_func<ObAnonymousBlockResolver>(params_, *params_.syntax_, stmt);
+        break;
+      case peg::NodeKind::Select:
+        params_.resolver_scope_stmt_type_ = T_SELECT;
+        ret = select_stmt_resolver_func<ObSelectResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::Insert:
+      case peg::NodeKind::Replace:
+        params_.resolver_scope_stmt_type_ = T_INSERT;
+        ret = stmt_resolver_func<ObInsertResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::Update:
+        params_.resolver_scope_stmt_type_ = T_UPDATE;
+        ret = stmt_resolver_func<ObUpdateResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::Delete:
+        params_.resolver_scope_stmt_type_ = T_DELETE;
+        ret = stmt_resolver_func<ObDeleteResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::Explain:
+        params_.resolver_scope_stmt_type_ = T_EXPLAIN;
+        ret = stmt_resolver_func<ObExplainResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreateView:
+        params_.resolver_scope_stmt_type_ = T_CREATE_VIEW;
+        ret = stmt_resolver_func<ObCreateViewResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::VariableSet:
+        params_.resolver_scope_stmt_type_ = T_VARIABLE_SET;
+        ret = stmt_resolver_func<ObVariableSetResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::SetNames:
+      case peg::NodeKind::SetCharset:
+        params_.resolver_scope_stmt_type_ = T_SET_NAMES;
+        ret = stmt_resolver_func<ObSetNamesResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::Kill:
+        params_.resolver_scope_stmt_type_ = T_KILL;
+        ret = stmt_resolver_func<ObKillResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::Diagnostics:
+        params_.resolver_scope_stmt_type_ = T_DIAGNOSTICS;
+        ret = stmt_resolver_func<ObGetDiagnosticsResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreateTable:
+        params_.resolver_scope_stmt_type_ = T_CREATE_TABLE;
+        ret = stmt_resolver_func<ObCreateTableResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::AlterTable:
+        params_.resolver_scope_stmt_type_ = T_ALTER_TABLE;
+        ret = stmt_resolver_func<ObAlterTableResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreateIndex:
+        params_.resolver_scope_stmt_type_ = T_CREATE_INDEX;
+        ret = stmt_resolver_func<ObCreateIndexResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::DropView:
+        params_.resolver_scope_stmt_type_ = T_DROP_VIEW;
+        ret = stmt_resolver_func<ObDropTableResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::DropTable:
+        params_.resolver_scope_stmt_type_ = T_DROP_TABLE;
+        ret = stmt_resolver_func<ObDropTableResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::DropIndex:
+        params_.resolver_scope_stmt_type_ = T_DROP_INDEX;
+        ret = stmt_resolver_func<ObDropIndexResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreateTableLike:
+        params_.resolver_scope_stmt_type_ = T_CREATE_TABLE_LIKE;
+        ret = stmt_resolver_func<ObCreateTableLikeResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ForkTable:
+        params_.resolver_scope_stmt_type_ = T_FORK_TABLE;
+        ret = stmt_resolver_func<ObForkTableResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ForkDatabase:
+        params_.resolver_scope_stmt_type_ = T_FORK_DATABASE;
+        ret = stmt_resolver_func<ObForkDatabaseResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::Freeze:
+        params_.resolver_scope_stmt_type_ = T_FREEZE;
+        ret = stmt_resolver_func<ObFreezeResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::FlushCache:
+        params_.resolver_scope_stmt_type_ = T_FLUSH_CACHE;
+        ret = stmt_resolver_func<ObFlushCacheResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::FlushKvCache:
+        params_.resolver_scope_stmt_type_ = T_FLUSH_KVCACHE;
+        ret = stmt_resolver_func<ObFlushKVCacheResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::SetConfig:
+        params_.resolver_scope_stmt_type_ = T_ALTER_SYSTEM_SET_PARAMETER;
+        ret = stmt_resolver_func<ObSetConfigResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::SetTracepoint:
+        params_.resolver_scope_stmt_type_ = T_ALTER_SYSTEM_SETTP;
+        ret = stmt_resolver_func<ObSetTPResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreateDatabase:
+        params_.resolver_scope_stmt_type_ = T_CREATE_DATABASE;
+        ret = stmt_resolver_func<ObCreateDatabaseResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::UseDatabase:
+        params_.resolver_scope_stmt_type_ = T_USE_DATABASE;
+        ret = stmt_resolver_func<ObUseDatabaseResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::DropDatabase:
+        params_.resolver_scope_stmt_type_ = T_DROP_DATABASE;
+        ret = stmt_resolver_func<ObDropDatabaseResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::RenameTables:
+        params_.resolver_scope_stmt_type_ = T_RENAME_TABLE;
+        ret = stmt_resolver_func<ObRenameTableResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::TruncateTable:
+        params_.resolver_scope_stmt_type_ = T_TRUNCATE_TABLE;
+        ret = stmt_resolver_func<ObTruncateTableResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::PurgeTable:
+        params_.resolver_scope_stmt_type_ = T_PURGE_TABLE;
+        ret = stmt_resolver_func<ObPurgeTableResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::PurgeIndex:
+        params_.resolver_scope_stmt_type_ = T_PURGE_INDEX;
+        ret = stmt_resolver_func<ObPurgeIndexResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::PurgeDatabase:
+        params_.resolver_scope_stmt_type_ = T_PURGE_DATABASE;
+        ret = stmt_resolver_func<ObPurgeDatabaseResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::PurgeRecyclebin:
+        params_.resolver_scope_stmt_type_ = T_PURGE_RECYCLEBIN;
+        ret = stmt_resolver_func<ObPurgeRecycleBinResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::OptimizeTable:
+        params_.resolver_scope_stmt_type_ = T_OPTIMIZE_TABLE;
+        ret = stmt_resolver_func<ObOptimizeTableResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::SetTransaction:
+        params_.resolver_scope_stmt_type_ = T_TRANSACTION;
+        ret = stmt_resolver_func<ObSetTransactionResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowTables:
+        params_.resolver_scope_stmt_type_ = T_SHOW_TABLES;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowDatabases:
+        params_.resolver_scope_stmt_type_ = T_SHOW_DATABASES;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowVariables:
+        params_.resolver_scope_stmt_type_ = T_SHOW_VARIABLES;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowColumns:
+        params_.resolver_scope_stmt_type_ = T_SHOW_COLUMNS;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowCreateDatabase:
+        params_.resolver_scope_stmt_type_ = T_SHOW_CREATE_DATABASE;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowCreateTable:
+        params_.resolver_scope_stmt_type_ = T_SHOW_CREATE_TABLE;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowCreateView:
+        params_.resolver_scope_stmt_type_ = T_SHOW_CREATE_VIEW;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowCreateProcedure:
+        params_.resolver_scope_stmt_type_ = T_SHOW_CREATE_PROCEDURE;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowCreateFunction:
+        params_.resolver_scope_stmt_type_ = T_SHOW_CREATE_FUNCTION;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowParameters:
+        params_.resolver_scope_stmt_type_ = T_SHOW_PARAMETERS;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowIndexes:
+        params_.resolver_scope_stmt_type_ = T_SHOW_INDEXES;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowProcesslist:
+        params_.resolver_scope_stmt_type_ = T_SHOW_PROCESSLIST;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowWarnings:
+        params_.resolver_scope_stmt_type_ = T_SHOW_WARNINGS;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowErrors:
+        params_.resolver_scope_stmt_type_ = T_SHOW_ERRORS;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowCharset:
+        params_.resolver_scope_stmt_type_ = T_SHOW_CHARSET;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowCollation:
+        params_.resolver_scope_stmt_type_ = T_SHOW_COLLATION;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowGrants:
+        params_.resolver_scope_stmt_type_ = T_SHOW_GRANTS;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ShowCreateTrigger:
+        params_.resolver_scope_stmt_type_ = T_SHOW_CREATE_TRIGGER;
+        ret = stmt_resolver_func<ObShowResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::EmptyQuery:
+        params_.resolver_scope_stmt_type_ = T_EMPTY_QUERY;
+        ret = stmt_resolver_func<ObEmptyQueryResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreateProcedure:
+        params_.resolver_scope_stmt_type_ = T_SP_CREATE;
+        ret = stmt_resolver_func<ObCreateRoutineResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::AlterProcedure:
+        params_.resolver_scope_stmt_type_ = T_SP_ALTER;
+        ret = stmt_resolver_func<ObAlterProcedureResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::PlCall:
+        params_.resolver_scope_stmt_type_ = T_SP_CALL_STMT;
+        ret = stmt_resolver_func<ObCallProcedureResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreateFunction:
+        params_.resolver_scope_stmt_type_ = T_SF_CREATE;
+        ret = stmt_resolver_func<ObCreateRoutineResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::AlterFunction:
+        params_.resolver_scope_stmt_type_ = T_SF_ALTER;
+        ret = stmt_resolver_func<ObAlterFunctionResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::DropProcedure:
+        params_.resolver_scope_stmt_type_ = T_SP_DROP;
+        ret = stmt_resolver_func<ObDropProcedureResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::DropFunction:
+        params_.resolver_scope_stmt_type_ = T_SF_DROP;
+        ret = stmt_resolver_func<ObDropFunctionResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreatePackage:
+        params_.resolver_scope_stmt_type_ = T_PACKAGE_CREATE;
+        ret = stmt_resolver_func<ObCreatePackageResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreatePackageBody:
+        params_.resolver_scope_stmt_type_ = T_PACKAGE_CREATE_BODY;
+        ret = stmt_resolver_func<ObCreatePackageBodyResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::DropPackage:
+        params_.resolver_scope_stmt_type_ = T_PACKAGE_DROP;
+        ret = stmt_resolver_func<ObDropPackageResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::Analyze:
+        params_.resolver_scope_stmt_type_ = T_MYSQL_ANALYZE;
+        ret = stmt_resolver_func<ObAnalyzeStmtResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::CreateTrigger:
+        params_.resolver_scope_stmt_type_ = T_TG_CREATE;
+        ret = stmt_resolver_func<ObTriggerResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::DropTrigger:
+        params_.resolver_scope_stmt_type_ = T_TG_DROP;
+        ret = stmt_resolver_func<ObTriggerResolver>(params_, statement, stmt);
+        break;
+      case peg::NodeKind::ResetConfig:
+        params_.resolver_scope_stmt_type_ = T_ALTER_SYSTEM_RESET_PARAMETER;
+        ret = stmt_resolver_func<ObResetConfigResolver>(params_, statement, stmt);
+        break;
       case peg::NodeKind::Prepare:
       case peg::NodeKind::Execute:
       case peg::NodeKind::Deallocate:
-        ret = resolve_prepared_command(*parsed.statement(), params_, stmt);
-        break;
+        return resolve_prepared_command(statement, params_, stmt);
       case peg::NodeKind::CreateUser:
       case peg::NodeKind::DropUser:
       case peg::NodeKind::SetPassword:
@@ -152,467 +433,61 @@ int ObResolver::resolve(const ParsedSql &parsed, ObStmt *&stmt)
       case peg::NodeKind::SetRole:
       case peg::NodeKind::SetDefaultRole:
       case peg::NodeKind::AlterUserDefaultRole:
-        ret = resolve_access_control(*parsed.statement(), params_, stmt);
-        break;
+        return resolve_access_control(statement, params_, stmt);
       default:
-        ret = resolve_transaction(*parsed.statement(), params_, stmt);
+        return resolve_transaction(statement, params_, stmt);
     }
   }
+  if (OB_SUCC(ret)) ret = finish_resolution(stmt);
   return ret;
 }
 
-int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObStmt *&stmt)
+int ObResolver::finish_resolution(ObStmt *stmt)
 {
-#define REGISTER_STMT_RESOLVER(name)                                   \
-  do {                                                                 \
-    ret = stmt_resolver_func<Ob##name##Resolver>(params_, *real_parse_tree, stmt); \
-  } while (0)
-
-#define REGISTER_SELECT_STMT_RESOLVER(name)                                   \
-  do {                                                                        \
-    ret = select_stmt_resolver_func<Ob##name##Resolver>(params_, parse_tree, stmt); \
-  } while (0)
-  ACTIVE_SESSION_FLAG_SETTER_GUARD(in_resolve);
   int ret = OB_SUCCESS;
-  const ParseNode *real_parse_tree = NULL;
-  int64_t questionmark_count = 0;
-  UNUSED(if_prepared);
-  if (OB_ISNULL(params_.allocator_)
-      || OB_ISNULL(params_.schema_checker_)
-      || OB_ISNULL(params_.session_info_)
-      || OB_ISNULL(params_.expr_factory_)
-      || OB_ISNULL(params_.query_ctx_)) {
-    ret = OB_NOT_INIT;
-  } else {
-    real_parse_tree = &parse_tree;
+  if (OB_SUCC(ret) && stmt->is_dml_stmt() && !params_.session_info_->is_varparams_sql_prepare()) {
+    ObDMLStmt *dml_stmt = static_cast<ObDMLStmt*>(stmt);
+    ObRawExprWrapEnumSet enum_set_wrapper(*params_.expr_factory_, params_.session_info_);
+    if (OB_FAIL(enum_set_wrapper.wrap_enum_set(*dml_stmt))) {
+    }
   }
 
+  if (OB_SUCC(ret) && stmt->is_dml_stmt() && !stmt->is_explain_stmt()) {
+    if (OB_FAIL(params_.query_ctx_->query_hint_.init_query_hint(params_.allocator_,
+                                                                params_.session_info_,
+                                                                static_cast<ObDMLStmt*>(stmt)))) {
+    } else if (OB_FAIL(params_.query_ctx_->query_hint_.check_and_set_params_from_hint(params_,
+                                                       *static_cast<ObDMLStmt*>(stmt)))) {
+    }
+  }
+
+  if (OB_SUCC(ret) && stmt->is_dml_stmt() && !stmt->is_explain_stmt()) {
+    bool is_contain_inner_table = false;
+    bool is_contain_select_for_update = false;
+    ObDMLStmt *dml_stmt = static_cast<ObDMLStmt*>(stmt);
+    if (OB_FAIL(dml_stmt->check_if_contain_inner_table(is_contain_inner_table))) {
+    } else if (OB_FAIL(dml_stmt->check_if_contain_select_for_update(
+                is_contain_select_for_update))) {
+    } else {
+      params_.query_ctx_->is_contain_inner_table_ = is_contain_inner_table;
+      params_.query_ctx_->is_contain_select_for_update_ = is_contain_select_for_update;
+      params_.query_ctx_->has_dml_write_stmt_ = dml_stmt->is_dml_write_stmt();
+    }
+
+  }
   if (OB_SUCC(ret)) {
-    params_.resolver_scope_stmt_type_ = parse_tree.type_;
-    params_.session_info_->set_stmt_type(
-      ObResolverUtils::get_stmt_type_by_item_type(parse_tree.type_));
-    ObExecContext *exec_ctx = params_.session_info_->get_cur_exec_ctx();
-    if (exec_ctx != nullptr && exec_ctx->get_sql_ctx() != nullptr) {
-      //save the current stmt type on my context,
-      //some other modules may need to get the current SQL stmt type through its context
-      ObSqlCtx *sql_ctx = exec_ctx->get_sql_ctx();
-      sql_ctx->stmt_type_ = ObResolverUtils::get_stmt_type_by_item_type(parse_tree.type_);
-    }
+    stmt::StmtType stmt_type = stmt->get_stmt_type();
+    if (ObStmt::is_ddl_stmt(stmt_type, stmt->has_global_variable()) || ObStmt::is_dcl_stmt(stmt_type)) {
+      ObDDLStmt *ddl_stmt = static_cast<ObDDLStmt*>(stmt);
+      obcall::ObDDLArg &ddl_arg = ddl_stmt->get_ddl_arg();
 
-    switch (real_parse_tree->type_) {
-      case T_CREATE_TABLE: {
-        REGISTER_STMT_RESOLVER(CreateTable);
-        break;
-      }
-      case T_ALTER_TABLE: {
-        REGISTER_STMT_RESOLVER(AlterTable);
-        break;
-      }
-      case T_CREATE_INDEX: {
-        REGISTER_STMT_RESOLVER(CreateIndex);
-        break;
-      }
-      case T_CREATE_VIEW: {
-        REGISTER_STMT_RESOLVER(CreateView);
-        break;
-      }
-      case T_ALTER_VIEW: {
-#if 0
-        ObAlterViewResolver stmt_resolver(params_);
-        if (OB_FAIL(stmt_resolver.resolve(*node))) {
-        }
-
-        stmt = stmt_resolver.get_basic_stmt();
-#endif
-        ret = OB_NOT_SUPPORTED;
-        LOG_WARN("not support to alter view");
-	      LOG_USER_ERROR(OB_NOT_SUPPORTED, "alter view");
-        break;
-      }
-      case T_DROP_VIEW:
-      case T_DROP_TABLE: {
-        REGISTER_STMT_RESOLVER(DropTable);
-        break;
-      }
-      case T_DROP_INDEX: {
-        REGISTER_STMT_RESOLVER(DropIndex);
-        break;
-      }
-      case T_CREATE_TABLE_LIKE: {
-        REGISTER_STMT_RESOLVER(CreateTableLike);
-        break;
-      }
-      case T_FORK_TABLE: {
-        REGISTER_STMT_RESOLVER(ForkTable);
-        break;
-      }
-      case T_FORK_DATABASE: {
-        REGISTER_STMT_RESOLVER(ForkDatabase);
-        break;
-      }
-      case T_DIFF_TABLE: {
-        REGISTER_STMT_RESOLVER(DiffTable);
-        break;
-      }
-      case T_MERGE_TABLE: {
-        REGISTER_STMT_RESOLVER(MergeTable);
-        break;
-      }
-      case T_SELECT: {
-        REGISTER_SELECT_STMT_RESOLVER(Select);
-        break;
-      }
-      case T_INSERT: {
-        REGISTER_STMT_RESOLVER(Insert);
-        break;
-      }
-      case T_UPDATE: {
-        REGISTER_STMT_RESOLVER(Update);
-        break;
-      }
-      case T_DELETE: {
-        REGISTER_STMT_RESOLVER(Delete);
-        break;
-      }
-      case T_FREEZE: {
-        REGISTER_STMT_RESOLVER(Freeze);
-        break;
-      }
-      case T_FLUSH_CACHE: {
-        REGISTER_STMT_RESOLVER(FlushCache);
-        break;
-      }
-      case T_FLUSH_KVCACHE: {
-        REGISTER_STMT_RESOLVER(FlushKVCache);
-        break;
-      }
-      case T_FLUSH_ILOGCACHE: {
-        REGISTER_STMT_RESOLVER(FlushIlogCache);
-        break;
-      }
-      case T_FLUSH_DAG_WARNINGS: {
-        REGISTER_STMT_RESOLVER(FlushDagWarnings);
-        break;
-      }
-      case T_MERGE_CONTROL: {
-        REGISTER_STMT_RESOLVER(AdminMerge);
-        break;
-      }
-      case T_CANCEL_TASK: {
-        REGISTER_STMT_RESOLVER(CancelTask);
-        break;
-      }
-      case T_REFRESH_MEMORY_STAT: {
-        REGISTER_STMT_RESOLVER(RefreshMemStat);
-        break;
-      }
-      case T_REFRESH_IO_CALIBRATION: {
-        REGISTER_STMT_RESOLVER(RefreshIOCalibration);
-        break;
-      }
-      case T_SWITCHOVER_TO_STANDBY:
-      case T_SWITCHOVER_TO_PRIMARY:
-      case T_ACTIVATE_STANDBY: {
-        REGISTER_STMT_RESOLVER(SwitchRole);
-        break;
-      }
-      case T_ALTER_SYSTEM_SET_PARAMETER: {
-        REGISTER_STMT_RESOLVER(SetConfig);
-        break;
-      }
-      case T_ALTER_SYSTEM_SETTP: {
-        REGISTER_STMT_RESOLVER(SetTP);
-        break;
-      }
-      case T_CLEAR_MERGE_ERROR: {
-        REGISTER_STMT_RESOLVER(ClearMergeError);
-        break;
-      }
-      case T_CREATE_DATABASE: {
-        REGISTER_STMT_RESOLVER(CreateDatabase);
-        break;
-      }
-      case T_USE_DATABASE: {
-        REGISTER_STMT_RESOLVER(UseDatabase);
-        break;
-      }
-      case T_ALTER_DATABASE: {
-        REGISTER_STMT_RESOLVER(AlterDatabase);
-        break;
-      }
-      case T_DROP_DATABASE: {
-        REGISTER_STMT_RESOLVER(DropDatabase);
-        break;
-      }
-      case T_RENAME_TABLE: {
-        REGISTER_STMT_RESOLVER(RenameTable);
-        break;
-      }
-      case T_TRUNCATE_TABLE: {
-        REGISTER_STMT_RESOLVER(TruncateTable);
-        break;
-      }
-      case T_RECYCLEBIN_RESTORE_TABLE: {
-        REGISTER_STMT_RESOLVER(RecyclebinRestoreTable);
-        break;
-      }
-      case T_RECYCLEBIN_RESTORE_DATABASE: {
-        REGISTER_STMT_RESOLVER(RecyclebinRestoreDatabase);
-        break;
-      }
-      case T_PURGE_TABLE: {
-        REGISTER_STMT_RESOLVER(PurgeTable);
-        break;
-      }
-      case T_PURGE_INDEX: {
-        REGISTER_STMT_RESOLVER(PurgeIndex);
-        break;
-      }
-      case T_PURGE_DATABASE: {
-        REGISTER_STMT_RESOLVER(PurgeDatabase);
-        break;
-      }
-      case T_PURGE_RECYCLEBIN: {
-        REGISTER_STMT_RESOLVER(PurgeRecycleBin);
-        break;
-      }
-      case T_OPTIMIZE_TABLE: {
-        REGISTER_STMT_RESOLVER(OptimizeTable);
-        break;
-      }
-      case T_VARIABLE_SET: {
-        REGISTER_STMT_RESOLVER(VariableSet);
-        break;
-      }
-      case T_TRANSACTION: {
-        REGISTER_STMT_RESOLVER(SetTransaction);
-        break;
-      }
-      case T_SHOW_TABLES:
-      case T_SHOW_DATABASES:
-      case T_SHOW_VARIABLES:
-      case T_SHOW_COLUMNS:
-      case T_SHOW_SCHEMA:
-      case T_SHOW_CREATE_DATABASE:
-      case T_SHOW_CREATE_TABLE:
-      case T_SHOW_CREATE_VIEW:
-      case T_SHOW_CREATE_PROCEDURE:
-      case T_SHOW_CREATE_FUNCTION:
-      case T_SHOW_TABLE_STATUS:
-      case T_SHOW_PARAMETERS:
-      case T_SHOW_INDEXES:
-      case T_SHOW_PROCESSLIST:
-      case T_SHOW_WARNINGS:
-      case T_SHOW_ERRORS:
-      case T_SHOW_TRACE:
-      case T_SHOW_ENGINES:
-      case T_SHOW_PROFILE:
-      case T_SHOW_ENGINE:
-      case T_SHOW_OPEN_TABLES:
-      case T_SHOW_PRIVILEGES:
-      case T_SHOW_CHARSET:
-      case T_SHOW_COLLATION:
-      case T_SHOW_GRANTS:
-      case T_SHOW_RECYCLEBIN:
-      case T_SHOW_PROCEDURE_STATUS:
-      case T_SHOW_FUNCTION_STATUS:
-      case T_SHOW_TRIGGERS:
-      case T_SHOW_STATUS:
-      case T_SHOW_CREATE_TRIGGER:
-      case T_SHOW_CHECK_TABLE:
-      case T_SHOW_CREATE_USER: {
-        REGISTER_STMT_RESOLVER(Show);
-        break;
-      }
-      case T_EXPLAIN: {
-        REGISTER_STMT_RESOLVER(Explain);
-        break;
-      }
-      case T_ALTER_SYSTEM_SET: {
-        REGISTER_STMT_RESOLVER(AlterSystemSet);
-        break;
-      }
-      case T_ALTER_SYSTEM_KILL: {
-        REGISTER_STMT_RESOLVER(Kill);
-        break;
-      }
-      case T_ALTER_SESSION_SET: {
-        REGISTER_STMT_RESOLVER(AlterSessionSet);
-        break;
-      }
-      case T_SET_NAMES:
-        // fall through
-      case T_SET_CHARSET: {
-        REGISTER_STMT_RESOLVER(SetNames);
-        break;
-      }
-      case T_KILL: {
-        REGISTER_STMT_RESOLVER(Kill);
-        break;
-      }
-      case T_EMPTY_QUERY: {
-        REGISTER_STMT_RESOLVER(EmptyQuery);
-        break;
-      }
-      case T_FLUSH_PRIVILEGES: {
-        REGISTER_STMT_RESOLVER(EmptyQuery);
-        break;
-      }
-      case T_LOCK_TABLE: {
-        REGISTER_STMT_RESOLVER(LockTable);
-        break;
-      }
-      case T_CREATE_OUTLINE: {
-        REGISTER_STMT_RESOLVER(CreateOutline);
-        break;
-      }
-      case T_ALTER_OUTLINE: {
-        REGISTER_STMT_RESOLVER(AlterOutline);
-        break;
-      }
-      case T_DROP_OUTLINE: {
-        REGISTER_STMT_RESOLVER(DropOutline);
-        break;
-      }
-      case T_SP_CREATE: {
-        REGISTER_STMT_RESOLVER(CreateProcedure);
-        break;
-      }
-      case T_SP_ALTER: {
-        REGISTER_STMT_RESOLVER(AlterProcedure);
-        break;
-      }
-      case T_SP_CALL_STMT: {
-        REGISTER_STMT_RESOLVER(CallProcedure);
-        break;
-      }
-      case T_SF_CREATE: {
-        REGISTER_STMT_RESOLVER(CreateFunction);
-        break;
-      }
-      case T_SF_ALTER: {
-        REGISTER_STMT_RESOLVER(AlterFunction);
-        break;
-      }
-      case T_SP_DROP: {
-        REGISTER_STMT_RESOLVER(DropProcedure);
-        break;
-      }
-      case T_SF_DROP: {
-        REGISTER_STMT_RESOLVER(DropFunction);
-        break;
-      }
-      case T_SP_ANONYMOUS_BLOCK: {
-        REGISTER_STMT_RESOLVER(AnonymousBlock);
-        break;
-      }
-      case T_PACKAGE_CREATE: {
-        REGISTER_STMT_RESOLVER(CreatePackage);
-        break;
-      }
-      case T_PACKAGE_CREATE_BODY: {
-        REGISTER_STMT_RESOLVER(CreatePackageBody);
-        break;
-      }
-      case T_PACKAGE_DROP: {
-        REGISTER_STMT_RESOLVER(DropPackage);
-        break;
-      }
-      case T_MYSQL_UPDATE_HISTOGRAM:
-      case T_MYSQL_DROP_HISTOGRAM:
-      case T_MYSQL_ANALYZE: {
-        REGISTER_STMT_RESOLVER(AnalyzeStmt);
-        break;
-      }
-      case T_LOAD_DATA_URL:
-      case T_LOAD_DATA: {
-        REGISTER_STMT_RESOLVER(LoadData);
-        break;
-      }
-      case T_SET_TABLE_COMMENT:
-      case T_SET_COLUMN_COMMENT: {
-        REGISTER_STMT_RESOLVER(SetComment);
-        break;
-      }
-      case T_TG_CREATE: {
-        REGISTER_STMT_RESOLVER(Trigger);
-        break;
-      }
-      case T_TG_DROP: {
-        REGISTER_STMT_RESOLVER(Trigger);
-        break;
-      }
-      case T_TG_ALTER: {
-        REGISTER_STMT_RESOLVER(Trigger);
-        break;
-      }
-      case T_DIAGNOSTICS: {
-        REGISTER_STMT_RESOLVER(GetDiagnostics);
-        break;
-      }
-      case T_ALTER_SYSTEM_RESET_PARAMETER: {
-        REGISTER_STMT_RESOLVER(ResetConfig);
-        break;
-      }
-      case T_ALTER_SYSTEM_RESET: {
-        REGISTER_STMT_RESOLVER(AlterSystemReset);
-        break;
-      }
-      default: {
-        ret = OB_NOT_SUPPORTED;
-        const char *type_name = get_type_name(parse_tree.type_);
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "statement type");
-        break;
-      }
-    }  // end switch
-    if (OB_SUCC(ret) && stmt->is_dml_write_stmt()) {
-      // todo yanli:check leader-follower database
-    }
-    
-    if (OB_SUCC(ret) && stmt->is_dml_stmt() && !params_.session_info_->is_varparams_sql_prepare()) {
-      ObDMLStmt *dml_stmt = static_cast<ObDMLStmt*>(stmt);
-      ObRawExprWrapEnumSet enum_set_wrapper(*params_.expr_factory_, params_.session_info_);
-      if (OB_FAIL(enum_set_wrapper.wrap_enum_set(*dml_stmt))) {
-      }
-    }
-
-    if (OB_SUCC(ret) && stmt->is_dml_stmt() && !stmt->is_explain_stmt()) {
-      if (OB_FAIL(params_.query_ctx_->query_hint_.init_query_hint(params_.allocator_,
-                                                                  params_.session_info_,
-                                                                  static_cast<ObDMLStmt*>(stmt)))) {
-      } else if (OB_FAIL(params_.query_ctx_->query_hint_.check_and_set_params_from_hint(params_,
-                                                         *static_cast<ObDMLStmt*>(stmt)))) {
-      }
-    }
-
-    if (OB_SUCC(ret) && stmt->is_dml_stmt() && !stmt->is_explain_stmt()) {
-      bool is_contain_inner_table = false;
-      bool is_contain_select_for_update = false;
-      ObDMLStmt *dml_stmt = static_cast<ObDMLStmt*>(stmt);
-      if (OB_FAIL(dml_stmt->check_if_contain_inner_table(is_contain_inner_table))) {
-      } else if (OB_FAIL(dml_stmt->check_if_contain_select_for_update(
-                  is_contain_select_for_update))) {
+      if (OB_ISNULL(params_.query_ctx_)) {
+        ret = OB_ERR_UNEXPECTED;
       } else {
-        params_.query_ctx_->is_contain_inner_table_ = is_contain_inner_table;
-        params_.query_ctx_->is_contain_select_for_update_ = is_contain_select_for_update;
-        params_.query_ctx_->has_dml_write_stmt_ = dml_stmt->is_dml_write_stmt();
-      }
-
-    }
-    if (OB_SUCC(ret)) {
-      stmt::StmtType stmt_type = stmt->get_stmt_type();
-      if (ObStmt::is_ddl_stmt(stmt_type, stmt->has_global_variable()) || ObStmt::is_dcl_stmt(stmt_type)) {
-        ObDDLStmt *ddl_stmt = static_cast<ObDDLStmt*>(stmt);
-        obcall::ObDDLArg &ddl_arg = ddl_stmt->get_ddl_arg();
-
-        if (OB_ISNULL(params_.query_ctx_)) {
-          ret = OB_ERR_UNEXPECTED;
-        } else {
-          ddl_arg.ddl_stmt_str_ = params_.query_ctx_->get_sql_stmt();
-        }
+        ddl_arg.ddl_stmt_str_ = params_.query_ctx_->get_sql_stmt();
       }
     }
-  }  // end if
+  }
   return ret;
 }
 

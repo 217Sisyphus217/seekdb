@@ -185,13 +185,13 @@ int ObPLRouter::simple_resolve(ObPLFunctionAST &func_ast)
     }
   }
   //Parser
-  ObStmtNodeTree *parse_tree = NULL;
+  sql::ParsedSql syntax;
   if (OB_SUCC(ret)) {
     ObString body = routine_info_.get_routine_body(); // get body string
     ObPLParser parser(inner_allocator_, session_info_.get_sql_mode());
     if (OB_FAIL(ObSQLUtils::convert_sql_text_from_schema_for_resolve(
                   inner_allocator_, session_info_.get_dtc_params(), body))) {
-    } else if (OB_FAIL(parser.parse(body, parse_tree))) {
+    } else if (OB_FAIL(parser.parse(body, syntax))) {
     }
   }
 
@@ -217,10 +217,10 @@ int ObPLRouter::simple_resolve(ObPLFunctionAST &func_ast)
                           NULL,
                           NULL,
                           routine_info_.get_tg_timing_event());
-    if (OB_ISNULL(parse_tree)) {
+    if (OB_ISNULL(syntax.statement())) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(resolver.init(func_ast))) {
-    } else if (OB_FAIL(resolver.resolve(parse_tree, func_ast))) {
+    } else if (OB_FAIL(resolver.resolve(syntax, func_ast))) {
     } else if (func_ast.is_function() && !func_ast.has_return()) {
       ret = OB_ERR_NO_RETURN_IN_FUNCTION;
       LOG_USER_ERROR(OB_ERR_NO_RETURN_IN_FUNCTION, func_ast.get_name().length(), 

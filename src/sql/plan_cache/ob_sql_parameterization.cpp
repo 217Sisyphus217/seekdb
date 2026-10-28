@@ -16,6 +16,8 @@
 
 #define USING_LOG_PREFIX SQL_PC
 #include "rust/config.h"
+#include <algorithm>
+#include "sql/parser/parsed_sql.h"
 #include "ob_sql_parameterization.h"
 #include "lib/json/ob_json_print_utils.h"
 #include "sql/resolver/ob_resolver_utils.h"
@@ -36,853 +38,809 @@ SqlInfo::SqlInfo() :
 {
 }
 
-namespace oceanbase {
-namespace sql {
-struct ArgumentParameterization
-{
-  const ParseNode *arguments_ = nullptr;
-  int64_t excluded_begin_ = 0;
-  int64_t excluded_end_ = 0;
+namespace oceanbase::sql {
+namespace {
+using SyntaxKind = peg::NodeKind;
 
-  bool excludes(const ParseNode *parent, int64_t index) const
-  {
-    return parent == arguments_ && index >= excluded_begin_ && index < excluded_end_;
-  }
+struct ParameterScope {
+  bool excluded = false;
+  bool projection = false;
+  bool direct_value = false;
+  bool arithmetic = false;
+  bool ignore_scale = false;
+  bool positive = false;
+  const peg::Node *subtraction = nullptr;
+  const peg::Node *subtraction_operand = nullptr;
 };
 
-struct TransformTreeCtx
-{
-  ObIAllocator *allocator_;
-  ParseNode *top_node_;
-  ParseNode *tree_;
-  ObStmtScope expr_scope_;
-  int64_t value_father_level_;
-  ObCollationType collation_type_;
-  ObCollationType national_collation_type_;
-  const ObTimeZoneInfo *tz_info_;
-  int64_t question_num_;
-  ParamStore *params_;
-  ParameterizationResult *parameterization_;
-  bool not_param_; // indicates that this node and its child nodes cannot be parameterized even when they are constants
-  bool is_fast_parse_const_; // indicates whether the current node is a constant recognizable by fp
-  bool enable_contain_param_;//Indicates whether the constants in this node and its sub-nodes are fp-recognizable parameters.
-  SqlInfo *sql_info_;
-  int64_t paramlized_questionmask_count_;
-  bool is_transform_outline_;
-  ObLengthSemantics default_length_semantics_;
-  struct Projection {
-    const ParseNode *node_;
-    bool string_literal_;
-  };
-  ObSEArray<Projection, 16> project_list_;
-  const ObIArray<ObPCParam *> *raw_params_;
+struct LiteralOccurrence {
+  const peg::Node *literal;
+  const peg::Node *expression;
+  ParameterScope scope;
+  ParameterOrigin origin;
+  size_t source_begin;
+};
+
+class SyntaxParameterizer {
+public:
+  SyntaxParameterizer(ObIAllocator &allocator, const ObSQLSessionInfo &session,
+                      const ParsedSql &parsed, SqlInfo &info, ParamStore &params,
+                      ParameterizationResult &bindings, SQL_EXECUTION_MODE mode,
+                      bool outline, bool from_pl)
+      : allocator_(allocator), session_(session), parsed_(parsed), info_(info),
+        params_(params), bindings_(bindings), mode_(mode), outline_(outline), from_pl_(from_pl) {}
+
+  int collect(const peg::Node &node, ParameterScope scope = {});
+  int apply(const ObIArray<ObPCParam *> &tokens, SelectItemParamInfoMap *projection_names);
+  const ObIArray<ObString> &user_variables() const { return user_variables_; }
+
+private:
+  int query(const peg::Node &node, ParameterScope scope);
+  int table(const peg::Node &node, ParameterScope scope);
+  int window(const peg::Node &node, ParameterScope scope);
+  int call(const peg::Node &node, ParameterScope scope);
+  int list(rust::Slice<const peg::Node> nodes, ParameterScope scope);
+  int exclude(const peg::Node &node);
+  int literal(const peg::Node &node, const peg::Node &expression,
+              ParameterScope scope, ParameterOrigin origin = ParameterOrigin::Literal);
+  int negate(const peg::Node &node, bool negate, const NumericLiteral *&result);
+  void subtraction_scope(const peg::Node &node, ParameterScope &scope);
+  int projection_name(const peg::Node &projection, const ObIArray<ObPCParam *> &tokens,
+                      SelectItemParamInfoMap &names);
+  int bind(LiteralOccurrence &occurrence, int64_t token_index,
+           const ObPCParam &token, ObCollationType collation);
+  bool excluded(size_t start, size_t end) const;
+
+  ObIAllocator &allocator_;
+  const ObSQLSessionInfo &session_;
+  const ParsedSql &parsed_;
+  SqlInfo &info_;
+  ParamStore &params_;
+  ParameterizationResult &bindings_;
   SQL_EXECUTION_MODE mode_;
-  bool is_project_list_scope_;
-  int64_t assign_father_level_;
-  bool ignore_scale_check_;
-  bool is_from_pl_;
-  ObItemType parent_type_;
-  TransformTreeCtx();
+  bool outline_;
+  bool from_pl_;
+  ObSEArray<LiteralOccurrence, 32> literals_;
+  ObSEArray<const peg::Node *, 16> exclusions_;
+  ObSEArray<const peg::Node *, 16> projections_;
+  ObSEArray<ObString, 4> user_variables_;
 };
 
-struct SelectItemTraverseCtx
+int SyntaxParameterizer::exclude(const peg::Node &node)
 {
-  const common::ObIArray<ObPCParam *> &raw_params_;
-  const ParseNode *tree_;
-  const ObString &org_expr_name_;
-  const int64_t expr_start_pos_;
-  const int64_t buf_len_;
-  int64_t &expr_pos_;
-  SelectItemParamInfo &param_info_;
-  const ParameterizationResult &parameterization_;
-
-  SelectItemTraverseCtx(const common::ObIArray<ObPCParam *> &raw_params,
-                        const ParseNode *tree,
-                        const ObString &org_expr_name,
-                        const int64_t expr_start_pos,
-                        const int64_t buf_len,
-                        int64_t &expr_pos,
-                        SelectItemParamInfo &param_info,
-                        const ParameterizationResult &bindings)
-    : raw_params_(raw_params), tree_(tree), org_expr_name_(org_expr_name),
-      expr_start_pos_(expr_start_pos), buf_len_(buf_len), expr_pos_(expr_pos), param_info_(param_info), parameterization_(bindings) {}
-};
-
-struct TraverseStackFrame
-{
-  const ParseNode *cur_node_;
-  int64_t next_child_idx_;
-
-  TO_STRING_KV(K_(next_child_idx),
-               K(cur_node_->type_));
-};
-
-}
+  int ret = OB_SUCCESS;
+  info_.ps_need_parameterized_ = false;
+  ParameterScope scope;
+  scope.excluded = true;
+  if (node.kind == SyntaxKind::JsonColumn
+      && peg::json_column_kind(node) == peg::JsonColumnKind::Nested) {
+    OZ (exclude(peg::json_path(node)));
+    for (const auto &column : peg::json_nested_columns(node)) OZ (exclude(column));
+    return ret;
+  }
+  for (const auto &reference : peg::syntax_literals(node)) {
+    OZ (literal(reference.node, reference.node, scope));
+  }
+  if (node.kind == SyntaxKind::JsonColumn
+      && peg::json_column_kind(node) == peg::JsonColumnKind::Value) {
+    OZ (exclude(peg::json_error_clause(node)));
+    OZ (exclude(peg::json_empty_clause(node)));
+  }
+  if (node.start < node.end) { OZ (exclusions_.push_back(&node)); }
+  return ret;
 }
 
-TransformTreeCtx::TransformTreeCtx() :
- allocator_(NULL),
- top_node_(NULL),
- tree_(NULL),
- expr_scope_(T_NONE_SCOPE),
- value_father_level_(ObSqlParameterization::NO_VALUES),
- collation_type_(),
- national_collation_type_(CS_TYPE_INVALID),
- tz_info_(NULL),
- question_num_(0),
- params_(NULL),
- parameterization_(nullptr),
- not_param_(false),
- is_fast_parse_const_(false),
- enable_contain_param_(true),
- sql_info_(NULL),
- paramlized_questionmask_count_(0),
- is_transform_outline_(false),
- default_length_semantics_(LS_BYTE),
- raw_params_(NULL),
- mode_(INVALID_MODE),
- is_project_list_scope_(false),
- assign_father_level_(ObSqlParameterization::NO_VALUES),
- ignore_scale_check_(false),
- is_from_pl_(false),
- parent_type_(T_INVALID)
+bool SyntaxParameterizer::excluded(size_t start, size_t end) const
 {
+  for (const peg::Node *node : exclusions_) {
+    if (node->start <= start && end <= node->end) return true;
+  }
+  return false;
 }
 
-// replace const expr with ? in syntax tree
-// separate params from syntax tree
+int SyntaxParameterizer::literal(const peg::Node &node, const peg::Node &expression,
+                                 ParameterScope scope, ParameterOrigin origin)
+{
+  const auto value = peg::expression_literal(node);
+  if (value.hidden) return OB_SUCCESS;
+  if (scope.excluded || !value.charset.empty()) info_.ps_need_parameterized_ = false;
+  if (scope.projection && value.kind != peg::LiteralKind::Placeholder) {
+    info_.ps_need_parameterized_ = false;
+  }
+  const size_t source_begin = scope.subtraction_operand == &node
+      ? peg::binary_left(*scope.subtraction).end : expression.start;
+  return literals_.push_back({&node, &expression, scope, origin, source_begin});
+}
+
+int SyntaxParameterizer::list(rust::Slice<const peg::Node> nodes, ParameterScope scope)
+{
+  int ret = OB_SUCCESS;
+  for (const auto &node : nodes) {
+    if (OB_FAIL(collect(node, scope))) break;
+  }
+  return ret;
+}
+
+int SyntaxParameterizer::query(const peg::Node &node, ParameterScope scope)
+{
+  int ret = OB_SUCCESS;
+  scope.direct_value = scope.arithmetic = scope.ignore_scale = false;
+  const auto excluded_scope = [&] { auto value = scope; value.excluded = true; return value; }();
+  for (const auto &cte : peg::query_ctes(node)) {
+    OZ (collect(peg::cte_query(cte), scope));
+  }
+  if (node.kind == SyntaxKind::Select || node.kind == SyntaxKind::PlSubquery) {
+    OZ (list(peg::query_set_operands(node), scope));
+    for (const auto &projection : peg::query_projection(node)) {
+      OZ (projections_.push_back(&projection));
+      auto projection_scope = scope;
+      projection_scope.projection = true;
+      OZ (collect(peg::projection_expression(projection), projection_scope));
+      if (peg::projection_alias_form(projection) == peg::AliasForm::String) {
+        OZ (exclude(peg::projection_alias(projection)));
+      }
+    }
+    if (peg::query_has_grouping(node)) {
+      for (const auto &key : peg::grouping_keys(peg::query_grouping(node))) {
+        OZ (collect(peg::sort_expression(key), excluded_scope));
+      }
+    }
+    if (peg::query_has_having(node)) OZ (collect(peg::query_having(node), scope));
+    for (const auto &named : peg::query_windows(node)) OZ (exclude(named));
+  } else if (node.kind == SyntaxKind::Insert || node.kind == SyntaxKind::Replace) {
+    auto value_scope = scope;
+    value_scope.direct_value = true;
+    if (peg::insert_source(node) == peg::InsertSource::Query) {
+      OZ (collect(peg::insert_query(node), scope));
+    } else if (peg::insert_source(node) == peg::InsertSource::Rows) {
+      for (const auto &row : peg::insert_rows(node)) OZ (list(peg::row_elements(row), value_scope));
+    } else {
+      for (const auto &assignment : peg::insert_assignments(node)) {
+        OZ (collect(peg::assignment_value(assignment), value_scope));
+      }
+    }
+    for (const auto &assignment : peg::insert_on_duplicate(node)) {
+      OZ (collect(peg::assignment_value(assignment), value_scope));
+    }
+  } else if (node.kind == SyntaxKind::Update) {
+    auto value_scope = scope;
+    value_scope.direct_value = true;
+    for (const auto &assignment : peg::query_assignments(node)) {
+      OZ (collect(peg::assignment_value(assignment), value_scope));
+    }
+  }
+  for (const auto &source : peg::query_sources(node)) OZ (table(source, scope));
+  if (peg::query_has_filter(node)) OZ (collect(peg::query_filter(node), scope));
+  const auto order = peg::query_order(node);
+  bool vector_order = false;
+  if (order.size() == 1) {
+    const auto &expression = peg::sort_expression(order[0]);
+    if (expression.kind == SyntaxKind::Function) {
+      const auto spelling = peg::call_name(expression);
+      const ObString name(spelling.size(), spelling.data());
+      vector_order = name.case_compare("l2_distance") == 0
+          || name.case_compare("negative_inner_product") == 0
+          || name.case_compare("cosine_distance") == 0
+          || name.case_compare("semantic_distance") == 0
+          || name.case_compare("semantic_vector_distance") == 0;
+    }
+  }
+  for (const auto &key : order) {
+    OZ (collect(peg::sort_expression(key), vector_order ? scope : excluded_scope));
+  }
+  if (peg::query_has_limit(node)) {
+    const auto &limit = peg::query_limit(node);
+    auto limit_scope = scope;
+    limit_scope.positive = true;
+    OZ (collect(peg::limit_count(limit), limit_scope));
+    if (peg::limit_has_offset(limit)) OZ (collect(peg::limit_offset(limit), limit_scope));
+  }
+  if (peg::query_has_lock(node)) OZ (exclude(peg::query_lock(node)));
+  for (const auto &parameter : peg::query_vector_parameters(node)) OZ (exclude(parameter));
+  return ret;
+}
+
+int SyntaxParameterizer::table(const peg::Node &node, ParameterScope scope)
+{
+  int ret = OB_SUCCESS;
+  if (node.kind == SyntaxKind::Table) {
+    const auto &source = peg::table_source(node);
+    if (source.kind != SyntaxKind::Relation) OZ (collect(source, scope));
+    if (peg::table_has_sample(node)) OZ (exclude(peg::table_sample(node)));
+    if (peg::table_has_snapshot(node)) OZ (collect(peg::table_snapshot(node), scope));
+  } else if (node.kind == SyntaxKind::JoinedTable) {
+    OZ (table(peg::join_left(node), scope));
+    OZ (table(peg::join_right(node), scope));
+    if (peg::join_condition(node) == peg::JoinCondition::On) {
+      OZ (collect(peg::join_predicate(node), scope));
+    }
+  } else if (node.kind == SyntaxKind::JsonTable) {
+    OZ (collect(peg::json_document(node), scope));
+    OZ (exclude(peg::json_path(node)));
+    for (const auto &column : peg::json_table_columns(node)) OZ (exclude(column));
+  } else if (node.kind == SyntaxKind::TableCollection) {
+    OZ (collect(peg::collection_table_expression(node), scope));
+  } else if (node.kind == SyntaxKind::Select) {
+    OZ (query(node, scope));
+  } else {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  return ret;
+}
+
+int SyntaxParameterizer::window(const peg::Node &node, ParameterScope scope)
+{
+  int ret = OB_SUCCESS;
+  OZ (list(peg::window_partition(node), scope));
+  auto order_scope = scope;
+  order_scope.excluded = true;
+  for (const auto &key : peg::window_order(node)) OZ (collect(peg::sort_expression(key), order_scope));
+  if (peg::window_has_frame(node)) {
+    const auto &frame = peg::window_frame(node);
+    const auto bound = [&](const peg::Node &value) {
+      const auto kind = peg::frame_bound(value);
+      return kind == peg::FrameBound::Preceding || kind == peg::FrameBound::Following
+          ? collect(peg::frame_bound_offset(value), scope) : OB_SUCCESS;
+    };
+    OZ (bound(peg::frame_start(frame)));
+    if (peg::frame_has_end(frame)) OZ (bound(peg::frame_end(frame)));
+  }
+  return ret;
+}
+
+int SyntaxParameterizer::call(const peg::Node &node, ParameterScope scope)
+{
+  int ret = OB_SUCCESS;
+  const auto args = peg::call_arguments(node);
+  const auto spelling = peg::call_name(node);
+  const ObString name(spelling.size(), spelling.data());
+  int64_t excluded_begin = args.size();
+  int64_t excluded_end = args.size();
+  if ((name.case_compare("userenv") == 0 || name.case_compare("unix_timestamp") == 0) && args.size() == 1) {
+    excluded_begin = 0;
+  } else if (name.case_compare("substr") == 0 && args.size() == 3) {
+    excluded_begin = 1;
+  } else if (name.case_compare("weight_string") == 0 && args.size() == 5) {
+    excluded_begin = 1;
+  } else if (args.size() == 2) {
+    if (name.case_compare("convert") == 0 || name.case_compare("char") == 0
+        || name.case_compare("str_to_date") == 0 || name.case_compare("date_format") == 0
+        || name.case_compare("from_unixtime") == 0 || name.case_compare("round") == 0
+        || name.case_compare("left") == 0 || name.case_compare("substr") == 0
+        || name.case_compare("truncate") == 0) {
+      excluded_begin = 1;
+    } else if (name.case_compare("name_const") == 0 || name.case_compare("json_schema_valid") == 0
+               || name.case_compare("json_schema_validation_report") == 0) {
+      excluded_begin = 0;
+      excluded_end = 1;
+    } else if (name.case_compare("json_overlaps") == 0 || name.case_compare("json_extract") == 0
+               || name.case_compare("json_member_of") == 0) {
+      excluded_begin = 0;
+    }
+  }
+  if (node.kind == SyntaxKind::StringConcat || name.case_compare("json_equal") == 0
+      || name.case_compare("json_member_of") == 0 || name.case_compare("json_contains") == 0
+      || excluded_begin != excluded_end) info_.ps_need_parameterized_ = false;
+  scope.direct_value = scope.arithmetic = false;
+  switch (node.kind) {
+    case SyntaxKind::ArrayMap: case SyntaxKind::ArrayFilter:
+    case SyntaxKind::ArrayFirst: case SyntaxKind::ArraySortBy:
+      OZ (collect(peg::collection_lambda(node), scope));
+      break;
+    default: break;
+  }
+  for (size_t i = 0; OB_SUCC(ret) && i < args.size(); ++i) {
+    auto argument_scope = scope;
+    argument_scope.excluded |= i >= excluded_begin && i < excluded_end;
+    argument_scope.ignore_scale = node.kind == SyntaxKind::Point || name.case_compare("st_point") == 0;
+    switch (node.kind) {
+      case SyntaxKind::CurrentTimestamp: case SyntaxKind::CurrentTime: case SyntaxKind::CurrentDate:
+      case SyntaxKind::UtcTimestamp: case SyntaxKind::UtcTime: case SyntaxKind::Sysdate:
+        argument_scope.excluded = true;
+        break;
+      default: break;
+    }
+    OZ (collect(args[i], argument_scope));
+  }
+  for (const auto &key : peg::aggregate_order(node)) {
+    auto order_scope = scope;
+    order_scope.excluded = true;
+    OZ (collect(peg::sort_expression(key), order_scope));
+  }
+  if (peg::aggregate_has_separator(node)) OZ (collect(peg::aggregate_separator(node), scope));
+  return ret;
+}
+
+int SyntaxParameterizer::collect(const peg::Node &node, ParameterScope scope)
+{
+  int ret = OB_SUCCESS;
+  if (scope.excluded) info_.ps_need_parameterized_ = false;
+  if (peg::is_literal(node)) return literal(node, node, scope);
+  switch (node.kind) {
+    case SyntaxKind::Select: case SyntaxKind::PlSubquery: case SyntaxKind::Insert: case SyntaxKind::Replace:
+    case SyntaxKind::Update: case SyntaxKind::Delete:
+      return query(node, scope);
+    case SyntaxKind::PlCall:
+      return list(peg::routine_call_arguments(node), scope);
+    case SyntaxKind::PlNamedArgument:
+      return collect(peg::named_argument_value(node), scope);
+    case SyntaxKind::Explain:
+      return collect(peg::explain_statement(node), scope);
+    case SyntaxKind::Ident: case SyntaxKind::Column: case SyntaxKind::Star:
+    case SyntaxKind::Relation: case SyntaxKind::Default:
+      break;
+    case SyntaxKind::Parenthesized:
+      return collect(peg::parenthesized_expression(node), scope);
+    case SyntaxKind::UserVariable: case SyntaxKind::GetUserVariable: {
+      const auto name = peg::variable_name(node);
+      OZ (user_variables_.push_back(ObString(name.size(), name.data())));
+      break;
+    }
+    case SyntaxKind::SystemVariable:
+      break;
+    case SyntaxKind::UserAssignment:
+      return collect(peg::variable_assignment_value(node), scope);
+    case SyntaxKind::Unary: {
+      const auto &operand = peg::unary_operand(node);
+      scope.direct_value = false;
+      scope.ignore_scale = false;
+      if (!scope.excluded && peg::unary_operator(node) == peg::UnaryOperator::Minus
+          && peg::is_literal(operand)) {
+        const auto value = peg::expression_literal(operand);
+        if (value.kind == peg::LiteralKind::Integer || value.kind == peg::LiteralKind::Unsigned
+            || value.kind == peg::LiteralKind::Decimal || value.kind == peg::LiteralKind::Float) {
+          OZ (literal(operand, node, scope, ParameterOrigin::UnaryNegation));
+        } else {
+          scope.arithmetic = false;
+          OZ (literal(operand, operand, scope, value.kind == peg::LiteralKind::String
+              ? ParameterOrigin::UnaryNegation : ParameterOrigin::Literal));
+        }
+      } else {
+        scope.arithmetic = false;
+        const peg::Node *value = &operand;
+        while (value->kind == SyntaxKind::Parenthesized) {
+          value = &peg::parenthesized_expression(*value);
+        }
+        if (peg::unary_operator(node) == peg::UnaryOperator::Minus
+            && value->kind == SyntaxKind::Uint) {
+          scope.excluded = true;
+        }
+        OZ (collect(operand, scope));
+      }
+      break;
+    }
+    case SyntaxKind::Binary: {
+      const auto op = peg::binary_operator(node);
+      scope.direct_value = scope.ignore_scale = false;
+      scope.arithmetic = op == peg::BinaryOperator::Add || op == peg::BinaryOperator::Subtract
+          || op == peg::BinaryOperator::Multiply || op == peg::BinaryOperator::Divide;
+      OZ (collect(peg::binary_left(node), scope));
+      if (peg::like_has_escape(node)) {
+        scope.excluded = true;
+        info_.ps_need_parameterized_ = false;
+      }
+      subtraction_scope(node, scope);
+      OZ (collect(peg::binary_right(node), scope));
+      if (peg::like_has_escape(node)) OZ (collect(peg::like_escape(node), scope));
+      break;
+    }
+    case SyntaxKind::In:
+      scope.direct_value = scope.arithmetic = scope.ignore_scale = false;
+      OZ (collect(peg::predicate_subject(node), scope));
+      if (peg::membership_source(node) == peg::MembershipSource::Query) {
+        OZ (collect(peg::membership_query(node), scope));
+      } else {
+        OZ (list(peg::membership_expressions(node), scope));
+      }
+      break;
+    case SyntaxKind::Between:
+      scope.direct_value = scope.arithmetic = scope.ignore_scale = false;
+      OZ (collect(peg::predicate_subject(node), scope));
+      OZ (collect(peg::between_lower(node), scope));
+      OZ (collect(peg::between_upper(node), scope));
+      break;
+    case SyntaxKind::Is:
+      scope.direct_value = scope.arithmetic = scope.ignore_scale = false;
+      OZ (collect(peg::predicate_subject(node), scope));
+      scope.excluded = true;
+      OZ (collect(peg::is_test(node), scope));
+      break;
+    case SyntaxKind::All: case SyntaxKind::Any:
+      OZ (collect(peg::quantified_query(node), scope));
+      break;
+    case SyntaxKind::Exists:
+      OZ (collect(peg::exists_query(node), scope));
+      break;
+    case SyntaxKind::ExprList: case SyntaxKind::ValueVector:
+      OZ (list(peg::row_elements(node), scope));
+      break;
+    case SyntaxKind::Case:
+      scope.direct_value = scope.arithmetic = scope.ignore_scale = false;
+      if (peg::case_has_operand(node)) OZ (collect(peg::case_operand(node), scope));
+      for (const auto &arm : peg::case_arms(node)) {
+        OZ (collect(peg::case_condition(arm), scope));
+        OZ (collect(peg::case_result(arm), scope));
+      }
+      if (peg::case_has_else(node)) OZ (collect(peg::case_else(node), scope));
+      break;
+    case SyntaxKind::Cast:
+      scope.direct_value = scope.arithmetic = scope.ignore_scale = false;
+      OZ (collect(peg::cast_argument(node), scope));
+      OZ (exclude(peg::cast_target(node)));
+      break;
+    case SyntaxKind::SetCollation:
+      OZ (collect(peg::collation_argument(node), scope));
+      OZ (exclude(peg::collation_specification(node)));
+      break;
+    case SyntaxKind::WindowFunction:
+      OZ (collect(peg::window_function(node), scope));
+      OZ (window(peg::window_definition(node), scope));
+      break;
+    case SyntaxKind::Lambda:
+      OZ (collect(peg::lambda_body(node), scope));
+      break;
+    case SyntaxKind::JsonValue: case SyntaxKind::JsonQuery:
+      OZ (collect(peg::json_document(node), scope));
+      OZ (exclude(peg::json_path(node)));
+      OZ (exclude(peg::json_returning(node)));
+      OZ (exclude(peg::json_error_clause(node)));
+      OZ (exclude(peg::json_empty_clause(node)));
+      if (node.kind == SyntaxKind::JsonQuery) OZ (exclude(peg::json_mismatch_clause(node)));
+      if (peg::json_options(node).on_error == peg::JsonResponse::Default) {
+        OZ (exclude(peg::json_error_default(node)));
+      }
+      if (peg::json_options(node).on_empty == peg::JsonResponse::Default) {
+        OZ (exclude(peg::json_empty_default(node)));
+      }
+      break;
+    case SyntaxKind::MatchAgainst:
+      OZ (collect(peg::fulltext_search(node), scope));
+      break;
+    case SyntaxKind::Table: case SyntaxKind::JoinedTable: case SyntaxKind::JsonTable:
+    case SyntaxKind::TableCollection:
+      OZ (table(node, scope));
+      break;
+    default:
+      if (peg::is_call_expression(node)) return call(node, scope);
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("unsupported syntax in parameterization", "kind", static_cast<int>(node.kind), K(ret));
+  }
+  return ret;
+}
+
+int SyntaxParameterizer::negate(const peg::Node &node, bool negative, const NumericLiteral *&result)
+{
+  const auto value = peg::expression_literal(node);
+  NumericKind kind;
+  switch (value.kind) {
+    case peg::LiteralKind::Integer: kind = NumericKind::Integer; break;
+    case peg::LiteralKind::Unsigned:
+      kind = negative ? (value.integer == (uint64_t(1) << 63) ? NumericKind::Integer : NumericKind::Decimal)
+                      : NumericKind::Unsigned;
+      break;
+    case peg::LiteralKind::Decimal: kind = NumericKind::Decimal; break;
+    case peg::LiteralKind::Float: kind = NumericKind::Double; break;
+    default: return OB_ERR_UNEXPECTED;
+  }
+  ObString text(value.text.size(), value.text.data());
+  uint64_t integer = value.integer;
+  if (negative) {
+    char *spelling = static_cast<char *>(allocator_.alloc(text.length() + 2));
+    if (spelling == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+    spelling[0] = '-';
+    MEMCPY(spelling + 1, text.ptr(), text.length());
+    spelling[text.length() + 1] = '\0';
+    text.assign_ptr(spelling, text.length() + 1);
+    if (kind == NumericKind::Integer) integer = uint64_t(0) - integer;
+  }
+  void *storage = allocator_.alloc(sizeof(NumericLiteral));
+  if (storage == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+  result = new (storage) NumericLiteral{kind, integer, text};
+  return OB_SUCCESS;
+}
+
+void SyntaxParameterizer::subtraction_scope(const peg::Node &node, ParameterScope &scope)
+{
+  if (peg::binary_operator(node) == peg::BinaryOperator::Subtract) {
+    const peg::Node *operand = &peg::binary_right(node);
+    while (operand->kind == SyntaxKind::Binary) {
+      const auto op = peg::binary_operator(*operand);
+      if (op != peg::BinaryOperator::Multiply && op != peg::BinaryOperator::Divide
+          && op != peg::BinaryOperator::IntegerDivide && op != peg::BinaryOperator::Modulo) break;
+      operand = &peg::binary_left(*operand);
+    }
+    if (peg::is_literal(*operand)) {
+      const auto value = peg::expression_literal(*operand);
+      if (value.kind == peg::LiteralKind::Integer || value.kind == peg::LiteralKind::Unsigned
+          || value.kind == peg::LiteralKind::Decimal || value.kind == peg::LiteralKind::Float) {
+        scope.subtraction = &node;
+        scope.subtraction_operand = operand;
+      }
+    }
+  }
+}
+
+int SyntaxParameterizer::bind(LiteralOccurrence &occurrence, int64_t token_index,
+                              const ObPCParam &token, ObCollationType collation)
+{
+  int ret = OB_SUCCESS;
+  const auto value_syntax = peg::expression_literal(*occurrence.literal);
+  const bool placeholder = value_syntax.kind == peg::LiteralKind::Placeholder;
+  const int64_t placeholder_index = placeholder ? peg::placeholder_index(*occurrence.literal) : -1;
+  const bool execute = ObSqlParameterization::is_execute_mode(mode_);
+  if (occurrence.origin == ParameterOrigin::UnaryNegation
+      && occurrence.expression->kind == SyntaxKind::Unary) {
+    if (token.source_offset_ < occurrence.literal->start) {
+      const NumericLiteral *negative = nullptr;
+      OZ (negate(*occurrence.literal, true, negative));
+      OZ (bindings_.fold_negation(occurrence.expression, negative));
+    } else {
+      occurrence.expression = occurrence.literal;
+      occurrence.origin = ParameterOrigin::Literal;
+      occurrence.scope.arithmetic = false;
+    }
+  }
+  if (occurrence.scope.subtraction_operand == occurrence.literal
+      && token.source_offset_ < occurrence.literal->start) {
+    const NumericLiteral *negative = nullptr;
+    OZ (negate(*occurrence.literal, !from_pl_, negative));
+    OZ (bindings_.negate_literal(occurrence.literal, negative));
+    OZ (bindings_.add_negated_operand(occurrence.scope.subtraction));
+  }
+  const auto *lowering = bindings_.numeric_lowering(occurrence.expression);
+  ParameterOrigin origin = occurrence.origin;
+  if (lowering != nullptr && lowering->kind == NumericLowering::Kind::NegateLiteral) {
+    origin = ParameterOrigin::Subtraction;
+  }
+  bool decimal_int = false;
+  bool mysql_dates = false;
+  OZ (ObSQLUtils::check_enable_decimalint(&session_, decimal_int));
+  OZ (ObSQLUtils::check_enable_mysql_compatible_dates(&session_, false, mysql_dates));
+  const bool arithmetic = occurrence.scope.arithmetic && value_syntax.kind == peg::LiteralKind::Integer;
+  const NumericLiteralOptions numeric{stmt::T_NONE, decimal_int, from_pl_, arithmetic,
+                                      session_.get_min_const_integer_precision()};
+  const LiteralDecodeOptions decode{numeric, collation, session_.get_timezone_info(), session_.get_sql_mode(),
+                                    share::COMPAT_MYSQL57, mysql_dates, outline_, nullptr, NumericSignMode::Source};
+  ObObjParam value;
+  ObString prefix;
+  if (OB_SUCC(ret)) {
+    if (lowering != nullptr && lowering->literal != nullptr) {
+      OZ (ObResolverUtils::resolve_numeric_literal(*lowering->literal, numeric, allocator_, value, prefix));
+    } else if (placeholder && !ObSqlParameterization::is_prepare_mode(mode_) && !execute
+               && token.literal_->kind != peg::LiteralKind::Placeholder) {
+      OZ (ObResolverUtils::resolve_literal(*token.literal_, decode, allocator_, value, prefix));
+    } else {
+      OZ (ObResolverUtils::resolve_expression_literal(*occurrence.literal, decode, allocator_, value, prefix));
+    }
+  }
+  if (origin == ParameterOrigin::UnaryNegation) OZ (info_.neg_param_index_.add_member(token_index));
+  if (origin == ParameterOrigin::Subtraction) OZ (info_.trans_from_minus_index_.add_member(token_index));
+  if (arithmetic) OZ (info_.fmt_int_or_ch_decint_idx_.add_member(token_index));
+  if (occurrence.scope.positive && (value.is_numeric_type() || placeholder)) {
+    OZ (info_.must_be_positive_index_.add_member(token_index));
+  }
+  if (placeholder) {
+    if (occurrence.scope.direct_value) {
+      OZ (info_.no_check_type_offsets_.push_back(placeholder_index));
+    } else {
+      OZ (info_.need_check_type_param_offsets_.add_member(placeholder_index));
+    }
+  } else {
+    value.set_need_to_check_type(!occurrence.scope.direct_value);
+    if (occurrence.scope.ignore_scale && !value.is_decimal_int()) value.set_ignore_scale_check(true);
+    OZ (info_.fixed_param_idx_.push_back(params_.count()));
+  }
+  value.set_is_boolean(value.is_boolean() || value_syntax.kind == peg::LiteralKind::Boolean);
+  value.set_raw_text_info(token.source_offset_, token.literal_->source.length());
+  if (!execute) {
+    OZ (bindings_.bind(occurrence.expression, params_.count(), token_index, origin));
+    OZ (params_.push_back(value));
+  }
+  return ret;
+}
+
+int SyntaxParameterizer::apply(const ObIArray<ObPCParam *> &tokens, SelectItemParamInfoMap *projection_names)
+{
+  int ret = OB_SUCCESS;
+  ObCollationType collation = CS_TYPE_INVALID;
+  OZ (session_.get_collation_connection(collation));
+  std::sort(literals_.begin(), literals_.end(), [](const auto &left, const auto &right) {
+    return left.literal->start < right.literal->start;
+  });
+  size_t occurrence_index = 0;
+  for (int64_t i = 0; OB_SUCC(ret) && i < tokens.count(); ++i) {
+    const auto &token = *tokens.at(i);
+    const size_t start = token.source_offset_;
+    const size_t end = start + token.literal_->source.length();
+    while (occurrence_index < literals_.count() && literals_.at(occurrence_index).literal->end <= start) {
+      ++occurrence_index;
+    }
+    LiteralOccurrence *occurrence = nullptr;
+    if (occurrence_index < literals_.count()) {
+      auto &candidate = literals_.at(occurrence_index);
+      if (candidate.source_begin <= start && end <= candidate.literal->end) occurrence = &candidate;
+    }
+    if (occurrence == nullptr && !excluded(start, end)) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("scanner literal has no syntax occurrence", K(ret), K(start), K(end), K(i));
+    } else {
+      ObCharsetType charset = CHARSET_INVALID;
+      if (occurrence != nullptr) {
+        const auto value = peg::expression_literal(*occurrence->literal);
+        if (!value.charset.empty()) {
+          const ObString name(value.charset.size(), value.charset.data());
+          charset = ObCharset::charset_type(name);
+          if (charset == CHARSET_INVALID) {
+            ret = OB_ERR_UNKNOWN_CHARSET;
+            LOG_USER_ERROR(OB_ERR_UNKNOWN_CHARSET, name.length(), name.ptr());
+          }
+        }
+      }
+      OZ (info_.param_charset_type_.push_back(charset));
+      const bool merged_subtraction = occurrence != nullptr
+          && occurrence->scope.subtraction_operand == occurrence->literal
+          && start < occurrence->literal->start;
+      const bool preserve_subtraction = merged_subtraction
+          && (&peg::binary_right(*occurrence->scope.subtraction) != occurrence->literal
+              || occurrence->literal->kind == SyntaxKind::Uint
+              || is_no_unsigned_subtraction(session_.get_sql_mode()));
+      const bool unsigned_negation = occurrence != nullptr
+          && occurrence->origin == ParameterOrigin::UnaryNegation
+          && occurrence->expression->kind == SyntaxKind::Unary
+          && occurrence->literal->kind == SyntaxKind::Uint
+          && start >= occurrence->literal->start;
+      if (occurrence == nullptr || occurrence->scope.excluded || preserve_subtraction || unsigned_negation) {
+        info_.ps_need_parameterized_ = false;
+        OZ (info_.not_param_index_.add_member(i));
+        if (occurrence != nullptr && occurrence->literal->kind == SyntaxKind::Parameter) {
+          OZ (info_.ps_not_param_offsets_.push_back(peg::placeholder_index(*occurrence->literal)));
+        }
+      } else {
+        OZ (bind(*occurrence, i, token, collation));
+      }
+      if (info_.need_check_fp_) {
+        ObPCParseInfo parse_info;
+        parse_info.param_idx_ = i;
+        parse_info.flag_ = info_.not_param_index_.has_member(i) ? NOT_PARAM : NORMAL_PARAM;
+        parse_info.raw_text_pos_ = start;
+        OZ (info_.parse_infos_.push_back(parse_info));
+      }
+    }
+  }
+  info_.total_ = tokens.count();
+  if (OB_SUCC(ret) && outline_) {
+    for (const auto &occurrence : literals_) {
+      if (occurrence.literal->kind == SyntaxKind::Parameter && occurrence.scope.excluded) {
+        ret = OB_INVALID_OUTLINE;
+        LOG_USER_ERROR(OB_INVALID_OUTLINE, "? appears at invalid position in sql_text");
+        break;
+      }
+    }
+  }
+  if (OB_SUCC(ret) && projection_names != nullptr) {
+    if (!projection_names->created() && !projections_.empty()) {
+      OZ (projection_names->create(projections_.count(), "ProjectionNames"));
+    }
+    for (const auto *projection : projections_) {
+      OZ (projection_name(*projection, tokens, *projection_names));
+    }
+  }
+  return ret;
+}
+
+int SyntaxParameterizer::projection_name(const peg::Node &projection,
+                                         const ObIArray<ObPCParam *> &tokens,
+                                         SelectItemParamInfoMap &names)
+{
+  int ret = OB_SUCCESS;
+  if (peg::projection_alias_form(projection) != peg::AliasForm::Absent) return ret;
+  const auto &expression = peg::projection_expression(projection);
+  if (expression.kind == SyntaxKind::Star
+      || (expression.kind == SyntaxKind::Column && peg::name_is_wildcard(expression))) return ret;
+  const peg::Node *display = &expression;
+  while (display->kind == SyntaxKind::Parenthesized) display = &peg::parenthesized_expression(*display);
+  bool string_literal = false;
+  ObString original_name = parsed_.source(expression);
+  if (peg::is_literal(*display)) {
+    const auto value = peg::expression_literal(*display);
+    string_literal = value.kind == peg::LiteralKind::String;
+    if (string_literal) {
+      original_name.assign_ptr(value.text.data(), value.concatenated ? value.first_part_length : value.text.size());
+    }
+  }
+  SelectItemParamInfo info;
+  int64_t expression_position = expression.start;
+  const int64_t buffer_size = SelectItemParamInfo::PARAMED_FIELD_BUF_LEN;
+  for (const auto &occurrence : literals_) {
+    const auto *binding = bindings_.find(occurrence.expression);
+    if (binding == nullptr || occurrence.literal->start < expression.start || occurrence.literal->end > expression.end) continue;
+    if (info.name_len_ >= buffer_size) break;
+    const auto &token = *tokens.at(binding->raw_token_index);
+    const int64_t source_position = token.source_offset_;
+    const int64_t prefix_length = std::min(buffer_size - info.name_len_, source_position - expression_position);
+    if (!string_literal && prefix_length > 0) {
+      MEMCPY(info.paramed_field_name_ + info.name_len_, original_name.ptr() + expression_position - expression.start,
+             prefix_length);
+      info.name_len_ += prefix_length;
+    }
+    expression_position = source_position + token.literal_->source.length();
+    OZ (info.questions_pos_.push_back(info.name_len_));
+    OZ (info.params_idx_.push_back(binding->raw_token_index));
+    if (OB_SUCC(ret) && info.name_len_ < buffer_size) info.paramed_field_name_[info.name_len_++] = '?';
+    if (binding->origin == ParameterOrigin::UnaryNegation) OZ (info.neg_params_idx_.add_member(binding->raw_token_index));
+  }
+  if (!string_literal) {
+    const int64_t offset = expression_position - expression.start;
+    const int64_t remaining = std::min(original_name.length() - offset, buffer_size - info.name_len_);
+    if (remaining > 0) {
+      MEMCPY(info.paramed_field_name_ + info.name_len_, original_name.ptr() + offset, remaining);
+      info.name_len_ += remaining;
+    }
+  }
+  info.esc_str_flag_ = string_literal && bindings_.find(display) != nullptr;
+  if (info.params_idx_.count() == 1 && info.name_len_ == 1 && info.paramed_field_name_[0] == '?') {
+    info.null_literal_ = tokens.at(info.params_idx_.at(0))->literal_->kind == peg::LiteralKind::Null;
+  }
+  if (OB_SUCC(ret) && info.params_idx_.count() > 0) OZ (names.set_refactored(&projection, info));
+  return ret;
+}
+}
+}
+
 int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
-                                                 const ObSQLSessionInfo &session,
-                                                 const ObIArray<ObPCParam *> *raw_params,
-                                                 ParseNode *tree,
-                                                 SqlInfo &sql_info,
-                                                 ParamStore &params,
-                                                 ParameterizationResult &bindings,
-                                                 SelectItemParamInfoMap *select_item_param_infos,
-                                                 bool is_transform_outline,
-                                                 SQL_EXECUTION_MODE execution_mode,
-                                                 bool is_from_pl)
+                                                const ObSQLSessionInfo &session,
+                                                const ObIArray<ObPCParam *> *raw_params,
+                                                const ParsedSql &parsed,
+                                                SqlInfo &sql_info,
+                                                ParamStore &params,
+                                                ParameterizationResult &bindings,
+                                                SelectItemParamInfoMap *select_item_param_infos,
+                                                bool is_transform_outline,
+                                                SQL_EXECUTION_MODE execution_mode,
+                                                bool is_from_pl,
+                                                ObIArray<ObString> *user_variables)
 {
   int ret = OB_SUCCESS;
   bindings.reset();
-  ObCollationType collation_connection = CS_TYPE_INVALID;
-  ParseNode *children_node = tree->children_[0];
-  if (OB_ISNULL(tree)) {
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(tree), K(ret));
-  } else if (OB_ISNULL(children_node)){
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(tree), K(ret));
-  } else if (OB_FAIL(session.get_collation_connection(collation_connection))) {
-  } else {
-    sql_info.sql_traits_.stmt_type_ = ObResolverUtils::get_stmt_type_by_item_type(children_node->type_);
-    sql_info.sql_traits_.allowed_on_standby_ = ObSQLUtils::is_allowed_on_standby(children_node->type_);
-    TransformTreeCtx ctx;
-    ctx.collation_type_ = collation_connection;
-    ctx.national_collation_type_ = session.get_nls_collation_nation();
-    ctx.tz_info_ = session.get_timezone_info();
-    ctx.default_length_semantics_ = session.get_actual_length_semantics();
-    ctx.allocator_ = &allocator;
-    ctx.tree_ = tree;
-    ctx.top_node_ = tree;
-    ctx.expr_scope_ = T_NONE_SCOPE;
-    ctx.value_father_level_ = NO_VALUES;
-    ctx.question_num_ = 0;
-    ctx.params_ = &params;
-    ctx.parameterization_ = &bindings;
-    ctx.not_param_ = false;
-    ctx.is_fast_parse_const_ = false;
-    ctx.enable_contain_param_ = true;
-    ctx.sql_info_ = &sql_info;
-    ctx.paramlized_questionmask_count_ = 0;
-    ctx.is_transform_outline_ = is_transform_outline;
-    ctx.raw_params_ = raw_params;
-    ctx.is_project_list_scope_ = false;
-    ctx.mode_ = execution_mode;
-    ctx.assign_father_level_ = NO_VALUES;
-    ctx.is_from_pl_ = is_from_pl;
-    ctx.parent_type_ = T_INVALID;
-
-    if (OB_FAIL(transform_tree(ctx, session, ArgumentParameterization{}, false, nullptr, ParameterOrigin::Literal))) {
-      if (OB_NOT_SUPPORTED != ret) {
-        SQL_PC_LOG(WARN, "fail to transform syntax tree", K(ret));
-      }
-    } else if (is_transform_outline && (INT64_MAX != children_node->value_)
-               && (children_node->value_ != ctx.paramlized_questionmask_count_)) {
-      ret = OB_INVALID_OUTLINE;
-      LOG_USER_ERROR(OB_INVALID_OUTLINE, "? appears at invalid position in sql_text");
-      SQL_PC_LOG(WARN, "? appear at invalid position", "total count of questionmasks in query", children_node->value_,
-                "paramlized_questionmask_count", ctx.paramlized_questionmask_count_, K(ret));
-    } else if (OB_NOT_NULL(raw_params)
-               && OB_NOT_NULL(select_item_param_infos)) {
-      if (sql_info.total_ != raw_params->count()) {
-        ret = OB_NOT_SUPPORTED;
-        SQL_PC_LOG(TRACE, "const number of fast parse and normal parse is different",
-                "fast_parse_const_num", raw_params->count(),
-                "normal_parse_const_num", sql_info.total_,
-                K(session.get_current_query_string()),
-                "result_tree_", SJ(ObParserResultPrintWrapper(*ctx.top_node_)));
-      } else {
-        if (!select_item_param_infos->created() && ctx.project_list_.count() > 0) {
-          ret = select_item_param_infos->create(ctx.project_list_.count(), "ProjectionNames");
-        }
-        for (int64_t i = 0; OB_SUCC(ret) && i < ctx.project_list_.count(); i++) {
-          const auto &projection = ctx.project_list_.at(i);
-          const ParseNode *tmp_root = projection.node_;
-          if (OB_ISNULL(tmp_root)) {
-            ret = OB_INVALID_ARGUMENT;
-          } else if (nullptr == select_item_param_infos->get(tmp_root)
-                     && OB_FAIL(get_select_item_param_info(*raw_params,
-                                                           tmp_root,
-                                                           projection.string_literal_,
-                                                           bindings,
-                                                           *select_item_param_infos))) {
-            SQL_PC_LOG(WARN, "failed to get select item param info", K(ret));
-          } else {
-            // do nothing
-          }
-        } // for end
-      }
-    }
-    SQL_PC_LOG(DEBUG, "after transform_tree",
-               "result_tree_", SJ(ObParserResultPrintWrapper(*tree)));
+  if (parsed.statement() == nullptr) return OB_ERR_UNEXPECTED;
+  ObFastParserResult scan;
+  if (raw_params == nullptr) {
+    FPContext context(session.get_charsets4parser());
+    context.sql_mode_ = session.get_sql_mode();
+    OZ (fast_parser(allocator, context, parsed.original_source(), scan));
+    raw_params = &scan.raw_params_;
   }
+  SyntaxParameterizer parameterizer(allocator, session, parsed, sql_info, params, bindings,
+                                    execution_mode, is_transform_outline, is_from_pl);
+  OZ (parameterizer.collect(*parsed.statement()));
+  OZ (parameterizer.apply(*raw_params, select_item_param_infos));
+  if (user_variables != nullptr) OZ (append(*user_variables, parameterizer.user_variables()));
   return ret;
-}
-// Determine if it is a constant recognizable by fast parse (only consider this node)
-//
-//T_CAST_ARGUMENT,T_FUN_SYS_CUR_TIMESTAMP, T_SFU_INT
-// This type node is a constant during fast parameterization (eg: cast ( 10 AS CHAR(20) ) where 20, now(10));
-// But normal parse when node type is not within the constant range,
-// This node does not need to be parameterized, but to ensure that the number of constants matches for normal parse and fast parse, a special judgment is added;
-// This parameter is processed in the same way as parameters in order by during normal parse;
-//
-//T_SFU_INT and T_FUN_SYS_UTC_TIME when judged as 0 or -1,
-// because now() and FOR UPDATE have no parameters, but the syntax provides default values, adding a judgment is to prevent normal parse from considering this value as a constant.
-int ObSqlParameterization::is_fast_parse_const(TransformTreeCtx &ctx)
-{
-  int ret = OB_SUCCESS;
-  if (NULL == ctx.tree_) { // parse tree contains a node that is NULL
-    ctx.is_fast_parse_const_ = false;
-  } else {
-    // If its node is T_HINT_OPTION_LIST then the constants in this node and its sub-nodes are not parameters recognizable by fp.
-    if (T_HINT_OPTION_LIST == ctx.tree_->type_) {
-      ctx.enable_contain_param_ = false;
-    }
-    if (ctx.enable_contain_param_) {
-      // When the node is of type T_NULL/T_VARCHAR and is_hidden_const_ is true, it indicates that the node cannot be recognized as a constant in fast parse
-      if ((T_NULL == ctx.tree_->type_ && true == ctx.tree_->is_hidden_const_)
-          || (T_VARCHAR == ctx.tree_->type_ && true == ctx.tree_->is_hidden_const_)
-          || (T_INT == ctx.tree_->type_ && true == ctx.tree_->is_hidden_const_)
-          || (T_CAST_ARGUMENT == ctx.tree_->type_ && true == ctx.tree_->is_hidden_const_)
-          || (T_DOUBLE == ctx.tree_->type_ && true == ctx.tree_->is_hidden_const_)
-          || (T_IEEE754_INFINITE == ctx.tree_->type_ && true == ctx.tree_->is_hidden_const_)
-          || (T_IEEE754_NAN == ctx.tree_->type_ && true == ctx.tree_->is_hidden_const_)
-          || (T_SFU_INT == ctx.tree_->type_ && true == ctx.tree_->is_hidden_const_)
-          || (T_FLOAT == ctx.tree_->type_ && true == ctx.tree_->is_hidden_const_)
-          || true == ctx.tree_->is_forbid_parameter_) {
-        ctx.is_fast_parse_const_ = false;
-      } else {
-        ctx.is_fast_parse_const_ = (IS_DATATYPE_OP(ctx.tree_->type_)
-                                    || T_QUESTIONMARK == ctx.tree_->type_
-                                    || T_COLLATION == ctx.tree_->type_
-                                    || T_CAST_ARGUMENT == ctx.tree_->type_
-                                    || T_NULLX_CLAUSE == ctx.tree_->type_
-                                    || (T_SFU_INT == ctx.tree_->type_ && -1 != ctx.tree_->value_)
-                                    || T_SFU_DECIMAL == ctx.tree_->type_
-                                    || T_WEIGHT_STRING_LEVEL_PARAM == ctx.tree_->type_);
-      }
-    } else {
-      ctx.is_fast_parse_const_ = false;
-    }
-  }
-  return ret;
-}
-
-// Determine whether this node is a non-parameterizable node
-bool ObSqlParameterization::is_node_not_param(TransformTreeCtx &ctx)
-{
-  bool not_param = false;
-  if (NULL == ctx.tree_) {
-    not_param = true;
-  } else if (!ctx.is_fast_parse_const_) {
-    not_param = true;
-  } else if (ctx.not_param_) { // If itself or its ancestor has already determined all child nodes as not param, then it is not param
-    not_param = true;
-  } else {
-    not_param = false;
-  }
-  return not_param;
-}
-// Determine that the node and its child nodes cannot be parameterized when they are constants.
-bool ObSqlParameterization::is_tree_not_param(const ParseNode *tree)
-{
-  bool ret_bool = false;
-  if (NULL == tree) {
-    ret_bool = true;
-  } else if (T_GROUPBY_CLAUSE == tree->type_) {
-    // select a from t group by 1 enables group by parameterization
-    ret_bool = true;
-  } else if (T_SORT_LIST == tree->type_) {
-    // vector index query always use order by vec_func() approx limit, we should open Parameterization for this situation
-    bool is_vec_idx_query = is_vector_index_query(tree);
-    ret_bool = is_vec_idx_query ? false : true;
-  } else if (T_HINT_OPTION_LIST == tree->type_) {
-    ret_bool = true;
-  } else if (T_COLLATION == tree->type_) {
-    ret_bool = true;
-  } else if (T_CAST_ARGUMENT == tree->type_) {
-    ret_bool = true;
-  } else if (T_FUN_SYS_UTC_TIMESTAMP == tree->type_) {
-    ret_bool = true;
-  } else if (T_FUN_SYS_UTC_TIME == tree->type_) {
-    ret_bool = true;
-  } else if (T_FUN_SYS_SYSDATE == tree->type_) {
-    ret_bool = true;
-  } else if (T_FUN_SYS_SYSTIMESTAMP == tree->type_) {
-    ret_bool = true;
-  } else if (T_FUN_SYS_CUR_TIMESTAMP == tree->type_) {
-    ret_bool = true;
-  } else if (T_FUN_SYS_LOCALTIMESTAMP == tree->type_) {
-    ret_bool = true;
-  } else if (T_FUN_SYS_CUR_TIME == tree->type_) {
-    ret_bool = true;
-  } else if (T_FUN_SYS_CUR_DATE == tree->type_) {
-    ret_bool = true;
-  } else if (T_SFU_INT == tree->type_ ||
-             T_SFU_DECIMAL == tree->type_ ||
-             T_SFU_DOUBLE == tree->type_) {
-    ret_bool = true;
-  } else if (T_CYCLE_NODE == tree->type_) {
-    ret_bool = true;
-  } else if (T_INTO_FIELD_LIST == tree->type_) {
-    ret_bool = true;
-  } else if (T_INTO_LINE_LIST == tree->type_) {
-    ret_bool = true;
-  } else if (T_INTO_FILE_LIST == tree->type_) {
-    ret_bool = true;
-  } else if (T_EXTERNAL_FILE_FORMAT == tree->type_) {
-    ret_bool = true;
-  } else if (T_CHAR_CHARSET == tree->type_) {
-    ret_bool = true;
-  } else if (T_WIN_NAMED_WINDOWS == tree->type_) {//name window cannot be parameterized because the order of parameterization cannot be guaranteed
-    ret_bool = true;
-  } else if (T_VEC_INDEX_PARAMS == tree->type_) {
-    ret_bool = true;
-  } else {
-    // do nothing
-  }
-  return ret_bool;
 }
 
 SQL_EXECUTION_MODE ObSqlParameterization::get_sql_execution_mode(ObPlanCacheCtx &pc_ctx)
 {
-  SQL_EXECUTION_MODE mode = INVALID_MODE;
   if (PC_PS_MODE == pc_ctx.mode_ || PC_PL_MODE == pc_ctx.mode_) {
-    if (pc_ctx.is_parameterized_execute_) {
-      mode = (PC_PL_MODE == pc_ctx.mode_) ? PL_EXECUTE_MODE : PS_EXECUTE_MODE;
-    } else {
-      mode = (PC_PL_MODE == pc_ctx.mode_) ? PL_PREPARE_MODE : PS_PREPARE_MODE;
-    }
-  } else {
-    mode = TEXT_MODE;
+    return pc_ctx.is_parameterized_execute_
+        ? (PC_PL_MODE == pc_ctx.mode_ ? PL_EXECUTE_MODE : PS_EXECUTE_MODE)
+        : (PC_PL_MODE == pc_ctx.mode_ ? PL_PREPARE_MODE : PS_PREPARE_MODE);
   }
-  return mode;
+  return TEXT_MODE;
 }
 
 bool ObSqlParameterization::is_prepare_mode(SQL_EXECUTION_MODE mode)
 {
-  return (PS_PREPARE_MODE == mode || PL_PREPARE_MODE == mode);
+  return mode == PS_PREPARE_MODE || mode == PL_PREPARE_MODE;
 }
 
 bool ObSqlParameterization::is_execute_mode(SQL_EXECUTION_MODE mode)
 {
-  return (PS_EXECUTE_MODE == mode || PL_EXECUTE_MODE == mode);
+  return mode == PS_EXECUTE_MODE || mode == PL_EXECUTE_MODE;
 }
 
 bool ObSqlParameterization::is_text_mode(SQL_EXECUTION_MODE mode)
 {
-  return TEXT_MODE == mode;
-}
-
-/* fix: 
-* decide if a number param can ignore scale check when choosing plancache.
-* if current node type is expr list or number,
-* and parent node is point, st_point, json array, or ctx.ignore_scale_check_ is true, return true,
-* otherwise return false.
-* example1 scale check could ignore:
-*   'select point(1.1, 1.1)' and 'select point(1.1111, 1.1111)' could share a same plancache,
-*   scale check about number literal in them are ignored
-* example2 scale check cannot ignore:
-*   'select point(cast(1.11 as double), 1.1)' and 'select point(cast(1.1111 as double), 1.1111)' 
-*   because 1.11 and 1.1111 in cast expr have different scales, 
-*   scale check will prevent them to share a same plancache
-*/ 
-bool ObSqlParameterization::is_ignore_scale_check(TransformTreeCtx &ctx, const ParseNode *parent)
-{
-  bool ret_bool = false;
-  if (OB_ISNULL(parent) || OB_ISNULL(ctx.tree_)) {
-    // do nothing
-  } else if (T_EXPR_LIST == ctx.tree_->type_ || T_NUMBER == ctx.tree_->type_) {
-    if (T_NUMBER == ctx.tree_->type_ && ctx.ignore_scale_check_) {
-      ret_bool = true;
-    } else if (T_FUN_SYS_POINT == parent->type_) {
-      ret_bool = true;
-    } else if (T_FUN_SYS == parent->type_) {
-      ParseNode **node = parent->children_;
-      if (OB_ISNULL(node) || OB_ISNULL(node[0])) {
-        // do nothing
-      } else {
-        ObString func_name(node[0]->str_len_, node[0]->str_value_);
-        if ((0 == func_name.case_compare("st_point"))) {
-          ret_bool = true;
-        }
-      }
-    } else { /* do nothing*/ }
-  } else { /* do nothing*/ }
-  return ret_bool;
-}
-
-// helper method of transform_syntax_tree
-// Normal parse and fast parse recognize constants inconsistently problem
-/*
-* 1.replace/insert's column with parentheses empty causes inconsistency between normal parse and fast parse constant recognition
-*   eg:replace into t2() values(40, 1, 'good')
-*   reason: mainly because opt_insert_columns, with parentheses, but empty, will default to generate a T_NULL node, causing inconsistency between normal parse and fast parse constant recognition.
-*   solution: change the T_NULL type to T_EMPTY type, at the resolver stage, this type is not recognized, but handled with this judgment if (T_COLUMN_LIST ==) else {//handle empty case}
-*2.default() causes inconsistency between normal parse and fast parse constants
-*   eg :select * from type_t where int_c = default(int_c)
-*   reason: default() generates 4 T_NULL type null_node at the syntax stage, filled with specific content at the resolve stage, causing inconsistency.
-*   solution: set the is_hidden_const_ field of the generated null_node to 1, at the transform tree stage, if the node is T_NULL type and is_hidden_const_ is true, it indicates that the node cannot be recognized as a constant in fast parse, thus not parameterized, ensuring consistency between normal parse and fast parse constant recognition.
-*3.using charset_name causes inconsistency between normal parse and fast parse constant recognition
-*  eg:select convert('1234' using 'utf8’);
-*  eg:select convert('1234' using utf8);
-*  reason: using ‘utf8’ and using utf8 both generate a T_VARCHAR type node, for using utf8, fast parse cannot recognize the constant, thus causing inconsistency between normal parse and fast parse.
-*  solution: set the is_hidden_const_ field of the T_VARCHAR node generated by using utf8 to 1, at the transform tree stage, if the node is T_VARCHAR type and is_hidden_const_ is true, it indicates that the node cannot be recognized as a constant in fast parse, thus not parameterized, ensuring consistency between normal parse and fast parse constant recognition.
-*4.month etc. date_unit causes inconsistency in the number of constants recognized by normal parse and fast parse
-*  eg:SELECT month(NULL);
-*  select * from type_t where date_c = date_add('2015-01-01', interval 5 month)
-*  issue: at the syntax stage, mouth, day etc. date_unit are parsed as T_INT type nodes, leading to inconsistency between normal parse and fast parse. The previous solution was to identify mouth etc. date_unit at the lexical stage and generate corresponding T_INT type nodes to solve this problem. However, this led to issues where mouth() is used as a function or when there are tables or units named month etc. in the sql, causing inconsistency between normal parse and fast parse constant recognition.
-*  solution: set the is_hidden_const_ field of the T_INT node generated by month, day etc. date_unit to 1, at the transform tree stage, if the node is T_INT type and is_hidden_const_ is true, it indicates that the node cannot be recognized as a constant in fast parse, thus not parameterized, ensuring consistency between normal parse and fast parse constant recognition.
-*5.as STRING_VALUE causes inconsistency between normal parse and fast parse constant recognition
-*  eg: select 'abc' as a;
-*      select 'abc' as ‘a’;
-*  issue: as a and as ‘a’ generate T_ALIAS nodes at the syntax stage, leading to fast parse recognizing one constant while normal parse does not recognize the constant.
-*  solution: record the number of constants recognizable by fast parse (0 or 1) in the T_ALIAS node, during transform, if it is a T_ALIAS node, treat it as a non-parameterizable constant and record the corresponding constant count, thus ensuring consistent constant count recognizable by fast parse next time.
-*
-*6. issue: when functions contain format strings, format strings do not need to be parameterized, eg:STR_TO_DATE, FROM_UNIXTIME, DATE_FORMAT
-*  solution: during parameterization, traverse the parse tree, identify T_FUN_SYS node after, identify the first child (function name), then traverse all children, and mark the formatting parameter nodes and their sub-nodes (the format string may be generated by the function) as non-parameterizable.
-*
-* 7. issue: when the weight_string function includes a level parameter, level can be variable-length, structured data, at this time normal_parser will flatten the constants of level (only one T_INT type ParseNode), but fast_parser will recognize all numbers, leading to inconsistent constant counts
-*    eg:
-*       select weight_string("AAA" as char(1) level 1-2 );
-*       select weight_string("AAA" as char(1) level 1,2,3,4,5,6,7,8,9,10,11 );
-*       select weight_string("AAA" as char(1) level 1 desc,2 asc ,3 desc ,4 reverse,5,6,7,8,9 reverse,10,11 );
-*    solution: create a new item_type(T_WEIGHT_STRING_LEVEL_PARAM), set different param_num_ according to different syntax, so normal_parser can equal faster_parser, when handling T_WEIGHT_STRING_LEVEL_PARAM specifically, convert it to T_INT for subsequent processing.
-*/
-int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
-                                          const ObSQLSessionInfo &session_info,
-                                          const ArgumentParameterization &parent_policy,
-                                          bool must_be_positive,
-                                          const ParseNode *parameter_expression,
-                                          ParameterOrigin origin)
-{
-  int ret = OB_SUCCESS;
-  int64_t value_level = NO_VALUES;
-  int64_t assign_level = NO_VALUES;
-  bool enable_mysql_compatible_dates = false;
-  ArgumentParameterization own_policy;
-  if (OB_ISNULL(ctx.top_node_)
-      || OB_ISNULL(ctx.allocator_)
-      || OB_ISNULL(ctx.sql_info_)
-      || OB_ISNULL(ctx.params_)) {
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "top node is NULL",
-               K(ctx.top_node_),
-               K(ctx.allocator_),
-               K(ctx.sql_info_),
-               K(ctx.params_),
-               K(ret));
-  } else if (NULL == ctx.tree_) {
-    // do nothing
-  } else if (OB_FAIL(ObSQLUtils::check_enable_mysql_compatible_dates(&session_info, false/*is_ddl*/,
-                       enable_mysql_compatible_dates))) {
-  } else if (OB_FAIL(get_argument_policy(ctx.tree_, *ctx.sql_info_, own_policy))) {
-  } else {
-    const ArgumentParameterization &argument_policy = own_policy.arguments_ != nullptr ? own_policy : parent_policy;
-    if (parameter_expression == nullptr) parameter_expression = ctx.tree_;
-    const NumericLowering *numeric = ctx.parameterization_->numeric_lowering(parameter_expression);
-    if (numeric != nullptr && numeric->kind == NumericLowering::Kind::NegateLiteral
-        && origin == ParameterOrigin::Literal) {
-      origin = ParameterOrigin::Subtraction;
-    }
-    bool enable_decimal_int = false;
-    if (OB_FAIL(ret)) {
-    } else if (T_PROJECT_STRING == ctx.tree_->type_
-        && (OB_ISNULL(ctx.tree_->children_) || ctx.tree_->num_child_ != 1
-            || OB_ISNULL(ctx.tree_->children_[0]))) {
-      ret = OB_INVALID_ARGUMENT;
-    } else if (T_PROJECT_STRING == ctx.tree_->type_
-        && OB_FAIL(ctx.project_list_.push_back({ctx.tree_,
-            ctx.tree_->children_[0]->type_ == T_VARCHAR}))) {
-    } else if (OB_FAIL(ObSQLUtils::check_enable_decimalint(&session_info, enable_decimal_int))) {
-    } else {
-      // do nothing
-    }
-    if (OB_SUCC(ret)) {
-      ObObjParam value;
-      ObAccuracy tmp_accuracy;
-      if (ctx.is_fast_parse_const_) { // Here we need to obtain all information identified as constants by fast parse
-        if (!is_node_not_param(ctx)) { // determine whether it is a constant that can be parameterized
-          const ParseNode *node = ctx.tree_;
-          const LiteralToken *raw_literal = nullptr;
-          if (OB_NOT_NULL(ctx.raw_params_) && ctx.tree_->value_ < ctx.raw_params_->count()
-              && T_QUESTIONMARK == ctx.tree_->type_ && !is_prepare_mode(ctx.mode_)) {
-            raw_literal = ctx.raw_params_->at(ctx.tree_->value_)->literal_;
-          }
-          if (T_QUESTIONMARK == ctx.tree_->type_) {
-            ctx.paramlized_questionmask_count_++;
-          }
-          // int constants in div/mul/add/sub
-          bool fmt_int_or_ch_decint =
-            (ctx.value_father_level_ < VALUE_VECTOR_LEVEL
-             && ctx.assign_father_level_ < ASSIGN_ITEM_LEVEL)
-            && (raw_literal != nullptr ? raw_literal->kind == peg::LiteralKind::Integer : node->type_ == T_INT)
-            && (ctx.parent_type_ == T_OP_DIV
-                || ctx.parent_type_ == T_OP_MUL
-                || ctx.parent_type_ == T_OP_ADD
-                || ctx.parent_type_ == T_OP_MINUS);
-
-          ObString literal_prefix;
-          int64_t server_collation = CS_TYPE_INVALID;
-          if (OB_FAIL(add_param_flag(origin, *ctx.sql_info_))) {
-          } else if (fmt_int_or_ch_decint
-                     && OB_FAIL(ctx.sql_info_->fmt_int_or_ch_decint_idx_.add_member(ctx.sql_info_->total_))) {
-          } else if (numeric != nullptr && numeric->literal != nullptr
-                     && OB_FAIL(ObResolverUtils::resolve_numeric_literal(*numeric->literal,
-                          NumericLiteralOptions{stmt::T_NONE, enable_decimal_int, ctx.is_from_pl_,
-                                                fmt_int_or_ch_decint, session_info.get_min_const_integer_precision()},
-                          *ctx.allocator_, value, literal_prefix))) {
-          } else if (numeric == nullptr && raw_literal != nullptr
-                     && OB_FAIL(ObResolverUtils::resolve_literal(*raw_literal,
-                          LiteralDecodeOptions{
-                            NumericLiteralOptions{stmt::T_NONE, enable_decimal_int, ctx.is_from_pl_,
-                              fmt_int_or_ch_decint, session_info.get_min_const_integer_precision()},
-                            ctx.collation_type_, ctx.tz_info_, session_info.get_sql_mode(),
-                            share::COMPAT_MYSQL57, enable_mysql_compatible_dates,
-                            ctx.is_transform_outline_, nullptr, NumericSignMode::Source},
-                          *ctx.allocator_, value, literal_prefix))) {
-          } else if (numeric == nullptr && raw_literal == nullptr && OB_FAIL(ObResolverUtils::resolve_const(node,
-                              stmt::T_NONE, // Parameters use execution precision, including SQL inside outline DDL.
-                              *(ctx.allocator_),
-                              ctx.collation_type_,
-                              ctx.national_collation_type_,
-                              ctx.tz_info_,
-                              value,
-                              ctx.is_transform_outline_,
-                              literal_prefix,
-                              ctx.default_length_semantics_,
-                              static_cast<ObCollationType>(server_collation),
-                              NULL, session_info.get_sql_mode(),
-                              enable_decimal_int,
-                              share::COMPAT_MYSQL57,
-                              enable_mysql_compatible_dates,
-                              session_info.get_min_const_integer_precision(),
-                              ctx.is_from_pl_,
-                              fmt_int_or_ch_decint))) {
-          } else {
-            // For string values, its T_VARCHAR type parse node has a T_VARCHAR type sub-node, which describes information such as the charset of the string.
-            // Therefore for parameterizable parameters, when the parent node of this node is T_VALUE_VECTOR, and the type is T_VARCHAR or there are no child nodes, it is considered a single value (not a parameter in a complex expression);
-            // At this time, mark the single value parameters in value as parameters that do not need to be strongly matched in the plan cache
-            if ((VALUE_VECTOR_LEVEL == ctx.value_father_level_
-                || ASSIGN_ITEM_LEVEL == ctx.assign_father_level_)
-                && (0 == ctx.tree_->num_child_
-                    || T_VARCHAR == ctx.tree_->type_
-                    || T_QUESTIONMARK == ctx.tree_->type_)) {
-              if (T_QUESTIONMARK == ctx.tree_->type_) {
-                if (OB_FAIL(ctx.sql_info_->no_check_type_offsets_.push_back(ctx.tree_->value_))) {
-                }
-              } else {
-                value.set_need_to_check_type(false);
-              }
-            } else {
-              if (T_QUESTIONMARK == ctx.tree_->type_) {
-                if (OB_FAIL(ctx.sql_info_->need_check_type_param_offsets_.add_member(ctx.tree_->value_))) {
-                }
-              } else {
-                value.set_need_to_check_type(true); 
-              }
-              // if value type is decimal int, it should not ignore scale check
-              if (ctx.ignore_scale_check_ && !value.is_decimal_int()) {
-                value.set_ignore_scale_check(true);
-              }
-            }
-            if (OB_SUCC(ret)) {
-              if (OB_FAIL(add_varchar_charset(ctx.tree_, *ctx.sql_info_))) {
-              }
-            }
-            if (OB_SUCC(ret) && ctx.tree_->type_ != T_QUESTIONMARK) {
-              if (OB_FAIL(ctx.sql_info_->fixed_param_idx_.push_back(ctx.question_num_))) {
-              }
-            }
-            value.set_is_boolean(value.is_boolean() || T_BOOL == ctx.tree_->type_);
-            if (T_QUESTIONMARK != ctx.tree_->type_ && ctx.is_project_list_scope_) {
-              ctx.sql_info_->ps_need_parameterized_ = false;
-            }
-            // If it is internal sql, such as pl internal sql, the formatted text string is used.
-            // because it is necessary to replace the sql variable in pl with the standard ps text
-            // for hard parsing. In this case, the param store has been constructed in advance
-            // so the constant cannot be resolved as a question mark, and there is no need to
-            // add it to the param store.
-            const ObItemType node_type = ctx.tree_->type_;
-            const int64_t raw_token_index = is_execute_mode(ctx.mode_)
-                ? ctx.tree_->raw_sql_offset_ : ctx.sql_info_->total_;
-            if (OB_SUCC(ret) && !is_execute_mode(ctx.mode_)) {
-              ret = ctx.parameterization_->bind(parameter_expression, ctx.question_num_, raw_token_index, origin);
-            }
-            ctx.question_num_++;
-            ctx.sql_info_->total_++;
-            if (must_be_positive && OB_SUCC(ret)
-                && OB_FAIL(ctx.sql_info_->must_be_positive_index_.add_member(raw_token_index))) {
-            }
-            if (OB_NOT_NULL(ctx.tree_) &&
-                OB_NOT_NULL(ctx.raw_params_) &&
-                raw_token_index >= 0 &&
-                raw_token_index < ctx.raw_params_->count() &&
-                OB_NOT_NULL(ctx.raw_params_->at(raw_token_index))) {
-              const auto &parameter = *ctx.raw_params_->at(raw_token_index);
-              value.set_raw_text_info(static_cast<int32_t>(parameter.source_offset_),
-                                      parameter.literal_->source.length());
-              if (ctx.sql_info_->need_check_fp_) {
-                ObPCParseInfo p_info;
-                p_info.param_idx_ = ctx.sql_info_->total_ - 1;
-                p_info.flag_ = NORMAL_PARAM;
-                p_info.raw_text_pos_ = ctx.tree_->sql_str_off_;
-                if (ctx.tree_->sql_str_off_ == -1) {
-                  ret = OB_NOT_SUPPORTED;
-                  LOG_WARN("invalid str off", K(lbt()), K(ctx.tree_),
-                      K(raw_token_index), K(get_type_name(node_type)),
-                      K(session_info.get_current_query_string()),
-                      "result_tree_", SJ(ObParserResultPrintWrapper(*ctx.top_node_)));
-                }
-                if (OB_FAIL(ret)) {
-                  // do nothing
-                } else if (OB_FAIL(ctx.sql_info_->parse_infos_.push_back(p_info))) {
-                }
-              }
-            }
-            if (OB_FAIL(ret)) {
-              //do nothing
-            } else if (!is_execute_mode(ctx.mode_) && OB_FAIL(ctx.params_->push_back(value))) {
-              SQL_PC_LOG(WARN, "fail to push into params", K(ret));
-            }
-          }
-        } else if (OB_FAIL(add_not_param_flag(ctx.tree_, *ctx.sql_info_))) {
-        }
-        if (ctx.sql_info_->need_check_fp_ && ret == OB_NOT_SUPPORTED) {
-          LOG_WARN("print tree", K(session_info.get_current_query_string()),
-              "result_tree_", SJ(ObParserResultPrintWrapper(*ctx.top_node_)));
-        }
-      } //if is_fast_parse_const end
-    }
-
-    // sql with charset need not ps parameterize
-    if (OB_SUCC(ret)) {
-      if ((T_QUESTIONMARK == ctx.tree_->type_ || ctx.parameterization_->find(ctx.tree_) != nullptr)
-          && OB_NOT_NULL(ctx.tree_->children_)
-          && OB_NOT_NULL(ctx.tree_->children_[0]) && ctx.tree_->children_[0]->type_ == T_CHARSET) {
-        ctx.sql_info_->ps_need_parameterized_ = false;
-      } else if (T_INTO_OUTFILE == ctx.tree_->type_) {
-        ctx.sql_info_->ps_need_parameterized_ = false;
-      }
-    }
-    // Determine which level of the tree the values() in insert are at, when a node's value_father_level_ is at VALUE_VECTOR_LEVEL,
-    // can be determined by checking if the node's num_child_ count is 0, to determine if the items in values are complex expressions;
-    if (OB_SUCC(ret)) {
-      if (T_VALUE_LIST == ctx.tree_->type_) {
-        value_level = VALUE_LIST_LEVEL;
-      } else if (T_VALUE_VECTOR == ctx.tree_->type_
-                 && VALUE_LIST_LEVEL == ctx.value_father_level_) {
-        value_level = VALUE_VECTOR_LEVEL;
-      } else if (ctx.value_father_level_ >= VALUE_VECTOR_LEVEL) {
-        value_level = ctx.value_father_level_ + 1;
-      }
-    }
-    if (OB_SUCC(ret)) {
-      if (T_ASSIGN_LIST == ctx.tree_->type_) {
-        assign_level = ASSIGN_LIST_LEVEL;
-      } else if (T_ASSIGN_ITEM == ctx.tree_->type_
-                 && ASSIGN_LIST_LEVEL == ctx.assign_father_level_) {
-        assign_level = ASSIGN_ITEM_LEVEL;
-      } else if (ctx.assign_father_level_ >= ASSIGN_ITEM_LEVEL) {
-        assign_level = ctx.assign_father_level_ + 1;
-      }
-    }
-
-    // transform `operand - const_num_val` to `operand + (-const_num_val)`
-    if (OB_SUCC(ret) && OB_FAIL(lower_subtraction(*ctx.allocator_, ctx.tree_, *ctx.parameterization_, ctx.is_from_pl_))) {
-    }
-    if (T_LIMIT_CLAUSE == ctx.tree_->type_) {
-      if (OB_ISNULL(ctx.tree_->children_) || 2 != ctx.tree_->num_child_) {
-        ret = OB_INVALID_ARGUMENT;
-      }
-    } else if (T_COMMA_LIMIT_CLAUSE == ctx.tree_->type_) {
-      if (OB_ISNULL(ctx.tree_->children_)
-          || 2 != ctx.tree_->num_child_
-          || OB_ISNULL(ctx.tree_->children_[0])
-          || OB_ISNULL(ctx.tree_->children_[1])) {
-        ret = OB_INVALID_ARGUMENT;
-      }
-    }
-
-    bool enable_contain_param = ctx.enable_contain_param_;
-    ParseNode *root = ctx.tree_;
-    // When type is T_QUESTIONMARK there is no need to consider parameterization of child nodes,
-    // For select '1', T_VARCHAR and T_CHAR nodes can share the same T_VARCHAR child node.
-    // Since the projection columns in select do not need to be parameterized, it will lead to the normal parse recognizing two constants,
-    // And fast parse only recognizes one constant, so add a T_VARCHAR check here, making both parses recognize only one constant.
-    bool not_param = ctx.not_param_;
-    ObItemType parent_type = ctx.parent_type_;
-    ctx.parent_type_ = root->type_;
-    if (not_param) {
-      ctx.sql_info_->ps_need_parameterized_ = false;
-    }
-    bool is_project_list_scope = T_PROJECT_LIST == root->type_;
-    if (is_project_list_scope) {
-      ctx.is_project_list_scope_ = true;
-    }
-    bool ignore_scale_check = ctx.ignore_scale_check_;
-    for (int32_t i = 0;
-         OB_SUCC(ret) && i < root->num_child_ && root->type_ != T_QUESTIONMARK
-         && ctx.parameterization_->find(parameter_expression) == nullptr
-         && root->type_ != T_VARCHAR && root->type_ != T_CHAR && root->type_ != T_NCHAR;
-         ++i) {
-      // If not_param is already true, then there is no need to check further; because if a node is determined to be true, then the entire subtree of that node is true;
-      if (OB_ISNULL(root->children_)) {
-        ret = OB_INVALID_ARGUMENT;
-        SQL_PC_LOG(WARN, "invalid argument", K(ctx.tree_->children_), K(ret));
-      } else {
-        const bool excluded_argument = argument_policy.excludes(root, i);
-        const bool child_must_be_positive = (root->type_ == T_LIMIT_CLAUSE
-            || root->type_ == T_COMMA_LIMIT_CLAUSE)
-            && root->children_[i] != nullptr
-            && ob_is_numeric_type(ITEM_TO_OBJ_TYPE(root->children_[i]->type_));
-        ArgumentParameterization child_policy;
-        if (argument_policy.arguments_ == root->children_[i]) child_policy = argument_policy;
-        ParseNode *child = root->children_[i];
-        const ParseNode *child_expression = child;
-        ParameterOrigin child_origin = ParameterOrigin::Literal;
-        if (!ctx.not_param_ && !excluded_argument && child != nullptr
-            && child->type_ == T_OP_NEG && child->num_child_ == 1
-            && child->children_ != nullptr && child->children_[0] != nullptr) {
-          ParseNode *operand = child->children_[0];
-          if (operand->type_ == T_VARCHAR) {
-            // The unary operation remains; the literal's source still belongs to a negation.
-          } else if ((operand->type_ == T_INT || operand->type_ == T_NUMBER
-                      || operand->type_ == T_DOUBLE || operand->type_ == T_FLOAT)
-                     && !(operand->type_ == T_INT && operand->value_ == INT64_MIN)
-                     && !operand->is_assigned_from_child_) {
-            const NumericLiteral *literal = nullptr;
-            if (OB_FAIL(make_negated_literal(*ctx.allocator_, *operand, true, literal))) {
-            } else if (OB_FAIL(ctx.parameterization_->fold_negation(child, literal))) {
-            } else {
-              child = operand;
-              child_origin = ParameterOrigin::UnaryNegation;
-            }
-          }
-        }
-        if (root->type_ == T_OP_NEG && child != nullptr && child->type_ == T_VARCHAR
-            && !ctx.not_param_) {
-          child_origin = ParameterOrigin::UnaryNegation;
-        }
-
-        if (OB_SUCC(ret)) {
-          if (T_STMT_LIST == root->type_) {
-            ctx.top_node_ = root->children_[i];
-          }
-          if (T_WHERE_CLAUSE == root->type_) { // Currently only processing where clause
-            ctx.expr_scope_ = T_WHERE_SCOPE;
-          }
-          ctx.tree_ = child;
-          ctx.value_father_level_ = value_level;
-          ctx.assign_father_level_ = assign_level;
-
-          if (OB_SUCC(ret)) {
-            // If not_param is already true then there is no need to check further; because if a node is determined to be true, then its entire subtree is true;
-            if (!ctx.not_param_) {
-              ctx.not_param_ = excluded_argument || is_tree_not_param(ctx.tree_);
-            }
-          }
-
-          if (OB_SUCC(ret)) {
-            // Determine whether this node is a constant node as recognized by fast_parse
-            ctx.enable_contain_param_ = enable_contain_param;
-            if (OB_FAIL(is_fast_parse_const(ctx))) {
-            }
-          }
-
-          if (OB_SUCC(ret)) {
-            ctx.ignore_scale_check_ = is_ignore_scale_check(ctx, root);
-          }
-        }
-        if (OB_SUCC(ret)) {
-          if (OB_FAIL(SMART_CALL(transform_tree(ctx, session_info, child_policy,
-                                               child_must_be_positive, child_expression, child_origin)))) {
-            if (OB_NOT_SUPPORTED != ret) {
-              SQL_PC_LOG(WARN, "fail to transform tree", K(ret));
-            }
-          } else {
-            ctx.not_param_ = not_param;
-            ctx.ignore_scale_check_ = ignore_scale_check;
-            // select a + 1 as 'a' from t where b = ?; 'a' in SQL will be recognized as a constant by fast parser
-            // In the ps parameterization scenario, 'a' will be added to the param store as a fixed parameter in
-            // the execute phase. The param store has two parameters, causing correctness problems.
-            // Therefore, the scene ps parameterization ability of specifying aliases needs to be disabled.
-            if (T_ALIAS == root->type_ && NULL != root->str_value_) {
-              ctx.sql_info_->ps_need_parameterized_ = false;
-            }
-            if (T_ALIAS == root->type_ && 0 == i) {
-              // alias node's param_num_ processing must wait until its first child node conversion is complete
-              // select a + 1 as 'a', 'a' cannot be parameterized, but its index in the raw_params array must be obtained after calculating the index plus 1
-              // alias node has one or zero parameters
-              for (int64_t param_cnt = 0; OB_SUCC(ret) && param_cnt < root->param_num_; param_cnt++) {
-                if (OB_FAIL(ctx.sql_info_->not_param_index_.add_member(ctx.sql_info_->total_++))) {
-                } else if (OB_FAIL(add_varchar_charset(root, *ctx.sql_info_))) {
-                } else {
-                  if (ctx.sql_info_->need_check_fp_) {
-                    ObPCParseInfo p_info;
-                    p_info.param_idx_ = ctx.sql_info_->total_ - 1;
-                    p_info.flag_ = NOT_PARAM;
-                    p_info.raw_text_pos_ = root->sql_str_off_;
-                    if (root->sql_str_off_ == -1) {
-                      ret = OB_NOT_SUPPORTED;
-                      LOG_WARN("invalid str off", K(lbt()), K(ctx.tree_),
-                          K(root->raw_sql_offset_), K(get_type_name(root->type_)),
-                          K(session_info.get_current_query_string()),
-                          "result_tree_", SJ(ObParserResultPrintWrapper(*ctx.top_node_)));
-                    }
-                    if (OB_FAIL(ret)) {
-                      // do nothing
-                    } else if (OB_FAIL(ctx.sql_info_->parse_infos_.push_back(p_info))) {
-                    }
-                  }
-                }
-              } // for end
-            } else {
-              // do nothing
-            }
-          }
-        }
-      }
-    } // for end
-    if (OB_SUCC(ret)) {
-      ctx.parent_type_ = parent_type;
-    }
-    if (is_project_list_scope) {
-      ctx.is_project_list_scope_ = false;
-    }
-  }
-  return ret;
+  return mode == TEXT_MODE;
 }
 
 int ObSqlParameterization::check_and_generate_param_info(const ObIArray<ObPCParam *> &raw_params,
@@ -961,7 +919,7 @@ int ObSqlParameterization::check_and_generate_param_info(const ObIArray<ObPCPara
 int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &allocator,
                                                     bool is_transform_outline,
                                                     ObPlanCacheCtx &pc_ctx,
-                                                    ParseNode *tree,
+                                                    const ParsedSql &parsed,
                                                     ParamStore &params,
                                                     ObCharsets4Parser charsets4parser)
 {
@@ -1022,13 +980,13 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
   } else if (OB_FAIL(transform_syntax_tree(allocator,
                                            *session,
                                            is_execute_mode(mode) ? NULL : &pc_ctx.fp_result_.raw_params_,
-                                           tree,
+                                           parsed,
                                            sql_info,
                                            params,
                                            pc_ctx.parameterization_,
                                            is_prepare_mode(mode) ? NULL : &pc_ctx.select_item_param_infos_,
                                            is_transform_outline,
-                                           mode))) {
+                                           mode, false, &user_var_names))) {
     if (OB_NOT_SUPPORTED != ret) {
       SQL_PC_LOG(WARN, "fail to normal parameterized parser tree", K(ret));
     }
@@ -1038,7 +996,6 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
   }
 
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(get_related_user_vars(tree, user_var_names))) {
   } else if (OB_FAIL(pc_ctx.sql_ctx_.set_related_user_var_names(user_var_names, allocator))) {
   } else if (is_execute_mode(mode)) {
     if (OB_FAIL(gen_ps_not_param_var(sql_info.ps_not_param_offsets_, params, pc_ctx))) {
@@ -1053,7 +1010,7 @@ int ObSqlParameterization::parameterize_syntax_tree(common::ObIAllocator &alloca
       if (OB_NOT_SUPPORTED != ret) {
         SQL_PC_LOG(WARN, "fail to check and generate param info", K(ret));
       } else if (sql_info.need_check_fp_) {
-        SQL_PC_LOG(INFO, "print tree", K(session->get_current_query_string()), "result_tree_", SJ(ObParserResultPrintWrapper(*tree)));
+        SQL_PC_LOG(INFO, "print tree", K(session->get_current_query_string()), "sql", parsed.original_source());
       } else {
         // do nothing
       }
@@ -1622,578 +1579,6 @@ int ObSqlParameterization::raw_fast_parameterize_sql(ObIAllocator &allocator,
   return ret;
 }
 
-int ObSqlParameterization::make_negated_literal(ObIAllocator &allocator, const ParseNode &source,
-                                                   bool negate, const NumericLiteral *&literal)
-{
-  int ret = OB_SUCCESS;
-  NumericKind kind;
-  switch (source.type_) {
-    case T_INT: kind = NumericKind::Integer; break;
-    case T_UINT64: kind = NumericKind::Unsigned; break;
-    case T_NUMBER: kind = NumericKind::Decimal; break;
-    case T_FLOAT: kind = NumericKind::Float; break;
-    case T_DOUBLE: kind = NumericKind::Double; break;
-    default: return OB_ERR_UNEXPECTED;
-  }
-  ObString text(source.str_len_, source.str_value_);
-  uint64_t integer = static_cast<uint64_t>(source.value_);
-  if (negate) {
-    char *spelling = static_cast<char *>(allocator.alloc(text.length() + 2));
-    if (spelling == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
-    spelling[0] = '-';
-    MEMCPY(spelling + 1, text.ptr(), text.length());
-    spelling[text.length() + 1] = '\0';
-    text.assign_ptr(spelling, text.length() + 1);
-    if (kind == NumericKind::Integer) integer = uint64_t(0) - integer;
-  }
-  void *storage = allocator.alloc(sizeof(NumericLiteral));
-  if (storage == nullptr) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else {
-    literal = new (storage) NumericLiteral{kind, integer, text};
-  }
-  return ret;
-}
-
-int ObSqlParameterization::add_param_flag(ParameterOrigin origin, SqlInfo &sql_info)
-{
-  int ret = OB_SUCCESS;
-  if (origin == ParameterOrigin::UnaryNegation) {
-    ret = sql_info.neg_param_index_.add_member(sql_info.total_);
-  } else if (origin == ParameterOrigin::Subtraction) {
-    ret = sql_info.trans_from_minus_index_.add_member(sql_info.total_);
-  }
-  return ret;
-}
-
-int ObSqlParameterization::add_not_param_flag(const ParseNode *node, SqlInfo &sql_info)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(node)) {
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(ret));
-  } else if (T_QUESTIONMARK == node->type_) {
-    if (OB_FAIL(sql_info.ps_not_param_offsets_.push_back(node->value_))) {
-    } else if (OB_FAIL(sql_info.not_param_index_.add_member(node->value_))) {
-    }
-  } else if (T_CAST_ARGUMENT == node->type_        // If it is a cast type, then N cast nodes corresponding constants need to be added, because normal parse does not recognize them as constants, but fast parse will recognize them as constants
-             || T_COLLATION == node->type_
-             || T_NULLX_CLAUSE == node->type_ // deal null clause on json expr
-             || T_WEIGHT_STRING_LEVEL_PARAM == node->type_) { 
-    for (int i = 0; OB_SUCC(ret) && i < node->param_num_; ++i) {
-      if (OB_FAIL(sql_info.not_param_index_.add_member(sql_info.total_++))) {
-      } else if (OB_FAIL(add_varchar_charset(node, sql_info))) {
-      }
-      if (sql_info.need_check_fp_) {
-        ObPCParseInfo p_info;
-        p_info.param_idx_ = sql_info.total_ - 1;
-        p_info.flag_ = NOT_PARAM;
-        p_info.raw_text_pos_ = node->sql_str_off_;
-        if (node->sql_str_off_ == -1) {
-          ret = OB_NOT_SUPPORTED;
-          LOG_WARN("invalid str off", K(lbt()), K(node),
-              K(node->raw_sql_offset_), K(get_type_name(node->type_)));
-        }
-        if (OB_FAIL(ret)) {
-
-        } else if (OB_FAIL(sql_info.parse_infos_.push_back(p_info))) {
-        }
-      }
-    }
-  } else {
-    if (OB_FAIL(sql_info.not_param_index_.add_member(sql_info.total_++))) {
-    } else if (OB_FAIL(add_varchar_charset(node, sql_info))) {
-    }
-    if (sql_info.need_check_fp_) {
-      ObPCParseInfo p_info;
-      p_info.param_idx_ = sql_info.total_ - 1;
-      p_info.flag_ = NOT_PARAM;
-      p_info.raw_text_pos_ = node->sql_str_off_;
-      if (node->sql_str_off_ == -1) {
-        ret = OB_NOT_SUPPORTED;
-        LOG_WARN("invalid str off", K(lbt()), K(node),
-            K(node->raw_sql_offset_), K(get_type_name(node->type_)));
-      }
-      if (OB_FAIL(ret)) {
-
-      } else if (OB_FAIL(sql_info.parse_infos_.push_back(p_info))) {
-      }
-    }
-  }
-
-  return ret;
-}
-int ObSqlParameterization::exclude_arguments(const ParseNode *arguments,
-                                               int64_t argument_count,
-                                               int64_t excluded_begin,
-                                               int64_t excluded_end,
-                                               SqlInfo &sql_info,
-                                               ArgumentParameterization &policy)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(arguments) || OB_ISNULL(arguments->children_)
-      || arguments->num_child_ != argument_count) {
-    ret = OB_INVALID_ARGUMENT;
-  } else {
-    sql_info.ps_need_parameterized_ = false;
-    for (int64_t i = excluded_begin; OB_SUCC(ret) && i < excluded_end; ++i) {
-      if (OB_ISNULL(arguments->children_[i])) ret = OB_INVALID_ARGUMENT;
-    }
-    if (OB_SUCC(ret)) {
-      policy.arguments_ = arguments;
-      policy.excluded_begin_ = excluded_begin;
-      policy.excluded_end_ = excluded_end;
-    }
-  }
-  return ret;
-}
-
-int ObSqlParameterization::get_argument_policy(const ParseNode *tree, SqlInfo &sql_info,
-                                               ArgumentParameterization &policy)
-{
-  int ret = OB_SUCCESS;
-  if (NULL == tree) {
-    //do nothing
-  } else if (T_FUN_SYS == tree->type_) {
-    ParseNode *const *node = tree->children_; // function name and argument list
-    if (2 != tree->num_child_) {
-      //do nothing  if it is not fun_name and arg_list then it is not within the scope of what needs to be marked
-    } else if (OB_ISNULL(node) || OB_ISNULL(node[0]) || OB_ISNULL(node[1])) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid argument", K(ret), K(node));
-    } else {
-      ObString func_name(node[0]->str_len_, node[0]->str_value_);
-      if ((0 == func_name.case_compare("USERENV")
-           || 0 == func_name.case_compare("UNIX_TIMESTAMP"))
-          && (1 == node[1]->num_child_)) {
-        // The return type of the USERENV function is determined by the specific value of the parameters, so if parameterized, we cannot obtain the specific values, hence parameterization is not done for now
-        // UNIX_TIMESTAMP(param_str), the precision of the result is related to param_str, cannot be parameterized
-        ret = exclude_arguments(node[1], 1, 0, 1, sql_info, policy);
-      } else if (0 == func_name.case_compare("substr") && (3 == node[1]->num_child_)) {
-        ret = exclude_arguments(node[1], 3, 1, 3, sql_info, policy);
-      } else if (0 == func_name.case_compare("weight_string")
-          && (5 == node[1]->num_child_)) {
-        ret = exclude_arguments(node[1], 5, 1, 5, sql_info, policy);
-      } else if ((0==func_name.case_compare("convert")
-                  || (0==func_name.case_compare("char")))
-                  && (2 == node[1]->num_child_)) {
-        ret = exclude_arguments(node[1], 2, 1, 2, sql_info, policy);
-      } else if ((0 == func_name.case_compare("str_to_date") // STR_TO_DATE(str,format)
-                  || 0 == func_name.case_compare("date_format") //DATE_FORMAT(date,format)
-                  || 0 == func_name.case_compare("from_unixtime")//FROM_UNIXTIME(unix_timestamp), FROM_UNIXTIME(unix_timestamp,format)
-                  || 0 == func_name.case_compare("round")        //ROUND(X), ROUND(X,D)
-                  || 0 == func_name.case_compare("left") // the length of result should be set with the value of the second param
-                  || 0 == func_name.case_compare("substr")
-                  || 0 == func_name.case_compare("truncate")) // The precision of the truncate result needs to be derived based on the second parameter, so it cannot be parameterized
-                 && (2 == node[1]->num_child_)) {
-        ret = exclude_arguments(node[1], 2, 1, 2, sql_info, policy);
-      } else if ((0 == func_name.case_compare("name_const"))
-                  && (2 == node[1]->num_child_)) {
-        ret = exclude_arguments(node[1], 2, 0, 1, sql_info, policy);
-      } else if ((0 == func_name.case_compare("concat")) && 1 == node[0]->reserved_) {
-        sql_info.ps_need_parameterized_ = false;
-      } else if ((0 == func_name.case_compare("json_equal"))) {
-        sql_info.ps_need_parameterized_ = false;
-      } else if ((0 == func_name.case_compare("json_extract"))) {
-        ret = exclude_arguments(tree, 2, 1, 2, sql_info, policy);
-      } else if ((0 == func_name.case_compare("json_member_of"))) {
-        sql_info.ps_need_parameterized_ = false;
-        if (2 == tree->num_child_) {
-          ret = exclude_arguments(tree, 2, 1, 2, sql_info, policy);
-        }
-      } else if ((0 == func_name.case_compare("json_contains"))) {
-        sql_info.ps_need_parameterized_ = false;
-        for (int64_t i = 0; OB_SUCC(ret) && i < tree->num_child_; i++) {
-          if (OB_ISNULL(tree->children_[i])) {
-            ret = OB_INVALID_ARGUMENT;
-            SQL_PC_LOG(WARN, "invalid argument", K(ret), K(tree->children_[i]));
-          }
-        }
-      } else if ((0 == func_name.case_compare("json_overlaps"))) {
-        ret = exclude_arguments(node[1], 2, 0, 2, sql_info, policy);
-      } else if ((0 == func_name.case_compare("json_schema_valid"))
-                || (0 == func_name.case_compare("json_schema_validation_report"))) {
-        ret = exclude_arguments(node[1], 2, 0, 1, sql_info, policy);
-      }
-    }
-  } else if (T_OP_LIKE == tree->type_) {
-    if (3 == tree->num_child_) {   // child[0] like child[1] escape child[2]
-      ret = exclude_arguments(tree, 3, 1, 3, sql_info, policy);
-    }
-  } else if (T_OP_IS == tree->type_ || T_OP_IS_NOT == tree->type_) {
-    if (tree->num_child_ == 2) {
-      ret = exclude_arguments(tree, 2, 1, 2, sql_info, policy);
-    } else { /*do nothing*/ }
-  } else if(T_FUN_SYS_JSON_VALUE == tree->type_) {
-    if (10 != tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid json value expr argument", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 10, 1, 10, sql_info, policy);
-    }
-  } else if(T_FUN_SYS_JSON_OBJECT == tree->type_) {
-    if (5 != tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid json object expr argument", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 5, 0, 5, sql_info, policy);
-    }
-  } else if(T_FUN_SYS_IS_JSON == tree->type_) {
-    if (5 != tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid argument num for IS json", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 5, 1, 5, sql_info, policy);
-    }
-  } else if(T_FUN_SYS_JSON_QUERY == tree->type_) {
-    if (13 != tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid json query expr argument", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 13, 1, 13, sql_info, policy);
-    }
-  } else if(T_FUN_SYS_JSON_EXISTS == tree->type_) {
-    if (5 != tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid argument num for json_exists", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 5, 1, 5, sql_info, policy);
-    }
-  } else if(T_FUN_SYS_JSON_EQUAL == tree->type_) {
-    if (3 < tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid json query expr argument", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 3, 2, 3, sql_info, policy);
-    }
-  } else if(T_FUN_SYS_JSON_ARRAY == tree->type_) {
-    if (4 != tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid json array expr argument", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 4, 1, 4, sql_info, policy);
-    }
-  } else if(T_FUN_SYS_JSON_MERGE_PATCH == tree->type_) {
-    if (7 != tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid json mergepatch expr argument", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 7, 2, 7, sql_info, policy);
-    }
-  } else if (T_JSON_TABLE_EXPRESSION == tree->type_) {
-    if (5 != tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid json table expr argument", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 5, 1, 5, sql_info, policy);
-    }
-  } else if (T_FUN_SYS_TREAT == tree->type_) {
-    if (2 != tree->num_child_) {
-      ret = OB_INVALID_ARGUMENT;
-      SQL_PC_LOG(WARN, "invalid treat expr argument", K(ret), K(tree->num_child_)); 
-    } else {
-      ret = exclude_arguments(tree, 2, 0, 1, sql_info, policy);
-    }
-  } else { /*do nothing*/ }
-  return ret;
-}
-
-int ObSqlParameterization::add_varchar_charset(const ParseNode *node, SqlInfo &sql_info)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(node)) {
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(node));
-  } else if (T_VARCHAR == node->type_
-             && NULL != node->children_
-             && NULL != node->children_[0]
-             && T_CHARSET == node->children_[0]->type_) {
-    ObString charset(node->children_[0]->str_len_,
-                     node->children_[0]->str_value_);
-    ObCharsetType charset_type = CHARSET_INVALID;
-    if (CHARSET_INVALID == (charset_type =
-          ObCharset::charset_type(charset.trim()))) {
-      ret = OB_ERR_UNKNOWN_CHARSET;
-      LOG_USER_ERROR(OB_ERR_UNKNOWN_CHARSET, charset.length(), charset.ptr());
-    } else if (OB_FAIL(sql_info.param_charset_type_.push_back(charset_type))) {
-    }
-  } else if (OB_FAIL(sql_info.param_charset_type_.push_back(CHARSET_INVALID))) {
-  }
-
-  return ret;
-}
-
-int ObSqlParameterization::get_related_user_vars(const ParseNode *tree, common::ObIArray<common::ObString> &user_vars)
-{
-  int ret = OB_SUCCESS;
-  ObString var_str;
-  if (tree == NULL) {
-    // do nothing
-  } else {
-    if (T_USER_VARIABLE_IDENTIFIER == tree -> type_) {
-      if (OB_ISNULL(tree -> str_value_) || tree -> str_len_ < 0) {
-        ret = OB_INVALID_ARGUMENT;
-      } else {
-        var_str.assign_ptr(tree -> str_value_, static_cast<int32_t>(tree -> str_len_));
-        if (OB_FAIL(user_vars.push_back(var_str))) {
-        }
-      }
-    } else {
-      for (int64_t i = 0; OB_SUCC(ret) && i < tree -> num_child_; i++) {
-        if (OB_ISNULL(tree -> children_)) {
-          ret = OB_INVALID_ARGUMENT;
-        } else if (OB_FAIL(SMART_CALL(get_related_user_vars(tree -> children_[i], user_vars)))) {
-        }
-      }
-    }
-  }
-
-  if (OB_FAIL(ret)) {
-    user_vars.reset();
-  }
-
-  return ret;
-}
-
-int ObSqlParameterization::get_select_item_param_info(const common::ObIArray<ObPCParam *> &raw_params,
-                                                      const ParseNode *tree,
-                                                      bool string_literal,
-                                                      const ParameterizationResult &bindings,
-                                                      SelectItemParamInfoMap &select_item_param_infos)
-{
-  int ret = OB_SUCCESS;
-  SelectItemParamInfo param_info;
-  ObString org_field_name;
-  int64_t expr_pos = tree->raw_sql_offset_;
-  int64_t buf_len = SelectItemParamInfo::PARAMED_FIELD_BUF_LEN;
-  ObSEArray<TraverseStackFrame, 64> stack_frames;
-
-  if (T_PROJECT_STRING != tree->type_ || OB_ISNULL(tree->children_) || tree->num_child_ <= 0) {
-    ret = OB_INVALID_ARGUMENT;
-  } else if (T_ALIAS == tree->children_[0]->type_
-             || T_STAR == tree->children_[0]->type_) { // have alias name, or is a '*', do not need parameterized
-    // do nothing
-  } else if (OB_FAIL(stack_frames.push_back(TraverseStackFrame{tree, 0}))) {
-  } else {
-    // start to construct paramed field name template...
-    org_field_name.assign_ptr(tree->str_value_, (int32_t)tree->str_len_);
-
-    SelectItemTraverseCtx ctx(raw_params,
-                              tree,
-                              org_field_name,
-                              tree->raw_sql_offset_,
-                              buf_len,
-                              expr_pos,
-                              param_info,
-                              bindings);
-    // Simulate function recursive operation, traverse subtree
-    // Stack each element is {cur_node, next_child_idx}
-    // Pop operation:
-    // A projection with a recorded name template has already been traversed.
-    // or T_QUESTION_MARK, or all child nodes have been traversed, pop from stack
-    //
-    // Push operation:
-    // Select the first non-empty child node of cur_node and push it onto the stack, and update the current stack's next_child_idx_
-    for (; OB_SUCC(ret) && stack_frames.count() > 0; ) {
-      int64_t frame_idx = stack_frames.count() - 1;
-      ctx.tree_ = stack_frames.at(frame_idx).cur_node_;
-      if (NULL == ctx.tree_) {
-        ret = OB_INVALID_ARGUMENT;
-      } else if (nullptr != select_item_param_infos.get(ctx.tree_)
-                 || bindings.find(ctx.tree_) != nullptr
-                 || stack_frames.at(frame_idx).next_child_idx_ >= ctx.tree_->num_child_) {
-        if (bindings.find(ctx.tree_) != nullptr) {
-          if (ctx.param_info_.name_len_ >= ctx.buf_len_) {
-            // column length is already full, no need to continue constructing the template, directly break out
-            break;
-          } else if (OB_FAIL(resolve_paramed_const(ctx))) {
-          } else {
-            // do nothing
-          }
-        }
-        // pop stack
-        stack_frames.pop_back();
-        --frame_idx;
-      } else {
-        // do nothing
-      }
-
-      if (OB_FAIL(ret) || frame_idx < 0) {
-        // do nothing
-      } else if (stack_frames.at(frame_idx).cur_node_->num_child_ > 0) {
-        if (OB_ISNULL(stack_frames.at(frame_idx).cur_node_->children_)) {
-          ret = OB_INVALID_ARGUMENT;
-          SQL_PC_LOG(WARN, "invalid null children", K(ret), K(stack_frames.at(frame_idx).cur_node_->children_), K(frame_idx));
-        } else {
-          TraverseStackFrame frame = stack_frames.at(frame_idx);
-          for (int64_t i = frame.next_child_idx_; OB_SUCC(ret) && i < frame.cur_node_->num_child_; i++) {
-            if (OB_ISNULL(frame.cur_node_->children_[i])) {
-              stack_frames.at(frame_idx).next_child_idx_ = i + 1;
-            } else if (OB_FAIL(stack_frames.push_back(TraverseStackFrame{frame.cur_node_->children_[i], 0}))) {
-            } else {
-              stack_frames.at(frame_idx).next_child_idx_ = i + 1;
-              break;
-            }
-          } // for end
-        }
-      }
-    } // for end
-
-    if (OB_SUCC(ret)) {
-      // If there is a string after the constant
-      int64_t res_start_pos = expr_pos - tree->raw_sql_offset_;
-      int64_t tmp_len = std::min(org_field_name.length() - res_start_pos, buf_len - param_info.name_len_);
-      if (tmp_len > 0) {
-        int32_t len = static_cast<int32_t>(tmp_len);
-        MEMCPY(param_info.paramed_field_name_ + param_info.name_len_, org_field_name.ptr() + res_start_pos, len);
-        param_info.name_len_ += len;
-      }
-
-      if (bindings.find(tree->children_[0]) != nullptr
-          && string_literal) {
-        param_info.esc_str_flag_ = true;
-      }
-    }
-  }
-
-  // MySQL sets the alias of standalone null value("\N","null"...) to "NULL" during projection.
-  if (OB_FAIL(ret)) {
-    // do nothing
-  } else if (1 == param_info.params_idx_.count() &&
-             0 == ObString(param_info.name_len_, param_info.paramed_field_name_).compare("?")) {
-    int64_t idx = param_info.params_idx_.at(0);
-    if (idx >= raw_params.count()) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_WARN("invalid index", K(idx), K(raw_params.count()));
-    } else if (OB_ISNULL(raw_params.at(idx)) || OB_ISNULL(raw_params.at(idx)->literal_)) {
-      ret = OB_INVALID_ARGUMENT;
-    } else if (peg::LiteralKind::Null == raw_params.at(idx)->literal_->kind) {
-      param_info.null_literal_ = true;
-    }
-  }
-
-  if (OB_SUCC(ret) && param_info.params_idx_.count() > 0) {
-    ret = select_item_param_infos.set_refactored(tree, param_info);
-  }
-
-  return ret;
-}
-
-int ObSqlParameterization::resolve_paramed_const(SelectItemTraverseCtx &ctx)
-{
-  int ret = OB_SUCCESS;
-  const auto *binding = ctx.parameterization_.find(ctx.tree_);
-  const int64_t idx = binding->raw_token_index;
-  if (idx >= ctx.raw_params_.count()) {
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(ret), K(idx), K(ctx.raw_params_.count()));
-  } else if (OB_ISNULL(ctx.raw_params_.at(idx)) || OB_ISNULL(ctx.raw_params_.at(idx)->literal_)) {
-    ret = OB_INVALID_ARGUMENT;
-    SQL_PC_LOG(WARN, "invalid argument", K(ret));
-  } else {
-    const auto &parameter = *ctx.raw_params_.at(idx);
-    const LiteralToken &literal = *parameter.literal_;
-    int64_t tmp_len = std::min(ctx.buf_len_ - ctx.param_info_.name_len_, parameter.source_offset_ - ctx.expr_pos_);
-    // In the case of select _binary 'abc';, special processing is required, because the value of
-    // org_expr_name_ is the same as that of raw param in this scenario.
-    // If the original name equals the decoded literal text,
-    // there is no need to copy it. paramed_field_name_ should be replaced with '?'
-    if (0 == ctx.org_expr_name_.case_compare(literal.text)) {
-      // do nothing
-    } else if (tmp_len > 0 && ctx.org_expr_name_.length() > 0) {
-      int32_t len = static_cast<int64_t>(tmp_len);
-      MEMCPY(ctx.param_info_.paramed_field_name_ + ctx.param_info_.name_len_, ctx.org_expr_name_.ptr() + ctx.expr_pos_ - ctx.expr_start_pos_, len);
-      ctx.param_info_.name_len_ += len;
-    }
-    ctx.expr_pos_ = parameter.source_offset_ + literal.source.length();
-    if (OB_FAIL(ctx.param_info_.questions_pos_.push_back(ctx.param_info_.name_len_))) {
-    } else if (OB_FAIL(ctx.param_info_.params_idx_.push_back(idx))) {
-    } else {
-      if (ctx.param_info_.name_len_ < ctx.buf_len_) {
-        ctx.param_info_.paramed_field_name_[ctx.param_info_.name_len_++] = '?'; // Replace constant with '?'
-      }
-      if (binding->origin == ParameterOrigin::UnaryNegation
-          && OB_FAIL(ctx.param_info_.neg_params_idx_.add_member(idx))) {
-        SQL_PC_LOG(WARN, "failed to add member", K(ret), K(idx));
-      }
-      if (OB_SUCC(ret)) {
-      }
-    }
-  }
-  return ret;
-}
-
-int ObSqlParameterization::lower_subtraction(ObIAllocator &allocator, const ParseNode *tree,
-                                                  ParameterizationResult &result, bool is_from_pl)
-{
-  int ret = OB_SUCCESS;
-  const ParseNode *operand = nullptr;
-  if (tree->type_ != T_OP_MINUS) {
-  } else if (tree->num_child_ != 2 || tree->children_ == nullptr || tree->children_[1] == nullptr) {
-    ret = OB_INVALID_ARGUMENT;
-  } else if (tree->children_[1]->is_assigned_from_child_) {
-  } else if (ob_is_number_or_decimal_int_tc(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_))
-             || ((ob_is_integer_type(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_))
-                   || ob_is_real_type(ITEM_TO_OBJ_TYPE(tree->children_[1]->type_)))
-                 && tree->children_[1]->value_ >= 0)) {
-    operand = tree->children_[1];
-  } else if (tree->children_[1]->type_ == T_OP_MUL || tree->children_[1]->type_ == T_OP_DIV
-             || tree->children_[1]->type_ == T_OP_INT_DIV || tree->children_[1]->type_ == T_OP_MOD) {
-    ret = find_leftest_const_node(*tree->children_[1], operand);
-  }
-  if (OB_SUCC(ret) && operand != nullptr) {
-    const NumericLiteral *literal = nullptr;
-    if (OB_FAIL(make_negated_literal(allocator, *operand, !is_from_pl, literal))) {
-    } else if (OB_FAIL(result.negate_literal(operand, literal))) {
-    } else {
-      ret = result.add_negated_operand(tree);
-    }
-  }
-  return ret;
-}
-
-int ObSqlParameterization::find_leftest_const_node(const ParseNode &cur_node, const ParseNode *&const_node)
-{
-  int ret = OB_SUCCESS;
-  if (ob_is_numeric_type(ITEM_TO_OBJ_TYPE(cur_node.type_))
-      && 0 == cur_node.is_assigned_from_child_) {
-    const_node = &cur_node;
-  } else if (1 == cur_node.is_assigned_from_child_) {
-    // do nothing
-  } else if (T_OP_MUL == cur_node.type_ || T_OP_DIV == cur_node.type_
-    || T_OP_INT_DIV == cur_node.type_ || T_OP_MOD == cur_node.type_) {
-    /*   For 1 - (2-3)/4, syntax tree is */
-    /*      - */
-    /*     / \ */
-    /*    1  div */
-    /*      /  \ */
-    /*     -    4 */
-    /*    / \ */
-    /*   2   3 */
-    /*  At this point - it cannot be combined with 2, that is, it cannot convert the syntax tree */
-    /*  For unary operators (unary operator precedence greater than subtraction), such as the negative sign */
-    /*  1 - (-2)/4 */
-    /*  Syntax tree is: */
-    /*     - */
-    /*    / \ */
-    /*   1  div */
-    /*     /  \ */
-    /*    neg  4 */
-    /*     | */
-    /*     2 */
-    /*  In this case, - cannot be combined with 2 */
-    /*  So only T_OP_MUL, T_OP_DIV and T_OP_MOD go down this path */
-    if (OB_ISNULL(cur_node.children_) || 2 != cur_node.num_child_
-        || OB_ISNULL(cur_node.children_[0]) || OB_ISNULL(cur_node.children_[1])) {
-      ret = OB_INVALID_ARGUMENT;
-    } else if (OB_FAIL(find_leftest_const_node(*cur_node.children_[0], const_node))) {
-    } else {
-      // do nothing
-    }
-  }
-  return ret;
-}
-
 int ObSqlParameterization::formalize_sql_text(ObIAllocator &allocator, const ObString &src_sql, 
                                               ObString &fmt_sql, const SqlInfo &sql_info,
                                               const FPContext &fp_ctx)
@@ -2227,30 +1612,4 @@ int ObSqlParameterization::formalize_sql_text(ObIAllocator &allocator, const ObS
     fmt_sql.assign_ptr(buf_format, format_pos);
   }
   return ret;
-}
-
-bool ObSqlParameterization::is_vector_index_query(const ParseNode *tree)
-{
-  bool bret = false;
-  // for vector index query
-  if (T_SORT_LIST == tree->type_) {
-    if (tree->num_child_ == 1 && OB_NOT_NULL(tree->children_[0])) { // only one sort key
-      ParseNode *curr = tree->children_[0];
-      if (curr->type_ == T_SORT_KEY && curr->num_child_ == 2 && OB_NOT_NULL(curr->children_[0])) {
-        curr = curr->children_[0];
-        if (curr->type_ == T_FUN_SYS && curr->num_child_ == 2 && OB_NOT_NULL(curr->children_[0])) {
-          curr = curr->children_[0]; // sort key is sys func
-          if (curr->type_ == T_IDENT && OB_NOT_NULL(curr->str_value_)) {
-            ObString func_name(curr->str_len_, curr->str_value_);
-            bret = func_name.case_compare("l2_distance") == 0 
-                   || func_name.case_compare("negative_inner_product") == 0
-                   || func_name.case_compare("cosine_distance") == 0
-                   || func_name.case_compare("semantic_distance") == 0
-                   || func_name.case_compare("semantic_vector_distance") == 0;
-          }
-        }
-      }
-    }
-  }
-  return bret;
 }

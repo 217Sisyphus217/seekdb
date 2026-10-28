@@ -20,6 +20,8 @@
 #include "sql/resolver/dml/ob_dml_resolver.h"
 #include "sql/resolver/parameterization_result.h"
 #include "sql/engine/expr/ob_expr_version.h"
+#include "sql/resolver/expr/literal_decode_options.h"
+#include "rust/sql_parser.h"
 #include "sql/rewrite/ob_transform_pre_process.h"
 
 namespace oceanbase
@@ -29,11 +31,33 @@ using namespace common;
 
 namespace sql
 {
+namespace {
+const peg::Node &unparenthesized(const peg::Node &node)
+{
+  const peg::Node *result = &node;
+  while (result->kind == peg::NodeKind::Parenthesized) result = &peg::parenthesized_expression(*result);
+  return *result;
+}
+
+const peg::Node &membership_element(const peg::Node &row, int64_t columns, int64_t index)
+{
+  const auto &value = unparenthesized(row);
+  return unparenthesized(columns == 1 ? value : peg::row_elements(value)[index]);
+}
+
+bool membership_row(const peg::Node &node)
+{
+  const auto kind = unparenthesized(node).kind;
+  return kind == peg::NodeKind::ExprList || kind == peg::NodeKind::ValueVector;
+}
+
+}
+
 int64_t InListRows::row_count() const
 {
   int64_t count = 0;
   for (int64_t i = 0; i < segments_.count(); ++i) {
-    count += segments_.at(i)->num_child_;
+    count += peg::membership_expressions(*segments_.at(i)).size();
   }
   return count;
 }
@@ -210,28 +234,23 @@ int ObInListResolver::get_inlist_rewrite_info(const InListRows &rows,
     int64_t row_idx = 0;
     for (int64_t segment_idx = 0; OB_SUCC(ret) && rewrite_info.is_valid_as_values_table_
          && segment_idx < rows.segments_.count(); ++segment_idx) {
-      const ParseNode &in_list = *rows.segments_.at(segment_idx);
-      if (OB_ISNULL(in_list.children_)) {
-        ret = OB_ERR_UNEXPECTED;
-      }
+      const auto in_list = peg::membership_expressions(*rows.segments_.at(segment_idx));
       for (int64_t i = 0; OB_SUCC(ret) && rewrite_info.is_valid_as_values_table_
-           && i < in_list.num_child_; ++i, ++row_idx) {
-        if (OB_ISNULL(in_list.children_[i])) {
-          ret = OB_ERR_UNEXPECTED;
-        } else if (OB_UNLIKELY(column_cnt > 1 && in_list.children_[i]->num_child_ != column_cnt)) {
+           && i < in_list.size(); ++i, ++row_idx) {
+        if (OB_UNLIKELY(column_cnt > 1 && (!membership_row(in_list[i])
+            || peg::row_elements(unparenthesized(in_list[i])).size() != column_cnt))) {
           // delay error later
           rewrite_info.is_valid_as_values_table_ = false;
         } else {
           DistinctObjMeta cur_param_type = DistinctObjMeta();
-          const ParseNode *node = column_cnt == 1 ? in_list.children_[i]
-                                                  : in_list.children_[i]->children_[col_idx];
+          const peg::Node *node = &membership_element(in_list[i], column_cnt, col_idx);
           const ParameterBinding *binding = helper.parameterization_ == nullptr
               ? nullptr : helper.parameterization_->find(node);
           if (OB_ISNULL(node)) {
             ret = OB_ERR_UNEXPECTED;
-          } else if (FALSE_IT(rewrite_info.is_question_mark_ = binding != nullptr || T_QUESTIONMARK == node->type_)) {
+          } else if (FALSE_IT(rewrite_info.is_question_mark_ = binding != nullptr || node->kind == peg::NodeKind::Parameter)) {
           } else if (rewrite_info.is_question_mark_) {
-            const int64_t parameter_index = binding != nullptr ? binding->parameter_index : node->value_;
+            const int64_t parameter_index = binding != nullptr ? binding->parameter_index : peg::placeholder_index(*node);
             // check if param indexes are continuous for values table
             if (-1 == rewrite_info.start_param_idx_
                 && FALSE_IT(rewrite_info.start_param_idx_ = parameter_index)) {
@@ -244,8 +263,8 @@ int ObInListResolver::get_inlist_rewrite_info(const InListRows &rows,
           if (OB_FAIL(ret) || !rewrite_info.is_valid_as_values_table_) {
           } else if (helper.is_prepare_stmt_ && rewrite_info.is_question_mark_) {
             // skip getting types for question marks in prepare stmt, because they have no type
-          } else if (!((binding != nullptr || T_QUESTIONMARK == node->type_) && rewrite_info.is_question_mark_) &&
-                     !(IS_DATATYPE_OP(node->type_) && !rewrite_info.is_question_mark_)) {
+          } else if (!((binding != nullptr || node->kind == peg::NodeKind::Parameter) && rewrite_info.is_question_mark_) &&
+                     !(peg::is_literal(*node) && !rewrite_info.is_question_mark_)) {
             // not const type
             rewrite_info.is_valid_as_values_table_ = false;
           } else if (OB_FAIL(ObResolverUtils::fast_get_param_type(*node,
@@ -335,16 +354,16 @@ int ObInListResolver::check_inlist_rewrite_enable(const InListRows &rows,
   //    and whether parameter indexes correspond to what a values table expected
   if (OB_SUCC(ret) && is_enable) {
     const int64_t row_cnt = rows.row_count();
-    const ParseNode &first_list = *rows.segments_.at(0);
+    const auto first_list = peg::membership_expressions(*rows.segments_.at(0));
     const int64_t column_cnt = T_OP_ROW == left_expr.get_expr_type() ? left_expr.get_param_count() :
                                                                        1;
     ObCollationType connect_collation = CS_TYPE_INVALID;
     ObCollationType nchar_collation = session_info->get_nls_collation_nation();
     int64_t server_collation = CS_TYPE_INVALID;
     bool enable_decimal_int = false;
-    if (OB_UNLIKELY(row_cnt <= 0 || column_cnt <= 0 || first_list.num_child_ <= 0)
-        || OB_ISNULL(first_list.children_) || OB_ISNULL(first_list.children_[0]) ||
-        OB_UNLIKELY(column_cnt > 1 && first_list.children_[0]->num_child_ != column_cnt)) {
+    if (OB_UNLIKELY(row_cnt <= 0 || column_cnt <= 0 || first_list.empty())
+        || OB_UNLIKELY(column_cnt > 1 && (!membership_row(first_list[0])
+            || peg::row_elements(unparenthesized(first_list[0])).size() != column_cnt))) {
       is_enable = false;  /* delay return error code */
     } else if (OB_FAIL(session_info->get_collation_connection(connect_collation))) {
     } else if (OB_FAIL(ObSQLUtils::check_enable_decimalint(session_info, enable_decimal_int))) {
@@ -385,7 +404,7 @@ int ObInListResolver::resolve_access_param_values_table(const InListRows &rows,
                                                         ObValuesTableDef &table_def)
 {
   int ret = OB_SUCCESS;
-  const ParseNode *row_node = NULL;
+  const peg::Node *row_node = NULL;
   const ParameterizationResult *parameter_bindings = cur_resolver_->params_.parameterization_;
   ObCollationType coll_type = CS_TYPE_INVALID;
   if (OB_ISNULL(allocator) || OB_ISNULL(session_info) || OB_ISNULL(param_store)) {
@@ -395,17 +414,17 @@ int ObInListResolver::resolve_access_param_values_table(const InListRows &rows,
 
   int64_t row_idx = 0;
   for (int64_t segment_idx = 0; OB_SUCC(ret) && segment_idx < rows.segments_.count(); ++segment_idx) {
-    const ParseNode &in_list = *rows.segments_.at(segment_idx);
-    for (int64_t i = 0; OB_SUCC(ret) && i < in_list.num_child_; ++i, ++row_idx) {
-      row_node = in_list.children_[i];
+    const auto in_list = peg::membership_expressions(*rows.segments_.at(segment_idx));
+    for (int64_t i = 0; OB_SUCC(ret) && i < in_list.size(); ++i, ++row_idx) {
+      row_node = &in_list[i];
       if (OB_ISNULL(row_node)) {
         ret = OB_ERR_UNEXPECTED;
       }
       for (int64_t j = 0; OB_SUCC(ret) && j < column_cnt; j++) {
-        const ParseNode *element = column_cnt == 1 ? row_node : row_node->children_[j];
+        const peg::Node *element = &membership_element(*row_node, column_cnt, j);
         const ParameterBinding *binding = parameter_bindings == nullptr
             ? nullptr : parameter_bindings->find(element);
-        const int64_t parameter_index = binding != nullptr ? binding->parameter_index : element->value_;
+        const int64_t parameter_index = binding != nullptr ? binding->parameter_index : peg::placeholder_index(*element);
         const ObObjParam &obj_param = param_store->at(parameter_index);
         ObRawExprResType res_type;
         res_type.set_meta(obj_param.get_param_meta());
@@ -434,17 +453,16 @@ int ObInListResolver::resolve_access_param_values_table(const InListRows &rows,
     }
   }
   if (OB_SUCC(ret)) {
-    const ParseNode *first_row = rows.segments_.at(0)->children_[0];
-    const ParseNode &last_list = *rows.segments_.at(rows.segments_.count() - 1);
-    const ParseNode *last_row = last_list.children_[last_list.num_child_ - 1];
-    const ParseNode *first = column_cnt == 1 ? first_row : first_row->children_[0];
-    const ParseNode *last = column_cnt == 1 ? last_row : last_row->children_[column_cnt - 1];
+    const auto first_list = peg::membership_expressions(*rows.segments_.at(0));
+    const auto last_list = peg::membership_expressions(*rows.segments_.at(rows.segments_.count() - 1));
+    const peg::Node *first = &membership_element(first_list[0], column_cnt, 0);
+    const peg::Node *last = &membership_element(last_list[last_list.size() - 1], column_cnt, column_cnt - 1);
     const ParameterBinding *first_binding = parameter_bindings == nullptr
         ? nullptr : parameter_bindings->find(first);
     const ParameterBinding *last_binding = parameter_bindings == nullptr
         ? nullptr : parameter_bindings->find(last);
-    table_def.start_param_idx_ = first_binding != nullptr ? first_binding->parameter_index : first->value_;
-    table_def.end_param_idx_ = last_binding != nullptr ? last_binding->parameter_index : last->value_;
+    table_def.start_param_idx_ = first_binding != nullptr ? first_binding->parameter_index : peg::placeholder_index(*first);
+    table_def.end_param_idx_ = last_binding != nullptr ? last_binding->parameter_index : peg::placeholder_index(*last);
   }
   return ret;
 }
@@ -468,7 +486,7 @@ int ObInListResolver::resolve_access_obj_values_table(const InListRows &rows,
   ObExprInfo parents_expr_info;
   ObString literal_prefix;
   ObCollationType nchar_collation = CS_TYPE_INVALID;
-  const ParseNode *row_node = NULL;
+  const peg::Node *row_node = NULL;
   bool enable_decimal_int = false;
   share::ObCompatType compat_type = share::COMPAT_MYSQL57;
   bool enable_mysql_compatible_dates = false;
@@ -487,27 +505,22 @@ int ObInListResolver::resolve_access_obj_values_table(const InListRows &rows,
 
   int64_t row_idx = 0;
   for (int64_t segment_idx = 0; OB_SUCC(ret) && segment_idx < rows.segments_.count(); ++segment_idx) {
-    const ParseNode &in_list = *rows.segments_.at(segment_idx);
-    for (int64_t i = 0; OB_SUCC(ret) && i < in_list.num_child_; ++i, ++row_idx) {
-      row_node = in_list.children_[i];
+    const auto in_list = peg::membership_expressions(*rows.segments_.at(segment_idx));
+    for (int64_t i = 0; OB_SUCC(ret) && i < in_list.size(); ++i, ++row_idx) {
+      row_node = &in_list[i];
       if (OB_ISNULL(row_node)) {
         ret = OB_ERR_UNEXPECTED;
       }
       for (int64_t j = 0; OB_SUCC(ret) && j < column_cnt; j++) {
-        const ParseNode *element = column_cnt == 1 ? row_node : row_node->children_[j];
+        const peg::Node *element = &membership_element(*row_node, column_cnt, j);
         ObObjParam obj_param;
         ObRawExprResType res_type;
-        if (OB_FAIL(ObResolverUtils::resolve_const(element, stmt_type, *allocator, coll_type,
-                                                   nchar_collation, timezone_info, obj_param, is_parameterize,
-                                                   literal_prefix, length_semantics,
-                                                   static_cast<ObCollationType>(server_collation),
-                                                   &parents_expr_info,
-                                                   session_info->get_sql_mode(),
-                                                   enable_decimal_int,
-                                                   compat_type,
-                                                   enable_mysql_compatible_dates,
-                                                   session_info->get_min_const_integer_precision(),
-                                                   is_from_pl))) {
+        const LiteralDecodeOptions options{{stmt_type, enable_decimal_int, is_from_pl, false,
+            session_info->get_min_const_integer_precision()}, coll_type, timezone_info,
+            session_info->get_sql_mode(), compat_type, enable_mysql_compatible_dates,
+            false, nullptr, NumericSignMode::Source};
+        if (OB_FAIL(ObResolverUtils::resolve_expression_literal(*element, options, *allocator,
+                                                               obj_param, literal_prefix))) {
         } else if (OB_FAIL(table_def.access_objs_.push_back(obj_param))) {
         } else {
           res_type.set_meta(obj_param.get_param_meta());
@@ -547,8 +560,8 @@ int ObInListResolver::resolve_access_obj_values_table(const InListRows &rows,
   return ret;
 }
 
-int ObInListResolver::check_can_merge_inlists(const ParseNode *last_in_node,
-                                              const ParseNode *cur_in_node,
+int ObInListResolver::check_can_merge_inlists(const peg::Node *last_in_node,
+                                              const peg::Node *cur_in_node,
                                               ObInListsResolverHelper &helper,
                                               InListRewriteInfo &last_info,
                                               bool &can_merge)
@@ -557,11 +570,11 @@ int ObInListResolver::check_can_merge_inlists(const ParseNode *last_in_node,
   InListRewriteInfo cur_info;
   InListRows previous_rows;
   InListRows current_rows;
-  const int64_t column_cnt = T_EXPR_LIST == cur_in_node->children_[0]->type_
-      ? cur_in_node->children_[0]->num_child_ : 1;
+  const auto &subject = unparenthesized(peg::predicate_subject(*cur_in_node));
+  const int64_t column_cnt = membership_row(subject) ? peg::row_elements(subject).size() : 1;
   const bool inspect_previous = last_info.param_types_.empty();
-  if (OB_FAIL(previous_rows.segments_.push_back(last_in_node->children_[1]))) {
-  } else if (OB_FAIL(current_rows.segments_.push_back(cur_in_node->children_[1]))) {
+  if (OB_FAIL(previous_rows.segments_.push_back(last_in_node))) {
+  } else if (OB_FAIL(current_rows.segments_.push_back(cur_in_node))) {
   }
   for (int64_t j = 0; OB_SUCC(ret) && can_merge && j < column_cnt; ++j) {
     if (inspect_previous && OB_FAIL(get_inlist_rewrite_info(previous_rows,
@@ -587,7 +600,7 @@ int ObInListResolver::check_can_merge_inlists(const ParseNode *last_in_node,
 
 int ObInListResolver::group_inlists(ObExprResolveContext &resolve_ctx,
                                    bool is_root_condition,
-                                   const ParseNode &root,
+                                   const peg::Node &root,
                                    ObIArray<InListGroup> &groups)
 {
   int ret = OB_SUCCESS;
@@ -599,8 +612,9 @@ int ObInListResolver::group_inlists(ObExprResolveContext &resolve_ctx,
   bool enable_decimal_int = false;
   bool is_prepare_stmt = false;
   bool enabled = false;
-  if (OB_ISNULL(session_info) || OB_ISNULL(root.children_)
-      || (root.type_ != T_OP_AND && root.type_ != T_OP_OR)) {
+  const auto logical_operator = peg::binary_operator(root);
+  if (OB_ISNULL(session_info)
+      || (logical_operator != peg::BinaryOperator::LogicalAnd && logical_operator != peg::BinaryOperator::LogicalOr)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (resolve_ctx.current_scope_ == T_WHERE_SCOPE && is_root_condition
              && !resolve_ctx.is_need_print_ && resolve_ctx.secondary_namespace_ == nullptr) {
@@ -619,24 +633,18 @@ int ObInListResolver::group_inlists(ObExprResolveContext &resolve_ctx,
                                    CS_TYPE_INVALID, enable_decimal_int, is_prepare_stmt);
     InListRewriteInfo previous_info;
     bool previous_is_membership = false;
-    for (int64_t i = 0; OB_SUCC(ret) && i < root.num_child_; ++i) {
-      const ParseNode *operand = root.children_[i];
-      bool is_membership = false;
+    const peg::Node *operands[] = {&peg::binary_left(root), &peg::binary_right(root)};
+    for (const auto *written_operand : operands) {
+      if (OB_FAIL(ret)) break;
+      const peg::Node *operand = &unparenthesized(*written_operand);
       bool can_merge = false;
-      if (OB_ISNULL(operand)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (enabled && ((root.type_ == T_OP_OR && operand->type_ == T_OP_IN)
-                 || (root.type_ == T_OP_AND && operand->type_ == T_OP_NOT_IN))) {
-        if (operand->num_child_ != 2 || OB_ISNULL(operand->children_)
-            || OB_ISNULL(operand->children_[0]) || OB_ISNULL(operand->children_[1])) {
-          ret = OB_ERR_UNEXPECTED;
-        } else {
-          is_membership = operand->children_[1]->type_ == T_EXPR_LIST;
-        }
-      }
+      const bool is_membership = enabled && operand->kind == peg::NodeKind::In
+          && peg::membership_source(*operand) == peg::MembershipSource::Expressions
+          && ((logical_operator == peg::BinaryOperator::LogicalOr && !peg::predicate_negated(*operand))
+              || (logical_operator == peg::BinaryOperator::LogicalAnd && peg::predicate_negated(*operand)));
       if (OB_SUCC(ret) && is_membership && previous_is_membership) {
-        const ParseNode *previous = groups.at(groups.count() - 1).node_;
-        can_merge = parsenode_equal(previous->children_[0], operand->children_[0], nullptr);
+        const peg::Node *previous = groups.at(groups.count() - 1).node_;
+        can_merge = peg::equivalent_expressions(peg::predicate_subject(*previous), peg::predicate_subject(*operand));
         if (can_merge && OB_FAIL(check_can_merge_inlists(previous, operand, helper,
                                                         previous_info, can_merge))) {
         }
@@ -645,8 +653,8 @@ int ObInListResolver::group_inlists(ObExprResolveContext &resolve_ctx,
       } else if (can_merge) {
         InListGroup &group = groups.at(groups.count() - 1);
         if (group.rows_.segments_.empty()
-            && OB_FAIL(group.rows_.segments_.push_back(group.node_->children_[1]))) {
-        } else if (OB_FAIL(group.rows_.segments_.push_back(operand->children_[1]))) {
+            && OB_FAIL(group.rows_.segments_.push_back(group.node_))) {
+        } else if (OB_FAIL(group.rows_.segments_.push_back(operand))) {
         }
       } else if (OB_FAIL(groups.push_back(InListGroup(operand)))) {
       } else {

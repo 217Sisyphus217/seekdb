@@ -33,6 +33,7 @@
 #include "sql/resolver/ddl/ob_index_builder_util.h"
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
+#include "sql/parser/parsed_sql.h"
 #include "sql/session/ob_local_session_var.h"
 #include "sql/engine/cmd/ob_partition_executor_utils.h"
 #include "share/ob_global_stat_proxy.h"
@@ -7133,15 +7134,15 @@ int ObDDLService::refill_columns_id_for_check_constraint(
             ObArray<ObQualifiedName> columns;
             ObSEArray<uint64_t, 1> column_id_array;
             ObRawExpr *expr = nullptr;
-            const ParseNode *node = nullptr;
+            sql::ParsedSql syntax;
             if (check_expr.empty()) {
               ret = OB_ERR_UNEXPECTED;
             } else if (OB_FAIL(ObRawExprUtils::parse_bool_expr_node_from_str(check_expr,
-                                                                            expr_factory.get_allocator(), node))) {
-            } else if (OB_ISNULL(node)) {
+                                                                            expr_factory.get_allocator(), syntax))) {
+            } else if (OB_ISNULL(syntax.statement())) {
               ret = OB_ERR_UNEXPECTED;
             } else if (OB_FAIL(ObRawExprUtils::build_check_constraint_expr(expr_factory,
-                                                                          default_session, *node, expr, columns))) {
+                                                                          default_session, *syntax.statement(), syntax.source(), expr, columns))) {
             } else if (1 != columns.count()) {
               ret = OB_ERR_UNEXPECTED;
             } else if (0 != alter_column_schema.get_column_name_str().case_compare(columns.at(0).col_name_)) {
@@ -7194,13 +7195,13 @@ int ObDDLService::refill_column_id_array_for_constraint(
             ObArray<ObQualifiedName> columns;
             ObSEArray<uint64_t, 1> column_id_array;
             ObRawExpr *expr = nullptr;
-            const ParseNode *node = nullptr;
+            sql::ParsedSql syntax;
             if (check_expr.empty()) {
               ret = OB_ERR_UNEXPECTED;
-            } else if (OB_FAIL(ObRawExprUtils::parse_bool_expr_node_from_str(check_expr, expr_factory.get_allocator(), node))) {
-            } else if (OB_ISNULL(node)) {
+            } else if (OB_FAIL(ObRawExprUtils::parse_bool_expr_node_from_str(check_expr, expr_factory.get_allocator(), syntax))) {
+            } else if (OB_ISNULL(syntax.statement())) {
               ret = OB_ERR_UNEXPECTED;
-            } else if (OB_FAIL(ObRawExprUtils::build_check_constraint_expr(expr_factory, default_session, *node, expr, columns))) {
+            } else if (OB_FAIL(ObRawExprUtils::build_check_constraint_expr(expr_factory, default_session, *syntax.statement(), syntax.source(), expr, columns))) {
             } else {
               for (int64_t i = 0; OB_SUCC(ret) && i < columns.count(); i++) {
                 const ObString &col_name = columns.at(i).col_name_;
@@ -7235,7 +7236,7 @@ int ObDDLService::rebuild_constraint_check_expr(
   const ObServerRuntimeSchema *runtime_schema = NULL;
   ObSchemaGetterGuard schema_guard;
   ObRawExpr *expr = NULL;
-  const ParseNode *node = NULL;
+  sql::ParsedSql syntax;
   ObArray<ObQualifiedName> columns;
   const ObColumnSchemaV2 *col_schema = NULL;
   ObString orig_check_expr = cst.get_check_expr_str();
@@ -7268,11 +7269,11 @@ int ObDDLService::rebuild_constraint_check_expr(
           ObRawExprModifyColumnName modifyColumnName(
               alter_column.get_column_name_str(), orig_column.get_column_name_str());
           if (OB_FAIL(ObRawExprUtils::parse_bool_expr_node_from_str(orig_check_expr,
-                                                                    expr_factory.get_allocator(), node))) {
-          } else if (OB_ISNULL(node)) {
+                                                                    expr_factory.get_allocator(), syntax))) {
+          } else if (OB_ISNULL(syntax.statement())) {
             ret = OB_ERR_UNEXPECTED;
           } else if (OB_FAIL(ObRawExprUtils::build_check_constraint_expr(expr_factory,
-                                                                         default_session, *node, expr, columns))) {
+                                                                         default_session, *syntax.statement(), syntax.source(), expr, columns))) {
           }
           for (int64_t i = 0; OB_SUCC(ret) && i <columns.count(); i++) {
             const ObQualifiedName &q_name = columns.at(i);

@@ -165,8 +165,8 @@ impl Node {
     pub fn setting_value(variable: &Self, mut value: Self) -> Self {
         if variable.kind != Kind::UserVariable
             && value.kind == Kind::Column
-            && value.children[0].kind == Kind::Missing
-            && value.children[1].kind == Kind::Missing
+            && crate::query::name_parts(&value).len() == 1
+            && !value.is_wildcard()
         {
             let name = value.children.pop().unwrap();
             value = Self::new(Kind::String, vec![])
@@ -189,15 +189,7 @@ impl Node {
     }
 
     pub fn where_clause(value: Option<Self>) -> Self {
-        Self::optional(value.map(|value| Self::new(Kind::Where, vec![value, Self::missing()])))
-    }
-
-    pub fn order_clause(values: Vec<Self>) -> Self {
-        if values.is_empty() {
-            Self::missing()
-        } else {
-            Self::new(Kind::Order, vec![Self::new(Kind::SortList, values)])
-        }
+        Self::optional(value.map(|value| Self::new(Kind::Where, vec![value])))
     }
 
     pub fn insert(
@@ -209,32 +201,29 @@ impl Node {
         assignments: Vec<Self>,
         hints: Vec<Self>,
     ) -> Self {
-        let into = Self::new(
-            Kind::InsertInto,
-            vec![table, Self::list(Kind::ColumnList, columns)],
-        );
-        let insert = Self::new(
-            Kind::SingleTableInsert,
-            vec![
-                into,
-                values,
-                Self::list(Kind::AssignList, assignments),
-                Self::missing(),
-            ],
-        );
-        Self::new(
-            Kind::Insert,
-            vec![
-                insert,
-                Self::new(if replace { Kind::Replace } else { Kind::Insert }, vec![]),
-                Self::list(Kind::Hints, hints),
-                if ignore {
-                    Self::new(Kind::Ignore, vec![])
-                } else {
-                    Self::missing()
-                },
-            ],
-        )
+        let source = match values.kind {
+            Kind::ValueList => Self::new(Kind::InsertRows, values.children),
+            Kind::AssignList => Self::new(Kind::InsertAssignments, values.children),
+            Kind::Select => Self::new(Kind::InsertQuery, vec![values]),
+            _ => unreachable!(),
+        };
+        let mut children = vec![Self::new(Kind::InsertTarget, vec![table]), source];
+        if !columns.is_empty() {
+            children.push(Self::new(Kind::InsertColumns, columns));
+        }
+        if !assignments.is_empty() {
+            children.push(Self::new(Kind::DuplicateKeyAssignments, assignments));
+        }
+        if !hints.is_empty() {
+            children.push(Self::new(Kind::Hints, hints));
+        }
+        if replace {
+            children.push(Self::new(Kind::Replace, vec![]));
+        }
+        if ignore {
+            children.push(Self::new(Kind::Ignore, vec![]));
+        }
+        Self::new(Kind::Insert, children)
     }
 
     pub fn data_type(
@@ -330,6 +319,7 @@ impl Node {
     pub fn name(name: Name) -> Self {
         Self::new(Kind::Ident, vec![])
             .text(name.text)
+            .value(u64::from(name.quoted))
             .at(name.start, name.end)
     }
 
@@ -363,8 +353,7 @@ impl Node {
         if count > 3 {
             return Err("column names have at most three parts");
         }
-        let mut children: Vec<_> = (count..3).map(|_| Self::missing()).collect();
-        children.extend(names.into_iter().map(Self::name));
+        let mut children: Vec<_> = names.into_iter().map(Self::name).collect();
         if star {
             children.push(Self::new(Kind::Star, vec![]).at(end - 1, end));
         }
@@ -422,10 +411,18 @@ impl Node {
             self = self.children.pop().unwrap();
         }
         if self.kind == Kind::Function
-            && self.children[0].text.eq_ignore_ascii_case("json_unquote")
-            && self.children[1].children.len() == 1
+            && crate::expression::call_qualifiers(&self).is_empty()
+            && crate::expression::call_name(&self).eq_ignore_ascii_case("json_unquote")
+            && crate::expression::call_arguments(&self).len() == 1
         {
-            self = self.children.pop().unwrap().children.pop().unwrap();
+            self = self
+                .children
+                .into_iter()
+                .find(|child| child.kind == Kind::CallArguments)
+                .unwrap()
+                .children
+                .pop()
+                .unwrap();
             while self.kind == Kind::Parenthesized {
                 self = self.children.pop().unwrap();
             }
@@ -433,10 +430,15 @@ impl Node {
         let mut children = if self.kind == Kind::Column {
             vec![self, Self::new(Kind::HiddenString, vec![])]
         } else if self.kind == Kind::Function
-            && self.children[0].text.eq_ignore_ascii_case("json_extract")
-            && self.children[1].children.len() == 2
+            && crate::expression::call_qualifiers(&self).is_empty()
+            && crate::expression::call_name(&self).eq_ignore_ascii_case("json_extract")
+            && crate::expression::call_arguments(&self).len() == 2
         {
-            self.children.pop().unwrap().children
+            self.children
+                .into_iter()
+                .find(|child| child.kind == Kind::CallArguments)
+                .unwrap()
+                .children
         } else {
             return Err("CAST ARRAY requires a JSON column or extracted path");
         };
@@ -462,18 +464,14 @@ impl Node {
             if name.len() > 3 || modifier.is_some() || window.is_some() {
                 return Err("qualified function call");
             }
-            let function = Self::new(
+            return Self::new(
                 Kind::Function,
                 vec![
-                    Self::name(name.pop().unwrap()),
-                    Self::list(Kind::ExprList, arguments),
+                    Self::new(Kind::CallName, name.into_iter().map(Self::name).collect()),
+                    Self::new(Kind::CallArguments, arguments),
                 ],
-            );
-            let mut access = Self::new(Kind::ObjectAccess, vec![function, Self::missing()]);
-            for part in name.into_iter().rev() {
-                access = Self::new(Kind::ObjectAccess, vec![Self::name(part), access]);
-            }
-            return access.expression(start, end);
+            )
+            .expression(start, end);
         }
         let mut name = name.pop().unwrap();
         let distinct = modifier == Some(Kind::Distinct);
@@ -527,8 +525,7 @@ impl Node {
             {
                 return Err("geometry constructor arguments");
             }
-            return Self::new(kind, vec![Self::list(Kind::ExprList, arguments)])
-                .expression(start, end);
+            return Self::named_call(kind, Self::name(name), arguments).expression(start, end);
         }
         if matches!(function.as_str(), "ln" | "log") {
             if modifier.is_some()
@@ -701,38 +698,29 @@ impl Node {
         {
             return Err("histogram rate and bucket count must be numeric constants");
         }
-        let children = if ranking || histogram || kind == Kind::JsonObjectAgg {
-            arguments
-        } else if timestamp || no_arguments {
-            vec![arguments.into_iter().next().unwrap_or_else(Self::missing)]
-        } else if !aggregate {
-            let name = Self::name(name);
-            if arguments.is_empty() {
-                vec![name]
-            } else {
-                vec![name, Self::new(Kind::ExprList, arguments)]
-            }
-        } else if approximate {
-            vec![Self::new(Kind::ExprList, arguments)]
-        } else if kind == Kind::SumOpnsize {
-            vec![Self::missing(), arguments.into_iter().next().unwrap()]
-        } else if count_star || kind == Kind::ApproxCountDistinctSynopsisMerge {
-            arguments
-        } else {
-            let modifier = Self::new(if distinct { Kind::Distinct } else { Kind::All }, vec![]);
-            let args = if kind == Kind::Count && distinct {
-                Self::new(Kind::ExprList, arguments)
-            } else {
-                arguments.into_iter().next().unwrap()
-            };
-            vec![modifier, args]
-        };
-        let function = Self::new(kind, children);
+        let mut function = Self::named_call(kind, Self::name(name), arguments);
+        if let Some(modifier) = modifier {
+            function.children.push(Self::new(modifier, vec![]));
+        }
         match window {
             Some(window) => Self::new(Kind::WindowFunction, vec![function, window]),
             None => function,
         }
         .expression(start, end)
+    }
+
+    pub fn callable(kind: Kind, arguments: Vec<Self>) -> Self {
+        Self::new(kind, vec![Self::new(Kind::CallArguments, arguments)])
+    }
+
+    pub fn named_call(kind: Kind, name: Self, arguments: Vec<Self>) -> Self {
+        Self::new(
+            kind,
+            vec![
+                Self::new(Kind::CallName, vec![name]),
+                Self::new(Kind::CallArguments, arguments),
+            ],
+        )
     }
 
     pub fn relation(names: Vec<Name>) -> Result<Self, &'static str> {
@@ -746,25 +734,11 @@ impl Node {
     }
 
     pub fn table(source: Self, alias: Option<Name>) -> Result<Self, &'static str> {
-        let derived = source.kind == Kind::Select;
+        let mut children = vec![source];
         if let Some(alias) = alias {
-            let text = alias.text.clone();
-            let mut children = vec![source, Self::name(alias)];
-            if !derived {
-                children.extend((0..3).map(|_| Self::missing()));
-            }
-            Ok(Self::new(Kind::Alias, children).text(text))
-        } else if derived {
-            Ok(Self::new(
-                Kind::Alias,
-                vec![source, Self::new(Kind::Ident, vec![])],
-            ))
-        } else {
-            Ok(Self::new(
-                Kind::Table,
-                vec![source, Self::missing(), Self::missing(), Self::missing()],
-            ))
+            children.push(Self::new(Kind::TableAlias, vec![Self::name(alias)]));
         }
+        Ok(Self::new(Kind::Table, children))
     }
 
     pub fn projection(mut value: Self, alias: Option<Self>) -> Self {
@@ -797,45 +771,47 @@ impl Node {
         if query.into.is_some() && query.into_end.is_some() {
             return Err("one INTO clause");
         }
-        let projection = Self::list(Kind::ProjectList, query.projection);
-        let from = if query.from.is_empty() {
-            Self::missing()
-        } else {
-            Self::new(Kind::FromList, query.from)
-        };
-        let filter = query
-            .filter
-            .map(|node| Self::new(Kind::Where, vec![node, Self::missing()]))
-            .unwrap_or_else(Self::missing);
-        let group = Self::optional(query.group_by);
-        let having = query.having.unwrap_or_else(Self::missing);
-        let order = if query.order_by.is_empty() {
-            Self::missing()
-        } else {
-            Self::new(Kind::Order, vec![Self::new(Kind::SortList, query.order_by)])
-        };
-        Self::new(
-            Kind::Select,
-            vec![
-                Self::list(Kind::SelectOptions, query.options),
-                projection,
-                Self::optional(query.into),
-                from,
-                filter,
-                group,
-                having,
-                Self::list(Kind::NamedWindows, query.windows),
-                Self::optional(query.set),
-                order,
-                query.limit.unwrap_or_else(Self::missing),
-                query.lock.unwrap_or_else(Self::missing),
-                Self::list(Kind::Hints, query.hints),
-                Self::optional(query.into_end),
-                Self::optional(query.approximate),
-                Self::optional(query.vector_parameters),
-                Self::optional(query.with),
-            ],
-        )
-        .expression(0, 0)
+        let mut children = Vec::new();
+        if !query.options.is_empty() {
+            children.push(Self::new(Kind::SelectOptions, query.options));
+        }
+        if !query.projection.is_empty() {
+            children.push(Self::new(Kind::ProjectList, query.projection));
+        }
+        children.extend(query.into);
+        if !query.from.is_empty() {
+            children.push(Self::new(Kind::FromList, query.from));
+        }
+        if let Some(filter) = query.filter {
+            children.push(Self::new(Kind::Where, vec![filter]));
+        }
+        children.extend(query.group_by);
+        if let Some(having) = query.having {
+            children.push(Self::new(Kind::Having, vec![having]));
+        }
+        if !query.windows.is_empty() {
+            children.push(Self::new(Kind::NamedWindows, query.windows));
+        }
+        children.extend(query.set);
+        if !query.order_by.is_empty() {
+            children.push(Self::new(Kind::Order, query.order_by));
+        }
+        children.extend(query.limit);
+        if let Some(lock) = query.lock {
+            children.push(Self::new(Kind::QueryLock, vec![lock]));
+        }
+        if !query.hints.is_empty() {
+            children.push(Self::new(Kind::Hints, query.hints));
+        }
+        if let Some(into) = query.into_end {
+            children.push(Self {
+                kind: Kind::TrailingIntoVariables,
+                ..into
+            });
+        }
+        children.extend(query.approximate);
+        children.extend(query.vector_parameters);
+        children.extend(query.with);
+        Self::new(Kind::Select, children).expression(0, 0)
     }
 }

@@ -17,7 +17,6 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_create_database_resolver.h"
 
-#include "sql/resolver/ddl/ob_database_resolver.h"
 #include "sql/resolver/ddl/ob_create_database_stmt.h"
 
 namespace oceanbase
@@ -35,19 +34,12 @@ ObCreateDatabaseResolver::~ObCreateDatabaseResolver()
 {
 }
 
-int ObCreateDatabaseResolver::resolve(const ParseNode &parse_tree)
+int ObCreateDatabaseResolver::resolve(const peg::Node &parse_tree)
 {
   int ret = OB_SUCCESS;
-  ParseNode *node = const_cast<ParseNode*>(&parse_tree);
-  if (OB_ISNULL(node)
-      || OB_UNLIKELY(node->type_ != T_CREATE_DATABASE)
-      || OB_UNLIKELY(node->num_child_ != DATABASE_NODE_COUNT)) {
+  if (OB_ISNULL(session_info_) || OB_ISNULL(allocator_)
+      || parse_tree.kind != peg::NodeKind::CreateDatabase) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(session_info_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(node->children_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("invalid node children", K(node), K(node->children_));
   } else {
     ObCreateDatabaseStmt *create_database_stmt = NULL;
     if (OB_ISNULL(create_database_stmt = create_stmt<ObCreateDatabaseStmt>())) {
@@ -57,27 +49,16 @@ int ObCreateDatabaseResolver::resolve(const ParseNode &parse_tree)
       stmt_ = create_database_stmt;
       
     }
-    //resolve if not exists
-    if (OB_SUCC(ret)) {
-      if (node->children_[IF_NOT_EXIST] != NULL) {
-        if (node->children_[IF_NOT_EXIST]->type_ != T_IF_NOT_EXISTS) {
-        } else {
-          create_database_stmt->set_if_not_exists(true);
-        }
-      }
-    }
+    OX (create_database_stmt->set_if_not_exists(peg::database_if_not_exists(parse_tree)));
     //resolve database name
     if (OB_SUCC(ret)) {
       ObString database_name;
-      // node->children_ pointer has already been checked, no need to check again here
-      ParseNode *dbname_node = node->children_[DBNAME];
-      if (OB_ISNULL(dbname_node) || dbname_node->type_ != T_IDENT) {
-        ret = OB_ERR_UNEXPECTED;
-      } else {
-        database_name.assign_ptr(dbname_node->str_value_,
-                                 static_cast<int32_t>(dbname_node->str_len_));
+      const auto &name = peg::database_name(parse_tree);
+      if (OB_SUCC(ret)) {
+        OZ (ob_write_string(*allocator_, ObString(name.text.size(), name.text.data()), database_name));
         ObNameCaseMode mode = OB_NAME_CASE_INVALID;
-        if (OB_FAIL(session_info_->get_name_case_mode(mode))) {
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(session_info_->get_name_case_mode(mode))) {
         } else {
           bool perserve_lettercase = (mode != OB_LOWERCASE_AND_INSENSITIVE);
           ObCollationType cs_type = CS_TYPE_INVALID;
@@ -89,22 +70,7 @@ int ObCreateDatabaseResolver::resolve(const ParseNode &parse_tree)
         }
       }
     }
-    //resolve database options
-    if (OB_SUCC(ret)) {
-      // node->children_ pointer has already been checked, no need to check again here
-      ParseNode *dboption_node = node->children_[DATABASE_OPTION];
-      if (NULL != dboption_node) {
-        if (T_DATABASE_OPTION_LIST != dboption_node->type_) {
-          ret = OB_ERR_UNEXPECTED;
-        } else {
-          ObDatabaseResolver<ObCreateDatabaseStmt> resolver;
-          if (OB_FAIL(resolver.resolve_database_options(create_database_stmt, dboption_node, session_info_))) {
-          }
-        }
-      } else {
-        //empty
-      }
-    }
+    OZ (resolve_options(*create_database_stmt, peg::database_options(parse_tree)));
     if (OB_SUCC(ret)) {
       if (CHARSET_INVALID == create_database_stmt->get_charset_type() &&  CS_TYPE_INVALID == create_database_stmt->get_collation_type()) {
          // For CREATE DATABASE statements, the server character set and collation are used as default
@@ -128,6 +94,51 @@ int ObCreateDatabaseResolver::resolve(const ParseNode &parse_tree)
     }
   }
   LOG_INFO("resolve create database finish", K(ret));
+  return ret;
+}
+
+int ObCreateDatabaseResolver::resolve_options(ObCreateDatabaseStmt &stmt,
+                                               rust::Slice<const peg::Node> options)
+{
+  int ret = OB_SUCCESS;
+  bool collation_set = false;
+  for (const auto &option : options) {
+    if (OB_FAIL(ret)) { break; }
+    ObString name(option.text.size(), option.text.data());
+    ObCharsetType charset_type = CHARSET_INVALID;
+    ObCollationType collation_type = CS_TYPE_INVALID;
+    if (option.kind == peg::NodeKind::Charset) {
+      charset_type = ObCharset::charset_type(name.trim());
+      collation_type = ObCharset::get_default_collation(charset_type);
+      if (charset_type == CHARSET_INVALID) {
+        ret = OB_ERR_UNKNOWN_CHARSET;
+        LOG_USER_ERROR(OB_ERR_UNKNOWN_CHARSET, name.length(), name.ptr());
+      } else if (collation_type == CS_TYPE_INVALID) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (collation_set && stmt.get_charset_type() != charset_type) {
+        ret = OB_ERR_CONFLICTING_DECLARATIONS;
+        LOG_USER_ERROR(OB_ERR_CONFLICTING_DECLARATIONS,
+                       ObCharset::charset_name(stmt.get_charset_type()),
+                       ObCharset::charset_name(charset_type));
+      }
+    } else if (option.kind == peg::NodeKind::Collation) {
+      collation_type = ObCharset::collation_type(name.trim());
+      charset_type = ObCharset::charset_type_by_coll(collation_type);
+      if (collation_type == CS_TYPE_INVALID) {
+        ret = OB_ERR_UNKNOWN_COLLATION;
+        LOG_USER_ERROR(OB_ERR_UNKNOWN_COLLATION, name.length(), name.ptr());
+      } else if (charset_type == CHARSET_INVALID) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (collation_set && stmt.get_charset_type() != charset_type) {
+        ret = OB_ERR_COLLATION_MISMATCH;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      stmt.set_charset_type(charset_type);
+      stmt.set_collation_type(collation_type);
+      collation_set = true;
+    }
+  }
   return ret;
 }
 

@@ -39,7 +39,6 @@ static int sigtimedwait(const sigset_t *set, siginfo_t *info, const struct times
 
 #include "ob_signal_handle.h"
 #include "observer/ob_server.h"
-#include "observer/ob_dump_task_generator.h"
 #include "sql/ob_sql_init.h"
 #include "storage/tx_storage/ob_memory_printer.h"
 
@@ -196,11 +195,6 @@ int ObSignalHandle::deal_signals(int signum)
       break;
     }
     case 60: {
-      break;
-    }
-    case 62: {
-      //RESP_DUMP_TRACE_TO_FILE();
-      ObDumpTaskGenerator::generate_task_from_file();
       break;
     }
     case 63: {

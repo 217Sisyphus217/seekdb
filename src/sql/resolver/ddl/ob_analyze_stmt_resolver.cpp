@@ -29,15 +29,13 @@ namespace sql
 ObAnalyzeStmtResolver::ObAnalyzeStmtResolver(ObResolverParams &params)
   : ObDDLResolver(params)
 {
-  // TODO Auto-generated constructor stub
 }
 
 ObAnalyzeStmtResolver::~ObAnalyzeStmtResolver()
 {
-  // TODO Auto-generated destructor stub
 }
 
-int ObAnalyzeStmtResolver::resolve(const ParseNode &parse_tree)
+int ObAnalyzeStmtResolver::resolve(const peg::Node &parse_tree)
 {
   int ret = OB_SUCCESS;
   ObAnalyzeStmt *analyze_stmt = NULL;
@@ -47,20 +45,9 @@ int ObAnalyzeStmtResolver::resolve(const ParseNode &parse_tree)
   } else if (OB_ISNULL(analyze_stmt = create_stmt<ObAnalyzeStmt>())) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("failed to create analyze stmt", K(ret));
-  } else if (FALSE_IT((void)0)) {
-    /*do nothing*/
   } else if (OB_FAIL(session_info_->get_force_parallel_query_dop(parallel_degree))) {
-  } else if (T_MYSQL_ANALYZE == parse_tree.type_) {
-    if (OB_FAIL(resolve_analyze_table(parse_tree, *analyze_stmt))) {
-    } else { /*do nothing*/ }
-  } else if (T_MYSQL_UPDATE_HISTOGRAM == parse_tree.type_) {
-    if (OB_FAIL(resolve_mysql_update_histogram(parse_tree, *analyze_stmt))) {
-    } else { /*do nothing*/ }
-  } else if (T_MYSQL_DROP_HISTOGRAM == parse_tree.type_) {
-    // TODO link.zt drop is not supported at the present
-    analyze_stmt->set_is_drop();
-    if (OB_FAIL(resolve_mysql_delete_histogram(parse_tree, *analyze_stmt))) {
-    } else { /*do nothing*/ }
+  } else if (parse_tree.kind == peg::NodeKind::Analyze) {
+    OZ (resolve_analyze_table(parse_tree, *analyze_stmt));
   } else {
     ret = OB_ERR_UNEXPECTED;
   }
@@ -86,134 +73,28 @@ int ObAnalyzeStmtResolver::resolve(const ParseNode &parse_tree)
   return ret;
 }
 
-int ObAnalyzeStmtResolver::resolve_analyze_table(const ParseNode &parse_node,
+int ObAnalyzeStmtResolver::resolve_analyze_table(const peg::Node &statement,
                                                  ObAnalyzeStmt &analyze_stmt)
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(3 != parse_node.num_child_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else {
-    ParseNode *table_node = parse_node.children_[0];
-    ParseNode *part_node = parse_node.children_[1];
-    ParseNode *statistic_node = parse_node.children_[2];
-    if (OB_ISNULL(table_node) || OB_NOT_NULL(statistic_node)) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(recursive_resolve_table_info(table_node, analyze_stmt))) {
-    } else if (OB_FAIL(resolve_partition_info(part_node, analyze_stmt))) {
-    } else if (OB_FAIL(resolve_default_column_info(analyze_stmt))) {
-    } else { /*do nothing*/ }
+  for (const auto &relation : peg::analyze_relations(statement)) {
+    if (OB_FAIL(ret)) { break; }
+    OZ (resolve_table_info(&relation, analyze_stmt));
   }
+  OZ (resolve_partition_info(analyze_stmt));
+  OZ (resolve_default_column_info(analyze_stmt));
   return ret;
 }
 
-int ObAnalyzeStmtResolver::resolve_mysql_update_histogram(const ParseNode &parse_node,
-                                                          ObAnalyzeStmt &analyze_stmt)
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(3 != parse_node.num_child_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else {
-    ParseNode *table_node = parse_node.children_[0];
-    ParseNode *column_node = parse_node.children_[1];
-    ParseNode *bucket_node = parse_node.children_[2];
-    int64_t bkt_num = 1;
-    if (OB_ISNULL(bucket_node)) {
-      bkt_num = ObColumnStatParam::DEFAULT_HISTOGRAM_BUCKET_NUM;
-    } else {
-      bkt_num = bucket_node->value_;
-    }
-    if (OB_ISNULL(table_node) || OB_ISNULL(column_node)) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(resolve_table_info(table_node, analyze_stmt))) {
-    } else if (OB_FAIL(resolve_partition_info(NULL, analyze_stmt))) {
-    } else if (OB_FAIL(resolve_mysql_column_bucket_info(column_node,
-                                                        bkt_num,
-                                                        analyze_stmt))) {
-    } else {
-      ObAnalyzeSampleInfo sample_info;
-      sample_info.is_sample_ = true;
-      sample_info.sample_type_ = SampleType::RowSample;
-      sample_info.sample_value_ = bkt_num * DEFAULT_SAMPLE_ROWCOUNT_PER_BUCKET;
-      analyze_stmt.set_sample_info(sample_info);
-    }
-  }
-  return ret;
-}
 
-int ObAnalyzeStmtResolver::resolve_mysql_delete_histogram(const ParseNode &parse_node,
-                                                          ObAnalyzeStmt &analyze_stmt)
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(2 != parse_node.num_child_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else {
-    ParseNode *table_node = parse_node.children_[0];
-    ParseNode *column_node = parse_node.children_[1];
-    bool dumy_bool = false;
-    if (OB_ISNULL(table_node) || OB_ISNULL(column_node)) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(resolve_table_info(table_node, analyze_stmt))) {
-    } else if (OB_FAIL(resolve_partition_info(NULL, analyze_stmt))) {
-    } else if (OB_FAIL(resolve_mysql_column_bucket_info(column_node, 0,
-                                                        analyze_stmt))) {
-    } else { /*do nothing*/ }
-  }
-  return ret;
-}
 
-int ObAnalyzeStmtResolver::resolve_mysql_column_bucket_info(const ParseNode *column_node,
-                                                            const int64_t bucket_number,
-                                                            ObAnalyzeStmt &analyze_stmt)
-{
-  int ret = OB_SUCCESS;
-  const ObTableSchema *table_schema = NULL;
-  ObAnalyzeTableInfo &table_info = analyze_stmt.get_tables().at(0);
-  if (OB_ISNULL(column_node) || OB_ISNULL(schema_checker_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(schema_checker_->get_table_schema( table_info.get_table_id(),
-                                                       table_schema))) {
-  } else if (OB_ISNULL(table_schema)) {
-    ret = OB_ERR_UNEXPECTED;
-  }
-  for (int64_t i = 0; OB_SUCC(ret) && i < column_node->num_child_; i++) {
-    const ObColumnSchemaV2 *column_schema = NULL;
-    ObColumnStatParam *col_param = NULL;
-    ObString column_name;
-    if (OB_ISNULL(column_node->children_[i])) {
-      ret = OB_ERR_UNEXPECTED;
-    } else {
-      column_name.assign_ptr(const_cast<char *>(column_node->children_[i]->str_value_),
-                             static_cast<int32_t>(column_node->children_[i]->str_len_));
-      if (OB_ISNULL(column_schema = table_schema->get_column_schema(column_name))) {
-        ret = OB_ERR_COLUMN_NOT_FOUND;
-      } else if (OB_ISNULL(col_param = table_info.get_column_param(column_schema->get_column_id()))) {
-        // do nothing
-      } else if (col_param->is_valid_opt_col()) {
-        col_param->set_need_basic_stat();
-        col_param->bucket_num_ = bucket_number;
-        col_param->set_size_manual();
-      }
-    }
-  }
-  return ret;
-}
 
-int ObAnalyzeStmtResolver::recursive_resolve_table_info(const ParseNode *table_list_node,
-                                                        ObAnalyzeStmt &analyze_stmt)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(table_list_node)) {
-    ret = OB_INVALID_ARGUMENT;
-  } else if (T_LINK_NODE == table_list_node->type_) {
-    if (OB_FAIL(SMART_CALL(recursive_resolve_table_info(table_list_node->children_[0], analyze_stmt)))) {
-    } else if (OB_FAIL(SMART_CALL(recursive_resolve_table_info(table_list_node->children_[1], analyze_stmt)))) {
-    }
-  } else if (OB_FAIL(resolve_table_info(table_list_node, analyze_stmt))) {
-  }
-  return ret;
-}
 
-int ObAnalyzeStmtResolver::resolve_table_info(const ParseNode *table_node,
+
+
+
+
+int ObAnalyzeStmtResolver::resolve_table_info(const peg::Node *table_node,
                                               ObAnalyzeStmt &analyze_stmt)
 {
   int ret = OB_SUCCESS;
@@ -248,20 +129,18 @@ int ObAnalyzeStmtResolver::resolve_table_info(const ParseNode *table_node,
   return ret;
 }
 
-int ObAnalyzeStmtResolver::resolve_partition_info(const ParseNode *part_node,
-                                                  ObAnalyzeStmt &analyze_stmt)
+int ObAnalyzeStmtResolver::resolve_partition_info(ObAnalyzeStmt &analyze_stmt)
 {
   int ret = OB_SUCCESS;
   ObIArray<ObAnalyzeTableInfo> &tables = analyze_stmt.get_tables();
   for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); ++i) {
-    if (OB_FAIL(inner_resolve_partition_info(part_node, tables.at(i)))) {
+    if (OB_FAIL(inner_resolve_partition_info(tables.at(i)))) {
     }
   }
   return ret;
 }
 
-int ObAnalyzeStmtResolver::inner_resolve_partition_info(const ParseNode *part_node,
-                                                        ObAnalyzeTableInfo &table_info)
+int ObAnalyzeStmtResolver::inner_resolve_partition_info(ObAnalyzeTableInfo &table_info)
 {
   int ret = OB_SUCCESS;
   const ObTableSchema *table_schema = NULL;
@@ -270,8 +149,6 @@ int ObAnalyzeStmtResolver::inner_resolve_partition_info(const ParseNode *part_no
   ObSEArray<PartInfo, 32> subpart_infos;
   ObSEArray<int64_t, 4> part_ids;
   ObSEArray<int64_t, 4> subpart_ids;
-  bool is_subpart_name = false;
-  ObString &partition_name = table_info.get_partition_name();
   if (OB_ISNULL(schema_checker_) || OB_ISNULL(params_.allocator_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(schema_checker_->get_table_schema( table_id, table_schema))) {
@@ -285,36 +162,10 @@ int ObAnalyzeStmtResolver::inner_resolve_partition_info(const ParseNode *part_no
                                                       subpart_ids))) {
   } else if (OB_FAIL(table_info.set_all_part_infos(part_infos))) {
   } else if (OB_FAIL(table_info.set_all_subpart_infos(subpart_infos))) {
-  } else if (NULL == part_node) {
-    table_info.set_part_level(table_schema->get_part_level());
-    if (OB_FAIL(table_info.set_part_infos(part_infos))) {
-    } else if (OB_FAIL(table_info.set_subpart_infos(subpart_infos))) {
-    }
-  } else if (is_virtual_table(table_id) &&
-             table_schema->get_part_option().get_part_num() > 1) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (part_node->num_child_ != 1 || OB_ISNULL(part_node->children_[0])) {
-    ret = OB_ERR_UNEXPECTED;
   } else {
-    const ParseNode *name_list = part_node->children_[0];
     table_info.set_part_level(table_schema->get_part_level());
-    for (int64_t i = 0; OB_SUCC(ret) && i < name_list->num_child_; i++) {
-      partition_name.assign_ptr(name_list->children_[i]->str_value_,
-                                static_cast<int32_t>(name_list->children_[i]->str_len_));
-      if (ObCharset::case_insensitive_equal(partition_name, table_schema->get_table_name())) {
-        partition_name.reset();
-      } else if (OB_FAIL(pl::ObDbmsStats::find_selected_part_infos(
-                     partition_name,
-                     part_infos,
-                     subpart_infos,
-                     false,
-                     table_info.get_part_infos(),
-                     table_info.get_subpart_infos(),
-                     is_subpart_name))) {
-      } else {
-        table_info.set_is_sepcify_subpart(is_subpart_name);
-      }
-    }
+    OZ (table_info.set_part_infos(part_infos));
+    OZ (table_info.set_subpart_infos(subpart_infos));
   }
   return ret;
 }

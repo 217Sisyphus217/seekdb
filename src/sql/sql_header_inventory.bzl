@@ -100,7 +100,6 @@ SQL_PUBLIC_HEADER_ROOTS = [
     "pl/ob_pl_user_type.h",
     "pl/parser/ob_pl_parser.h",
     "pl/parser/parse_stmt_item_type.h",
-    "pl/parser/parse_stmt_node.h",
     "pl/pl_cache/ob_pl_cache.h",
     "pl/pl_cache/ob_pl_cache_mgr.h",
     "pl/pl_cache/ob_pl_cache_object.h",

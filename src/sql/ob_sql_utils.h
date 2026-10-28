@@ -55,6 +55,7 @@ class ObISrsProvider;
 }
 namespace sql
 {
+class ParsedSql;
 class ObRawExprFactory;  // fwd: previously re-exported through the share schema include chain
 class ObMaintainDepInfoTaskQueue;
 class RowDesc;
@@ -197,8 +198,7 @@ public:
    *  duplicates.
    */
 
-  static int replace_questionmarks(ParseNode *tree,
-                                   const ParamStore &params);
+
 
   static int calc_const_or_calculable_expr(ObExecContext *exec_ctx,
                                            const ObRawExpr *raw_expr,
@@ -334,9 +334,9 @@ public:
                                bool is_from_view = false);
   static int check_and_copy_column_alias_name(const common::ObCollationType cs_type, const bool is_auto_gen,
                                               common::ObIAllocator *allocator, common::ObString &name);
-  static bool cause_implicit_commit(ParseResult &result);
-  static bool is_mysql_ps_not_support_stmt(const ParseResult &result);
-  static bool is_readonly_stmt(ParseResult &result);
+
+  static bool is_mysql_ps_not_support_stmt(const ParsedSql &syntax);
+
   static bool is_allowed_on_standby(const ObItemType stmt_type);
   static int make_field_name(const char *src, int64_t len, const common::ObCollationType cs_type,
                              common::ObIAllocator *allocator, common::ObString &name);
@@ -567,7 +567,7 @@ public:
                                         const common::ObIArray<OrderItem> &order_keys,
                                         int64_t start_key,
                                         OrderItem &encode_sortkey);
-  static ObItemType get_sql_item_type(const ParseResult &result);
+
   static bool is_enable_explain_batched_multi_statement();
   static bool is_support_batch_exec(ObItemType type);
   static bool is_pl_nested_sql(ObExecContext *cur_ctx);
@@ -691,11 +691,7 @@ public:
                                    int64_t cur_pos,
                                    int64_t &question_mark_offset,
                                    common::ObSqlString &string_helper);
-  static int replace_not_param(const common::ObString &not_param_sql,
-                               const ParseNode &node,
-                               int64_t start_pos,
-                               int64_t cur_pos,
-                               common::ObSqlString &string_helper);
+
   static int get_outline_sql(const share::schema::ObOutlineInfo &outline_info, common::ObIAllocator &allocator, const ObSQLSessionInfo &session, common::ObString &outline_sql);
 }; // end of ObSQLUtils
 

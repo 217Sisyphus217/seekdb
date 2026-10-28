@@ -41,7 +41,6 @@ namespace sql
 {
 typedef common::LinkHashValue<common::ObString> ParameterizationHashValue;
 
-struct ArgumentParameterization;
 
 struct SqlInfo: public ParameterizationHashValue
 {
@@ -99,8 +98,7 @@ struct SqlInfo: public ParameterizationHashValue
   SqlInfo();
 };
 
-struct TransformTreeCtx;
-struct SelectItemTraverseCtx;
+class ParsedSql;
 
 enum SQL_EXECUTION_MODE
 {
@@ -133,14 +131,15 @@ public:
   static int transform_syntax_tree(common::ObIAllocator &allocator,
                                    const ObSQLSessionInfo &session,
                                    const ObIArray<ObPCParam *> *raw_params,
-                                   ParseNode *tree,
+                                   const ParsedSql &parsed,
                                    SqlInfo &sql_info,
                                    ParamStore &params,
                                    ParameterizationResult &bindings,
                                    SelectItemParamInfoMap *select_item_param_infos,
                                    bool is_transform_outline,
                                    SQL_EXECUTION_MODE execution_mode = INVALID_MODE,
-                                   bool is_from_pl = false);
+                                   bool is_from_pl = false,
+                                   common::ObIArray<common::ObString> *user_variables = nullptr);
   static int raw_fast_parameterize_sql(common::ObIAllocator &allocator,
                                        const ObSQLSessionInfo &session,
                                        const common::ObString &sql,
@@ -202,7 +201,7 @@ public:
   static int parameterize_syntax_tree(common::ObIAllocator &allocator,
                                       bool is_transform_outline,
                                       ObPlanCacheCtx &pc_ctx,
-                                      ParseNode *tree,
+                                      const ParsedSql &parsed,
                                       ParamStore &params,
                                       ObCharsets4Parser charsets4parser);
   static int gen_special_param_info(SqlInfo &sql_info, ObPlanCacheCtx &pc_ctx);
@@ -212,49 +211,13 @@ public:
   static int construct_no_check_type_params(const ObIArray<int64_t> &no_check_type_offsets,
                                             const ObBitSet<> &need_check_type_offsets,
                                             ParamStore &params);
-  static bool is_tree_not_param(const ParseNode *tree);
   static SQL_EXECUTION_MODE get_sql_execution_mode(ObPlanCacheCtx &pc_ctx);
   static bool is_prepare_mode(SQL_EXECUTION_MODE mode);
   static bool is_execute_mode(SQL_EXECUTION_MODE mode);
   static bool is_text_mode(SQL_EXECUTION_MODE mode);
-  static bool is_ignore_scale_check(TransformTreeCtx &ctx, const ParseNode *parent);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObSqlParameterization);
-  static int is_fast_parse_const(TransformTreeCtx &ctx);
-
-  static bool is_node_not_param(TransformTreeCtx &ctx);
-  static int transform_tree(TransformTreeCtx &ctx, const ObSQLSessionInfo &session_info,
-                             const ArgumentParameterization &parent_policy,
-                             bool must_be_positive,
-                             const ParseNode *parameter_expression,
-                             ParameterOrigin origin);
-  static int add_param_flag(ParameterOrigin origin, SqlInfo &sql_info);
-  static int add_not_param_flag(const ParseNode *node, SqlInfo &sql_info);
-  static int add_varchar_charset(const ParseNode *node, SqlInfo &sql_info);
-  static int exclude_arguments(const ParseNode *arguments,
-                                 int64_t argument_count,
-                                 int64_t excluded_begin,
-                                 int64_t excluded_end,
-                                 SqlInfo &sql_info,
-                                 ArgumentParameterization &policy);
-  static int get_argument_policy(const ParseNode *tree, SqlInfo &sql_info,
-                                   ArgumentParameterization &policy);
-  static int get_related_user_vars(const ParseNode *tree, common::ObIArray<common::ObString> &user_vars);
-
-  static int get_select_item_param_info(const common::ObIArray<ObPCParam *> &raw_params,
-                                        const ParseNode *tree,
-                                        bool string_literal,
-                                        const ParameterizationResult &bindings,
-                                        SelectItemParamInfoMap &select_item_param_infos);
-  static int parameterize_fields(SelectItemTraverseCtx &ctx);
-
-  static int resolve_paramed_const(SelectItemTraverseCtx &ctx);
-  static int make_negated_literal(ObIAllocator &, const ParseNode &, bool negate, const NumericLiteral *&);
-  static int lower_subtraction(ObIAllocator &, const ParseNode *, ParameterizationResult &, bool is_from_pl);
-
-  static int find_leftest_const_node(const ParseNode &cur_node, const ParseNode *&const_node);
   static bool need_fast_parser(const ObString &sql);
-  static bool is_vector_index_query(const ParseNode *tree);
 };
 
 }

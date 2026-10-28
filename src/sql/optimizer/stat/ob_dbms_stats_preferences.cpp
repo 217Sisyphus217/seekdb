@@ -712,8 +712,8 @@ int ObMethodOptPrefs::check_pref_value_validity(ObTableStatParam *param/*default
                     session_info_->get_sql_mode(),
                     session_info_->get_charsets4parser());
     ParseMode parse_mode = METHOD_OPT_MODE;
-    ParseResult parse_result;
-    if (OB_FAIL(parser.parse(pvalue_, parse_result, parse_mode))) {
+    ParsedSql syntax;
+    if (OB_FAIL(parser.parse(pvalue_, syntax, parse_mode))) {
     } else {/*do nothing*/}
     if (OB_FAIL(ret)) {
       ret = OB_ERR_DBMS_STATS_PL;

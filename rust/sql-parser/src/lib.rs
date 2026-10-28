@@ -14,11 +14,17 @@
 
 mod access;
 mod bridge;
+mod command;
+mod ddl;
+mod expression;
 mod fts;
 mod grammar;
 mod inspect;
 mod lex;
 mod node;
+mod query;
+mod routine;
 mod scan;
+mod statistics;
 
 pub use bridge::ffi::SqlMode;

@@ -41,41 +41,27 @@ int calc_digest_text_inner(const ObString &query,
 {
   int ret = OB_SUCCESS;
   ParsedSql parsed;
-  ParseResult &parse_result = parsed.legacy();
+  ParseResult &parse_result = parsed.metadata();
   ParamStore tmp_params((ObWrapperAllocator(allocator)));
   stmt::StmtType stmt_type = stmt::T_NONE;
-  ObItemType item_type = T_NULL;
   if (OB_FAIL(parser.parse(query, parsed))) {
-  } else if (parsed.statement() != nullptr) {
-    if (i > 0) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "digest function");
-    } else {
-      digest_str = query;
-    }
-  } else if (OB_ISNULL(parse_result.result_tree_)
-            || OB_ISNULL(parse_result.result_tree_->children_[0])) {
+  } else if (OB_ISNULL(parsed.statement())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (FALSE_IT(item_type = parse_result.result_tree_->children_[0]->type_)) {
   } else if (i > 0) {
-    if (OB_UNLIKELY(T_EMPTY_QUERY != item_type)) {
+    if (parsed.statement()->kind != peg::NodeKind::EmptyQuery) {
       ret = OB_INVALID_ARGUMENT;
       LOG_USER_ERROR(OB_INVALID_ARGUMENT, "digest function");
     }
-  } else if (OB_UNLIKELY(T_EMPTY_QUERY == item_type)) {
+  } else if (parsed.statement()->kind == peg::NodeKind::EmptyQuery) {
     ret = OB_INVALID_ARGUMENT;
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "digest function");
-  } else if (OB_FAIL(ObResolverUtils::resolve_stmt_type(parse_result, stmt_type))) {
+  } else if (OB_FAIL(parsed.statement_type(stmt_type))) {
   } else if (ObStmt::is_dml_stmt(stmt_type) && !ObStmt::is_show_stmt(stmt_type)) {
-    if (OB_UNLIKELY(parse_result.result_tree_->children_[0]->value_ > 0)) {
+    if (parse_result.question_mark_ctx_.count_ > 0) {
       ret = OB_INVALID_ARGUMENT;
       LOG_USER_ERROR(OB_INVALID_ARGUMENT, "digest function");
     } else if (OB_FAIL(ObSqlParameterization::parameterize_syntax_tree(allocator,
-                                                                true,
-                                                                pc_ctx,
-                                                                parse_result.result_tree_,
-                                                                tmp_params,
-                                                                charsets4parser))) {
+        true, pc_ctx, parsed, tmp_params, charsets4parser))) {
     } else {
       digest_str = pc_ctx.sql_ctx_.plan_key_.format_sql_;
     }

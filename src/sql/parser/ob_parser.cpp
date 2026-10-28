@@ -765,8 +765,30 @@ int ObParser::parse(const ObString &query, ParsedSql &parsed, ParseMode mode,
                     bool split, bool no_throw, bool pl_inner, bool dynamic_sql)
 {
   parsed.reset();
-  return SMART_CALL(parse_(query, parsed.legacy(), mode, split, no_throw,
+  return SMART_CALL(parse_(query, parsed.metadata(), mode, split, no_throw,
                           pl_inner, dynamic_sql, &parsed));
+}
+
+int ObParser::parse_routine_definition(const ObString &definition, ParsedSql &parsed)
+{
+  int ret = OB_SUCCESS;
+  constexpr char prefix[] = "CREATE\n";
+  const int64_t prefix_length = sizeof(prefix) - 1;
+  const int64_t length = prefix_length + definition.length();
+  char *source = static_cast<char *>(allocator_->alloc(length));
+  if (OB_ISNULL(source)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    MEMCPY(source, prefix, prefix_length);
+    MEMCPY(source + prefix_length, definition.ptr(), definition.length());
+    OZ (parse(ObString(length, source), parsed));
+    if (OB_SUCC(ret) && (parsed.statement() == nullptr
+        || (parsed.statement()->kind != peg::NodeKind::CreateProcedure
+            && parsed.statement()->kind != peg::NodeKind::CreateFunction))) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  }
+  return ret;
 }
 
 namespace {
@@ -775,175 +797,121 @@ enum class RewriteKind { Parameter, TriggerColumn, Alias, Into };
 struct SqlRewrite {
   int64_t start;
   int64_t end;
-  ParseNode *node;
+  const peg::Node *node;
   RewriteKind kind;
   int64_t parameter = -1;
 };
 
-int record_reference(ParseResult &result, ParseNode *node, RefType type)
-{
-  auto *reference = static_cast<RefObjList *>(parse_malloc(sizeof(RefObjList), result.malloc_pool_));
-  if (reference == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
-  reference->node_ = node;
-  reference->type_ = type;
-  if (result.pl_parse_info_.tail_ref_object_node_ == nullptr) result.pl_parse_info_.ref_object_nodes_ = reference;
-  else result.pl_parse_info_.tail_ref_object_node_->next_ = reference;
-  result.pl_parse_info_.tail_ref_object_node_ = reference;
-  return OB_SUCCESS;
-}
-
-int collect_pl_rewrites(ParseNode *node, ParseResult &result, ObIArray<SqlRewrite> &rewrites,
-                        bool diagnostics = false)
-{
-  if (node == nullptr) return OB_SUCCESS;
-  int ret = OB_SUCCESS;
-  if (node->type_ == T_INTO_VARIABLES) {
-    return rewrites.push_back({node->sql_str_off_, node->stmt_loc_.last_column_, node, RewriteKind::Into});
-  }
-  if (node->type_ == T_OBJ_ACCESS_REF && node->num_child_ == 2
-      && node->children_[0] != nullptr && node->children_[0]->type_ == T_IDENT
-      && node->children_[1] != nullptr && node->children_[1]->type_ == T_OBJ_ACCESS_REF
-      && node->children_[1]->children_[0] != nullptr
-      && node->children_[1]->children_[0]->type_ == T_FUN_SYS) {
-    ParseNode *function = node->children_[1]->children_[0];
-    ParseNode *reference = new_node(result.malloc_pool_, T_FUN_UDF, 4);
-    if (reference == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
-    reference->children_[0] = function->children_[0];
-    reference->children_[1] = function->num_child_ > 1 ? function->children_[1] : nullptr;
-    reference->children_[2] = node->children_[0];
-    if (OB_FAIL(record_reference(result, reference, REF_FUNC))) return ret;
-    return collect_pl_rewrites(reference->children_[1], result, rewrites);
-  }
-  for (int i = 0; i < node->num_child_; ++i) {
-    if (OB_FAIL(collect_pl_rewrites(node->children_[i], result, rewrites,
-                                   diagnostics || node->type_ == T_DIAGNOSTICS))) return ret;
-  }
-  if (node->type_ == T_RELATION_FACTOR) {
-    return record_reference(result, node, REF_REL);
-  }
-  if (node->type_ == T_FUN_SYS || node->type_ == T_FUN_UDF) {
-    return record_reference(result, node, REF_FUNC);
-  }
-  if (node->type_ == T_JSON_TABLE_EXPRESSION) result.pl_parse_info_.is_forbid_pl_fp_ = true;
-  if (node->type_ == T_COLUMN_REF || (diagnostics && node->type_ == T_IDENT)) {
-    ParseNode *name = node->type_ == T_IDENT ? node : node->children_[2];
-    if (name->type_ == T_STAR) return OB_SUCCESS;
-    ParseNode *qualifier = node->type_ == T_IDENT ? nullptr : node->children_[1];
-    if (qualifier != nullptr) {
-      const ObString prefix(qualifier->str_len_, qualifier->str_value_);
-      if (node->children_[0] == nullptr && (prefix.case_compare("NEW") == 0 || prefix.case_compare("OLD") == 0)) {
-        ret = rewrites.push_back({node->sql_str_off_, node->stmt_loc_.last_column_, node, RewriteKind::TriggerColumn});
-      }
-    } else {
-      int64_t parameter = -1;
-      if (OB_FAIL(result.pl_parse_info_.lookup_symbol_(result.pl_parse_info_.pl_ns_,
-                                                       name->str_value_, name->str_len_, &parameter))) return ret;
-      if (parameter != -1) {
-        ret = rewrites.push_back({node->sql_str_off_, node->stmt_loc_.last_column_, node,
-                                  RewriteKind::Parameter, parameter});
-        node->str_value_ = name->str_value_;
-        node->str_len_ = name->str_len_;
-      }
-    }
-  } else if (node->type_ == T_PROJECT_STRING) {
-    const ParseNode *expression = node->children_[0];
-    bool alias = expression->type_ != T_ALIAS && expression->type_ != T_EXPR_WITH_ALIAS
-        && expression->type_ != T_VARCHAR && expression->type_ != T_STAR;
-    if (alias && expression->type_ == T_COLUMN_REF) {
-      int64_t parameter = -1;
-      if (expression->children_[2]->type_ != T_STAR) {
-        if (OB_FAIL(result.pl_parse_info_.lookup_symbol_(result.pl_parse_info_.pl_ns_,
-                                                         node->str_value_, node->str_len_, &parameter))) return ret;
-      }
-      alias = parameter != -1;
-    }
-    if (alias) {
-      ret = rewrites.push_back({node->stmt_loc_.last_column_, node->stmt_loc_.last_column_, node, RewriteKind::Alias});
-    }
-  }
-  return ret;
-}
-
-int bind_pl_sql(ParseResult &result)
+int bind_pl_sql(ParsedSql &parsed, const void *ns, ObIArray<const peg::Node *> &bindings)
 {
   int ret = OB_SUCCESS;
+  ParseResult &result = parsed.metadata();
+  const auto source = parsed.source();
   ObSEArray<SqlRewrite, 16> rewrites;
-  if (result.pl_parse_info_.pl_ns_ != nullptr
-      && OB_FAIL(collect_pl_rewrites(result.result_tree_, result, rewrites))) return ret;
+  if (parsed.statement() == nullptr) { return OB_ERR_UNEXPECTED; }
+  for (const auto &reference : peg::embedded_sql_references(*parsed.statement())) {
+    const auto &node = reference.node;
+    if (OB_FAIL(ret)) { break; }
+    if (reference.kind == peg::SqlReferenceKind::Into) {
+      OZ (rewrites.push_back({static_cast<int64_t>(node.start), static_cast<int64_t>(node.end),
+          &node, RewriteKind::Into}));
+    } else if (reference.kind == peg::SqlReferenceKind::Column) {
+      const auto names = peg::name_parts(node);
+      if (peg::name_is_wildcard(node)) {
+      } else if (names.size() == 2) {
+        const ObString qualifier(names[0].text.size(), names[0].text.data());
+        if (qualifier.case_compare("NEW") == 0 || qualifier.case_compare("OLD") == 0) {
+          OZ (rewrites.push_back({static_cast<int64_t>(node.start), static_cast<int64_t>(node.end),
+              &node, RewriteKind::TriggerColumn}));
+        }
+      } else if (names.size() == 1) {
+        int64_t parameter = -1;
+        OZ (lookup_pl_symbol(ns, names[0].text.data(), names[0].text.size(), &parameter));
+        if (OB_SUCC(ret) && parameter != -1) {
+          OZ (rewrites.push_back({static_cast<int64_t>(node.start), static_cast<int64_t>(node.end),
+              &node, RewriteKind::Parameter, parameter}));
+        }
+      }
+    } else if (reference.kind == peg::SqlReferenceKind::Projection) {
+      const auto &expression = peg::projection_expression(node);
+      bool alias = peg::projection_alias_form(node) == peg::AliasForm::Absent
+          && expression.kind != peg::NodeKind::String && expression.kind != peg::NodeKind::Star;
+      if (alias && expression.kind == peg::NodeKind::Column) {
+        int64_t parameter = -1;
+        if (!peg::name_is_wildcard(expression)) {
+          const auto spelling = parsed.source(node);
+          OZ (lookup_pl_symbol(ns, spelling.ptr(), spelling.length(), &parameter));
+        }
+        alias = parameter != -1;
+      }
+      if (OB_SUCC(ret) && alias) {
+        OZ (rewrites.push_back({static_cast<int64_t>(node.end), static_cast<int64_t>(node.end),
+            &node, RewriteKind::Alias}));
+      }
+    }
+  }
+  if (OB_FAIL(ret)) { return ret; }
   if (rewrites.count() > 1) {
-    std::stable_sort(&rewrites.at(0), &rewrites.at(0) + rewrites.count(), [](const SqlRewrite &a, const SqlRewrite &b) {
+    std::stable_sort(&rewrites.at(0), &rewrites.at(0) + rewrites.count(), [](const auto &a, const auto &b) {
       return a.start < b.start;
     });
   }
   ObSqlString output;
   int64_t offset = 0;
-  for (int64_t i = 0; i < rewrites.count(); ++i) {
-    const auto &rewrite = rewrites.at(i);
-    if (OB_FAIL(output.append(result.input_sql_ + offset, rewrite.start - offset))) return ret;
+  for (const auto &rewrite : rewrites) {
+    if (OB_FAIL(output.append(source.ptr() + offset, rewrite.start - offset))) { return ret; }
     switch (rewrite.kind) {
       case RewriteKind::Parameter:
         ret = output.append_fmt(":%ld", rewrite.parameter);
         break;
-      case RewriteKind::TriggerColumn:
-        ret = output.append_fmt(":%.*s.%.*s",
-            static_cast<int>(rewrite.node->children_[1]->str_len_), rewrite.node->children_[1]->str_value_,
-            static_cast<int>(rewrite.node->children_[2]->str_len_), rewrite.node->children_[2]->str_value_);
+      case RewriteKind::TriggerColumn: {
+        const auto names = peg::name_parts(*rewrite.node);
+        ret = output.append_fmt(":%.*s.%.*s", static_cast<int>(names[0].text.size()), names[0].text.data(),
+            static_cast<int>(names[1].text.size()), names[1].text.data());
         break;
-      case RewriteKind::Alias:
-        if (OB_FAIL(output.append(" AS `"))) return ret;
-        for (int64_t i = 0; i < rewrite.node->str_len_; ++i) {
-          if (OB_FAIL(output.append(rewrite.node->str_value_ + i, 1))) return ret;
-          if (rewrite.node->str_value_[i] == '`' && OB_FAIL(output.append("`"))) return ret;
+      }
+      case RewriteKind::Alias: {
+        if (OB_FAIL(output.append(" AS `"))) { return ret; }
+        const auto name = parsed.source(*rewrite.node);
+        for (int64_t i = 0; i < name.length(); ++i) {
+          if (OB_FAIL(output.append(name.ptr() + i, 1))) { return ret; }
+          if (name[i] == '`' && OB_FAIL(output.append("`"))) { return ret; }
         }
         ret = output.append("` ");
         break;
+      }
       case RewriteKind::Into:
         break;
     }
-    if (OB_FAIL(ret)) return ret;
+    if (OB_FAIL(ret)) { return ret; }
     if (rewrite.kind == RewriteKind::Parameter || rewrite.kind == RewriteKind::TriggerColumn) {
-      auto *parameter = static_cast<ParamList *>(parse_malloc(sizeof(ParamList), result.malloc_pool_));
-      if (parameter == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
-      parameter->node_ = rewrite.node;
-      if (result.tail_param_node_ == nullptr) result.param_nodes_ = parameter;
-      else result.tail_param_node_->next_ = parameter;
-      result.tail_param_node_ = parameter;
+      if (OB_FAIL(bindings.push_back(rewrite.node))) { return ret; }
     }
     offset = rewrite.end;
   }
-  if (OB_FAIL(output.append(result.input_sql_ + offset, result.input_sql_len_ - offset))) return ret;
+  if (OB_FAIL(output.append(source.ptr() + offset, source.length() - offset))) { return ret; }
   result.no_param_sql_ = parse_strndup(output.ptr(), output.length(), result.malloc_pool_);
-  if (result.no_param_sql_ == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+  if (result.no_param_sql_ == nullptr) { return OB_ALLOCATE_MEMORY_FAILED; }
   result.no_param_sql_len_ = output.length();
   return OB_SUCCESS;
 }
 }
 
-// Through parser for prepare interface, for spi_prepare call in mysql mode
-int ObParser::prepare_parse(const ObString &query, void *ns, ParsedSql &parsed)
+int ObParser::prepare_parse(const ObString &query, void *ns, ParsedSql &parsed,
+                            ObIArray<const peg::Node *> &bindings)
 {
   int64_t length = query.length();
-  while (length > 0 && ISSPACE(query[length - 1])) --length;
-  if (length > 0 && query[length - 1] == '\0') --length;
-  while (length > 0 && ISSPACE(query[length - 1])) --length;
+  while (length > 0 && ISSPACE(query[length - 1])) { --length; }
+  if (length > 0 && query[length - 1] == '\0') { --length; }
+  while (length > 0 && ISSPACE(query[length - 1])) { --length; }
   parsed.reset();
-  ParseResult &parse_result = parsed.legacy();
-  parse_result.pl_parse_info_.pl_ns_ = ns;
-  parse_result.pl_parse_info_.lookup_symbol_ = lookup_pl_symbol;
+  bindings.reuse();
+  ParseResult &parse_result = parsed.metadata();
   parse_result.malloc_pool_ = allocator_;
   parse_result.sql_mode_ = sql_mode_;
   int ret = parse_rust_sql(ObString(length, query.ptr()), parse_result, false, &parsed);
   if (OB_SUCC(ret)) {
-    if (parsed.statement() != nullptr) {
-      parse_result.no_param_sql_ = parse_strndup(query.ptr(), length, parse_result.malloc_pool_);
-      if (parse_result.no_param_sql_ == nullptr) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-      } else {
-        parse_result.no_param_sql_len_ = length;
-      }
-    } else {
-      ret = bind_pl_sql(parse_result);
-    }
+    ret = bind_pl_sql(parsed, ns, bindings);
   }
   return ret;
 }
@@ -1061,16 +1029,14 @@ void ObParser::free_result(ParseResult &parse_result)
   UNUSED(parse_result);
 }
 
-int ObParser::parse_expression(const ObString &text, const ParseNode *&node, bool is_for_trigger)
+int ObParser::parse_expression(const ObString &text, ParsedSql &parsed, bool is_for_trigger)
 {
-  ParseResult result{};
+  parsed.reset();
+  ParseResult &result = parsed.metadata();
   result.malloc_pool_ = allocator_;
   result.sql_mode_ = sql_mode_;
   result.charset_info_ = ObCharset::get_charset(charsets4parser_.string_collation_);
   result.is_expression_ = true;
   result.is_for_trigger_ = is_for_trigger;
-  node = nullptr;
-  const int ret = parse_rust_sql(text, result);
-  if (OB_SUCCESS == ret) node = result.result_tree_->children_[0];
-  return ret;
+  return parse_rust_sql(text, result, false, &parsed);
 }

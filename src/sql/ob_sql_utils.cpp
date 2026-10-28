@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_OPT
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "ob_sql_utils.h"
+#include "sql/engine/ob_physical_plan.h"
 #include "sql/parser/parsed_sql.h"
 #include "sql/executor/ob_maintain_dependency_info_task.h"
 #include "share/rc/ob_server_runtime.h"
@@ -162,71 +163,7 @@ int ObSQLUtils::md5(const ObString &stmt, char *sql_id, int32_t len)
   return ret;
 }
 
-int ObSQLUtils::replace_questionmarks(ParseNode *tree,
-                                      const ParamStore &params)
-{
-  int ret = OB_SUCCESS;
-  bool is_stack_overflow = false;
-  if (OB_FAIL(check_stack_overflow(is_stack_overflow))) {
-  } else if (is_stack_overflow) {
-    ret = OB_SIZE_OVERFLOW;
-  } else if (NULL != tree) {
-    // replace ? with given params
-    if (T_QUESTIONMARK == tree->type_) {
-      const ObObj &param = params.at(tree->value_);
-      switch (param.get_type()) {
-      case ObIntType:
-        tree->value_ = param.get_int();
-        tree->type_ = T_INT;
-        break;
-      case ObDateTimeType:
-        tree->value_ = param.get_datetime();
-        tree->type_ = T_DATETIME;
-        break;
-      case ObTimestampType:
-        tree->value_ = param.get_timestamp();
-        tree->type_ = T_TIMESTAMP;
-        break;
-      case ObDateType:
-        tree->value_ = param.get_date();
-        tree->type_ = T_DATE;
-        break;
-      case ObTimeType:
-        tree->value_ = param.get_time();
-        tree->type_ = T_TIME;
-        break;
-      case ObYearType:
-        tree->value_ = param.get_year();
-        tree->type_ = T_YEAR;
-        break;
-      case ObVarcharType:
-        tree->str_value_ = param.get_varchar().ptr();
-        tree->str_len_ = param.get_varchar().length();
-        tree->type_ = T_VARCHAR;
-        break;
-      case ObTinyIntType:
-        tree->value_ = param.get_bool();
-        tree->type_ = T_BOOL;
-        break;
-      case ObNumberType:
-        tree->str_value_ = param.get_number().format();
-        tree->type_ = T_NUMBER;
-        break;
-      default:
-        LOG_WARN("never reach here", "type", param.get_type());
-        break;
-      }
-    }
-    for (int32_t i = 0; OB_SUCC(ret) && i < tree->num_child_; ++i) {
-      if (OB_ISNULL(tree->children_)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else {
-        ret = SMART_CALL(replace_questionmarks(tree->children_[i], params));
-      }
-    }
-  }
-  return ret;
-}
+
 
 /**
  * @brief calculate the result of the const or calculable expr
@@ -947,103 +884,17 @@ int ObSQLUtils::check_enable_mysql_compatible_dates(const sql::ObSQLSessionInfo 
 }
 
 /***************************/
-/*   This is an incomplete list, extracted from ObBasicStmt::virtual bool cause_implicit_commit() */
-/* Need to manually synchronize this list */
-/***************************/
-bool ObSQLUtils::cause_implicit_commit(ParseResult &result)
-{
-  bool ret = false;
-  if (NULL != result.result_tree_
-      && NULL != result.result_tree_->children_
-      && NULL != result.result_tree_->children_[0]) {
-    ParseNode *root = result.result_tree_->children_[0];
-    ObItemType type = root->type_;
-    if (T_SET_PASSWORD == type
-        || T_DROP_USER == type
-        || T_CREATE_USER == type
-        || T_LOCK_USER == type
-        || T_REVOKE == type
-        || T_REVOKE_ALL == type
-        || T_RENAME_USER == type
-        || T_GRANT == type
-        || T_CREATE_TABLE == type
-        || T_ALTER_DATABASE == type
-        || T_DROP_DATABASE == type
-        || T_CREATE_VIEW == type
-        || T_DROP_TABLE == type
-        || T_DROP_INDEX == type
-        || T_CREATE_DATABASE == type
-        || T_CREATE_INDEX == type
-        /* pl item type*/
-        || T_PACKAGE_CREATE == type
-        || T_PACKAGE_CREATE_BODY == type
-        || T_PACKAGE_DROP == type
-        || T_SF_CREATE == type
-        || T_SF_DROP == type
-        || T_SF_ALTER == type
-        || T_SP_CREATE == type
-        || T_SP_DROP == type
-        || T_SP_ALTER == type
-        || T_TG_CREATE == type
-        || T_TG_DROP == type
-        || T_TG_ALTER == type
-        /* pl item type*/) {
-      ret = true;
-    }
-  }
-  return ret;
-}
+
 
 // Used to determine the statement types not supported by prepare statements in mysql mode
-bool ObSQLUtils::is_mysql_ps_not_support_stmt(const ParseResult &result)
+bool ObSQLUtils::is_mysql_ps_not_support_stmt(const ParsedSql &syntax)
 {
-  bool ret = false;
-  if (NULL != result.result_tree_
-      && NULL != result.result_tree_->children_
-      && NULL != result.result_tree_->children_[0]) {
-    ParseNode *root = result.result_tree_->children_[0];
-    ObItemType type = root->type_;
-    switch (type) {
-      case T_SP_CREATE:
-      case T_SP_DROP: {
-        ret = true;
-        break;
-      }
-      default: {
-        ret = false;
-      }
-    }
-  }
-  return ret;
+  return syntax.statement() != nullptr
+      && (syntax.statement()->kind == peg::NodeKind::CreateProcedure
+          || syntax.statement()->kind == peg::NodeKind::DropProcedure);
 }
 
-bool ObSQLUtils::is_readonly_stmt(ParseResult &result)
-{
-  bool ret = false;
-  if (NULL != result.result_tree_
-      && NULL != result.result_tree_->children_
-      && NULL != result.result_tree_->children_[0]) {
-    ParseNode *root = result.result_tree_->children_[0];
-    ObItemType type = root->type_;
-    if (T_SELECT == type && NULL == root->children_[PARSE_SELECT_FOR_UPD]) {
-      ret = true;
-    } else if (T_EXPLAIN == type
-               && NULL != root->children_[1]
-               && root->children_[1]->type_ == T_SELECT
-               && NULL == root->children_[1]->children_[PARSE_SELECT_FOR_UPD]) {
-      ret = true;
-    } else if (IS_SHOW_STMT(type)
-               || T_USE_DATABASE == type
-               || T_TRANSACTION == type
-               || T_VARIABLE_SET == type
-               || T_SET_NAMES == type //read only not restrict it
-               || T_SET_CHARSET == type  //read only not restrict it
-               || T_SET_ROLE == type) {
-      ret = true;
-    }
-  }
-  return ret;
-}
+
 
 bool ObSQLUtils::is_allowed_on_standby(const ObItemType stmt_type)
 {
@@ -1418,7 +1269,6 @@ int ObSQLUtils::get_outline_key(ObIAllocator &allocator,
     // Quick parameterization SQL with ?
     ObString no_param_sql;
     ParsedSql parsed;
-    ParseResult &parse_result = parsed.legacy();
     ObParser parser(allocator, session->get_sql_mode(), session->get_charsets4parser());
     ObSEArray<ObPCParam *, OB_PC_SPECIAL_PARAM_COUNT> special_params;
     ObString param_sql;
@@ -1434,25 +1284,17 @@ int ObSQLUtils::get_outline_key(ObIAllocator &allocator,
     ObString constructed_sql;
     const bool is_transform_outline = true;
     const bool is_parameterized_execute = false;
-    ParseNode *type_node = NULL;
+    stmt::StmtType type = stmt::T_NONE;
     sql_info.need_check_fp_ = false;
     int64_t format_len = query_sql.length() * 2;
     if (OB_FAIL(parser.parse(query_sql, parsed))) {
-    } else if (parsed.statement() != nullptr) {
-      ret = OB_SQL_DML_ONLY;
-    } else if (OB_ISNULL(parse_result.result_tree_)) {
-      ret = OB_NOT_INIT;
-    } else if (OB_ISNULL(parse_result.result_tree_->children_)
-               || OB_UNLIKELY(parse_result.result_tree_->num_child_ < 1)) {
-      ret = OB_INVALID_ARGUMENT;
-    } else if (NULL == (type_node = parse_result.result_tree_->children_[0])) {
-      ret = OB_INVALID_ARGUMENT;
-    } else if (!IS_DML_STMT(type_node->type_)) {
+    } else if (OB_FAIL(parsed.statement_type(type))) {
+    } else if (!(type == stmt::T_SELECT || ObStmt::is_dml_write_stmt(type))) {
       ret = OB_SQL_DML_ONLY;
     } else if (check_param && OB_FAIL(ObSqlParameterization::transform_syntax_tree(allocator,
                                                                     *session,
                                                                     NULL,
-                                                                    parse_result.result_tree_,
+                                                                    parsed,
                                                                     sql_info,
                                                                     params,
                                                                     bindings,
@@ -1502,11 +1344,10 @@ int ObSQLUtils::get_outline_key(ObIAllocator &allocator,
         } else if (OB_FAIL(constructed_sql.serialize(buf, size, pos_s))) {
         } else {
           outline_key.assign_ptr(buf, static_cast<ObString::obstr_size_t>(pos_s));
-          has_questionmark_in_sql = INT64_MAX != type_node->value_ && type_node->value_ > 0;
+          has_questionmark_in_sql = parsed.metadata().question_mark_ctx_.count_ > 0;
         }
       }
     }
-    parser.free_result(parse_result);
   }
   return ret;
 }
@@ -1937,16 +1778,6 @@ int SemanticVectorDistExprChecker::add_expr(ObRawExpr *&expr)
     }
   }
   return ret;
-}
-
-//used for C module
-bool check_stack_overflow_c()
-{
-  bool is_overflow = false;
-  int ret = OB_SUCCESS;
-  if (OB_FAIL(oceanbase::common::check_stack_overflow(is_overflow))) {
-  }
-  return is_overflow;
 }
 
 int ObSQLUtils::extract_pre_query_range(const ObQueryRangeProvider &query_range_provider,
@@ -3260,16 +3091,7 @@ int ObPreCalcExprConstraint::check_is_match(ObDatumObjParam &datum_param,
   return ret;
 }
 
-ObItemType ObSQLUtils::get_sql_item_type(const ParseResult &result)
-{
-  ObItemType type = ObItemType::T_INVALID;
-  if (NULL != result.result_tree_
-      && NULL != result.result_tree_->children_
-      && NULL != result.result_tree_->children_[0]) {
-    type = result.result_tree_->children_[0]->type_;
-  }
-  return type;
-}
+
 
 bool ObSQLUtils::is_support_batch_exec(ObItemType type)
 {

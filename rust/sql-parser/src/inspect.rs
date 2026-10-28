@@ -26,7 +26,9 @@ pub(crate) fn inspect_expression(sql: &[u8], mode: SqlMode) -> ExpressionInfo {
         root = &root.children[0];
     }
     let function_name = match root.kind {
-        Kind::Function | Kind::Cast | Kind::StringConcat => root.children[0].text.clone(),
+        Kind::Function | Kind::Cast | Kind::StringConcat => {
+            crate::expression::call_name(root).into()
+        }
         _ => String::new(),
     };
     let mut columns = Vec::new();
@@ -36,6 +38,7 @@ pub(crate) fn inspect_expression(sql: &[u8], mode: SqlMode) -> ExpressionInfo {
     ExpressionInfo {
         root_kind: root.kind,
         function_name,
+        qualified_function: !crate::expression::call_qualifiers(root).is_empty(),
         columns,
         error: parsed.error,
         error_offset: parsed.error_offset,
@@ -53,16 +56,115 @@ fn collect_columns(node: &Node, columns: &mut Vec<ColumnReference>) {
                 .collect(),
             wildcard: node.children.iter().any(|child| child.kind == Kind::Star),
         });
-    } else if node.kind == Kind::ObjectAccess
-        && node.children[0].kind == Kind::Ident
-        && node.children[1].kind == Kind::Missing
-    {
-        columns.push(ColumnReference {
-            parts: vec![node.children[0].text.clone()],
-            wildcard: false,
-        });
     }
     for child in &node.children {
         collect_columns(child, columns);
     }
+}
+
+pub(crate) fn embedded_sql_references(statement: &Node) -> Vec<bridge::ffi::SqlReference<'_>> {
+    fn visit<'a>(node: &'a Node, references: &mut Vec<bridge::ffi::SqlReference<'a>>) {
+        use bridge::ffi::{SqlReference, SqlReferenceKind as Role};
+        if matches!(node.kind, Kind::IntoVariables | Kind::TrailingIntoVariables) {
+            references.push(SqlReference {
+                kind: Role::Into,
+                node,
+            });
+            return;
+        }
+        if node.kind == Kind::Diagnostics {
+            if crate::command::diagnostics_has_condition(node) {
+                visit(crate::command::diagnostics_condition(node), references);
+            }
+            for item in crate::command::diagnostics_items(node) {
+                let target = crate::command::diagnostics_target(item);
+                if target.kind == Kind::Ident {
+                    references.push(SqlReference {
+                        kind: Role::Column,
+                        node: target,
+                    });
+                } else {
+                    visit(target, references);
+                }
+            }
+            return;
+        }
+        for child in &node.children {
+            visit(child, references);
+        }
+        let kind = match node.kind {
+            Kind::Column => Role::Column,
+            Kind::Relation => Role::Relation,
+            Kind::Function => Role::Function,
+            Kind::Projection => Role::Projection,
+            _ => return,
+        };
+        references.push(SqlReference { kind, node });
+    }
+    let mut references = Vec::new();
+    visit(statement, &mut references);
+    references
+}
+
+pub(crate) fn query_has_mixed_string_array(node: &Node) -> bool {
+    fn literal_kind(mut node: &Node) -> Option<crate::bridge::ffi::LiteralKind> {
+        use crate::bridge::ffi::{LiteralKind, UnaryOperator};
+        while node.kind == Kind::Parenthesized {
+            node = crate::expression::parenthesized_expression(node);
+        }
+        if node.kind == Kind::Unary
+            && matches!(
+                crate::expression::unary_operator(node),
+                UnaryOperator::Plus | UnaryOperator::Minus
+            )
+        {
+            return literal_kind(crate::expression::unary_operand(node)).filter(|kind| {
+                matches!(
+                    *kind,
+                    LiteralKind::Integer
+                        | LiteralKind::Unsigned
+                        | LiteralKind::Decimal
+                        | LiteralKind::Float
+                )
+            });
+        }
+        if node.kind == Kind::CharsetLiteral {
+            Some(LiteralKind::String)
+        } else if crate::expression::is_literal(node) {
+            Some(crate::expression::expression_literal(node).kind)
+        } else {
+            None
+        }
+    }
+    if node.kind == Kind::ArrayLiteral {
+        use crate::bridge::ffi::LiteralKind;
+        let mut string = false;
+        let mut scalar = false;
+        for value in crate::expression::call_arguments(node) {
+            match literal_kind(value) {
+                Some(LiteralKind::String | LiteralKind::NationalString) => string = true,
+                Some(LiteralKind::Null | LiteralKind::Placeholder) | None => {}
+                Some(_) => scalar = true,
+            }
+        }
+        if string && scalar {
+            return true;
+        }
+    }
+    node.children.iter().any(query_has_mixed_string_array)
+}
+
+pub(crate) fn syntax_literals(syntax: &Node) -> Vec<bridge::ffi::LiteralReference<'_>> {
+    fn collect<'a>(node: &'a Node, literals: &mut Vec<bridge::ffi::LiteralReference<'a>>) {
+        if crate::expression::is_literal(node) {
+            literals.push(bridge::ffi::LiteralReference { node });
+        } else {
+            for child in &node.children {
+                collect(child, literals);
+            }
+        }
+    }
+    let mut literals = Vec::new();
+    collect(syntax, &mut literals);
+    literals
 }

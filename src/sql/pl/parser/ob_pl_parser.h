@@ -17,7 +17,7 @@
 #ifndef OCEANBASE_SRC_PL_PARSER_OB_PL_PARSER_H_
 #define OCEANBASE_SRC_PL_PARSER_OB_PL_PARSER_H_
 
-#include "sql/pl/parser/parse_stmt_node.h"
+#include "sql/parser/parsed_sql.h"
 #include "share/ob_define.h"
 #include "share/schema/ob_trigger_info.h"
 #include "sql/parser/ob_parser_utils.h"
@@ -44,7 +44,7 @@ public:
     : allocator_(allocator),
       sql_mode_(sql_mode)
   {}
-  int parse(const common::ObString &source, ObStmtNodeTree *&tree);
+  int parse(const common::ObString &source, sql::ParsedSql &syntax);
 private:
   common::ObIAllocator &allocator_;
   ObSQLMode sql_mode_;

@@ -1068,7 +1068,8 @@ private:
 
   static bool is_get_package_or_subprogram_var_expression(const ObSqlExpression &expr);
 
-  static int resolve_exec_params(const ParseResult &parse_result,
+  static int resolve_exec_params(const common::ObIArray<const peg::Node *> &bindings,
+                                 const common::ObString &source,
                                  ObSQLSessionInfo &session,
                                  share::schema::ObSchemaGetterGuard &schema_guard,
                                  sql::ObRawExprFactory &expr_factory,
@@ -1076,14 +1077,15 @@ private:
                                  ObSPIPrepareResult &prepare_result,
                                  common::ObIAllocator &allocator);
 
-  static int resolve_into_params(const ParseResult &parse_result,
+  static int resolve_into_params(const peg::Node &statement,
                                  ObSQLSessionInfo &session,
                                  share::schema::ObSchemaGetterGuard &schema_guard,
                                  sql::ObRawExprFactory &expr_factory,
                                  pl::ObPLBlockNS &secondary_namespace,
                                  ObSPIPrepareResult &prepare_result);
 
-  static int resolve_ref_objects(const ParseResult &parse_result,
+  static int resolve_ref_objects(const peg::Node &statement,
+                                 common::ObIAllocator &allocator,
                                  ObSQLSessionInfo &session,
                                  share::schema::ObSchemaGetterGuard &schema_guard,
                                  ObSPIPrepareResult &prepare_result);

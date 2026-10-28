@@ -31,16 +31,16 @@ struct InListRewriteInfo;
 
 struct InListRows
 {
-  // Original ExprList nodes, borrowed until deferred expression resolution finishes.
-  common::ObSEArray<const ParseNode *, 4> segments_;
+  // Original membership nodes, borrowed until deferred expression resolution finishes.
+  common::ObSEArray<const peg::Node *, 4> segments_;
   int64_t row_count() const;
   int get_copy_assign_ret() const { return segments_.get_copy_assign_ret(); }
 };
 
 struct InListGroup
 {
-  explicit InListGroup(const ParseNode *node = nullptr) : node_(node) {}
-  const ParseNode *node_;
+  explicit InListGroup(const peg::Node *node = nullptr) : node_(node) {}
+  const peg::Node *node_;
   // Empty when this operand was not combined with another membership predicate.
   InListRows rows_;
   int get_copy_assign_ret() const { return rows_.get_copy_assign_ret(); }
@@ -115,7 +115,7 @@ public:
                                          bool &is_enable);
   static int group_inlists(ObExprResolveContext &resolve_ctx,
                           bool is_root_condition,
-                          const ParseNode &root,
+                          const peg::Node &root,
                           common::ObIArray<InListGroup> &groups);
   int resolve_inlist(ObInListInfo &inlist_infos);
 private:
@@ -124,8 +124,8 @@ private:
                                      int64_t col_idx,
                                      ObInListsResolverHelper &helper,
                                      InListRewriteInfo &rewrite_info);
-  static int check_can_merge_inlists(const ParseNode *last_in_node,
-                                     const ParseNode *cur_in_node,
+  static int check_can_merge_inlists(const peg::Node *last_in_node,
+                                     const peg::Node *cur_in_node,
                                      ObInListsResolverHelper &helper,
                                      InListRewriteInfo &last_info,
                                      bool &can_merge);

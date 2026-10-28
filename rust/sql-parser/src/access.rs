@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::bridge::ffi::{
-    AccessOptions, AccountKind, AccountNameForm, AuthenticationKind, PrivilegeObject,
-    PrivilegeScope, PrivilegeTarget, RoleSelection,
+    AccessOptions, AccountIdentity, AccountKind, AccountNameForm, AuthenticationKind,
+    PrivilegeObject, PrivilegeScope, PrivilegeTarget, RoleSelection,
 };
 use crate::node::{Kind, Node};
 
@@ -99,6 +99,21 @@ fn authentication(spec: &Node) -> Option<&Node> {
 
 fn plugin(spec: &Node) -> Option<&Node> {
     authentication(spec).and_then(|auth| child(auth, Kind::AuthenticationPlugin))
+}
+
+pub(crate) fn account_identity(principal: &Node) -> AccountIdentity<'_> {
+    let name = &principal.children[0];
+    let host = &principal.children[1];
+    AccountIdentity {
+        name: &name.text,
+        host: &host.text,
+        name_form: if name.kind == Kind::Ident {
+            AccountNameForm::Identifier
+        } else {
+            AccountNameForm::String
+        },
+        has_host: host.kind != Kind::Missing,
+    }
 }
 
 pub(crate) fn account_kind(spec: &Node) -> AccountKind {

@@ -17,6 +17,7 @@
 #ifndef _OB_PARSER_H
 #define _OB_PARSER_H 1
 #include "sql/parser/parse_node.h"
+#include "rust/sql_parser.h"
 #include "sql/parser/parse_define.h"
 #include "lib/allocator/ob_allocator.h"
 #include "lib/container/ob_iarray.h"
@@ -104,25 +105,13 @@ public:
             bool is_pl_inner_parse = false,
             bool is_parser_dynamic_sql = false);
 
+  int parse_routine_definition(const common::ObString &definition, ParsedSql &parsed);
+
   virtual void free_result(ParseResult &parse_result);
-  int parse_expression(const common::ObString &text, const ParseNode *&node,
+  int parse_expression(const common::ObString &text, ParsedSql &parsed,
                        bool is_for_trigger = false);
-  /**
-   * @brief  parse interface for prepare usage
-   * @param [in] query      - statement to be parsed
-   * @param [in] ns      - external namespace
-   * @param [out] parsed  - owned parse result
-   * @retval OB_SUCCESS execute success
-   * @retval OB_SOME_ERROR special errno need to handle
-   *
-   * Compared with the general prepare, it takes an external namespace as input and simplifies redundant processes that will not be reached in this path.
-   * Its main idea is that during the parsing process, whenever a variable in the sql is encountered, it attempts to look up this variable in the pl namespace.
-   * If found, it copies out the sql statement before this variable and rewrites this variable as a question mark,
-   * while also recording this variable.
-   * At the same time, all objects (tables, views, functions) encountered are also recorded.
-   *
-   */
-  int prepare_parse(const common::ObString &query, void *ns, ParsedSql &parsed);
+  int prepare_parse(const common::ObString &query, void *ns, ParsedSql &parsed,
+                    common::ObIArray<const peg::Node *> &bindings);
   static int pre_parse(const common::ObString &stmt,
                        PreParseResult &res);
 

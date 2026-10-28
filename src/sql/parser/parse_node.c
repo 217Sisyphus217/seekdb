@@ -17,74 +17,10 @@
 #include "sql/parser/parse_node.h"
 #include <string.h>
 #include "lib/utility/alloc_assist.h"
-#include "sql/parser/parse_node_hash.h"
 #include "sql/parser/parse_define.h"
 #include "sql/parser/parse_malloc.h"
 #include <stdio.h>
 #include <ctype.h>
-#include "sql/executor/ob_memory_tracker_wrapper.h"
-extern const char *get_type_name(int type);
-
-int OB_WEAK_SYMBOL check_mem_status() { return OB_PARSER_SUCCESS; }
-int OB_WEAK_SYMBOL try_check_mem_status(int64_t check_try_times) { return OB_PARSER_SUCCESS; }
-
-ParseNode *new_node(void *malloc_pool, ObItemType type, int num)
-{
-  int ret = OB_PARSER_SUCCESS;
-  const int64_t check_try_times = 1024;
-  ParseNode *node = NULL;
-  // the mem alloced by parse_malloc has been memset;
-  if (OB_UNLIKELY((OB_PARSER_SUCCESS != (ret = try_check_mem_status(check_try_times))))) {
-    (void)printf("Exceeded memory usage limit\n");
-  } else {
-    node = (ParseNode *)parse_malloc(sizeof(ParseNode), malloc_pool);
-    if (OB_UNLIKELY(NULL == node)) {
-      (void)printf("malloc memory failed\n");
-    } else {
-      node->type_ = type;
-      node->num_child_ = num;
-      node->value_ = INT64_MAX;
-      node->pl_str_off_ = -1;
-      if (num > 0) {
-        int64_t alloc_size = sizeof(ParseNode *) * num ;
-        node->children_ = (ParseNode **)parse_malloc(alloc_size, malloc_pool);
-        if (OB_UNLIKELY(NULL == node->children_)) {
-          parse_free(node);
-          node = NULL;
-        }
-      } else {
-        node->children_ = NULL;
-      }
-    }
-  }
-  return node;
-}
-
-ParseNode *new_terminal_node(void *malloc_pool, ObItemType type)
-{
-  int children_num = 0;
-  return new_node(malloc_pool, type, children_num);
-}
-
-ParseNode *new_non_terminal_node(void *malloc_pool, ObItemType node_tag, int num, ...)
-{
-  ParseNode *ret_node = NULL;
-  if (OB_UNLIKELY(num <= 0)) {
-    (void)fprintf(stderr, "ERROR invalid num:%d\n", num);
-  } else {
-    int32_t i = 0;
-    va_list va;
-    ret_node = new_node(malloc_pool, node_tag, num);
-    if (OB_LIKELY(NULL != ret_node)) {
-      va_start(va, num);
-      for (; i < num; ++i) {
-        ret_node->children_[i] = va_arg(va, ParseNode *);
-      }
-      va_end(va);
-    }
-  }
-  return ret_node;
-}
 
 static char char_int(char c)
 {
@@ -203,100 +139,6 @@ char *str_toupper(char *buff, int64_t len)
   return buff;
 }
 
-// calculate hash value of syntax tree recursively
-// every member of ParseNode is calculated using murmurhash
-uint64_t parsenode_hash(const ParseNode *node, int *ret)
-{
-  uint64_t hash_val = 0;
-  if (check_stack_overflow_c()) {
-    (void)fprintf(stderr, "ERROR stack overflow in recursive function\n");
-    if (ret) {
-      *ret = OB_PARSER_ERR_SIZE_OVERFLOW;
-    }
-  } else if (OB_LIKELY(NULL != node)) {
-    hash_val = murmurhash(&node->type_, sizeof(node->type_), hash_val);
-    hash_val = murmurhash(&node->value_, sizeof(node->value_), hash_val);
-    hash_val = murmurhash(&node->str_len_, sizeof(node->str_len_), hash_val);
-    if (NULL != node->str_value_) {
-      hash_val = murmurhash(node->str_value_, (int32_t)node->str_len_, hash_val);
-    }
-
-    uint64_t child_hash_val = 0;
-    int32_t i = 0;
-    if (node->num_child_ > 0) {
-      if (OB_UNLIKELY(NULL == node->children_)) {
-        (void)fprintf(stderr, "ERROR children of node is NULL\n");
-      } else {
-        for (; i < node->num_child_; ++i) {
-          if (NULL != node->children_[i]) {
-            child_hash_val = parsenode_hash(node->children_[i], ret);
-            if (ret && OB_PARSER_ERR_SIZE_OVERFLOW == *ret) {
-              break;
-            }
-            hash_val = murmurhash(&child_hash_val, sizeof(child_hash_val), hash_val);
-          }
-        }
-      }
-    }
-  }
-  return hash_val;
-}
-
-// compare syntax tree recursively
-// every member of ParseNode is compared
-bool parsenode_equal(const ParseNode *lnode, const ParseNode *rnode, int *ret)
-{
-  bool result = true;
-  if (check_stack_overflow_c()) {
-    (void)fprintf(stderr, "ERROR stack overflow in recursive function\n");
-    if (ret) {
-      *ret = OB_PARSER_ERR_SIZE_OVERFLOW;
-    }
-  } else if (NULL == lnode && NULL == rnode) {
-    result = true;
-  } else if ((NULL == lnode && NULL != rnode)
-             || (NULL != lnode && NULL == rnode)) {
-    result = false;
-  } else {
-    if (lnode->type_ != rnode->type_
-        || lnode->value_ != rnode->value_
-        || lnode->str_len_ != rnode->str_len_
-        || lnode->num_child_ != rnode->num_child_) {
-      result = false;
-    } else {
-      if (NULL == lnode->str_value_ && NULL == rnode->str_value_) {
-        result = true;
-      } else if ((NULL == lnode->str_value_ && NULL != rnode->str_value_)
-                 || (NULL != lnode->str_value_ && NULL == rnode->str_value_ )) {
-        result = false;
-      } else if (lnode->str_len_ != rnode->str_len_) {
-        result = false;
-      } else {
-        // T_VARCHAR type: value_ is length, str_value_ is ptr
-        // @ref ob_raw_expr.cpp
-        if (0 != strncmp(lnode->str_value_, rnode->str_value_, lnode->str_len_)){
-          result = false;
-        }
-      }
-      if (result) {
-        if (lnode->num_child_ > 0) {
-          if (NULL == lnode->children_ || NULL == rnode->children_) {
-            result = false;
-          } else {
-            int32_t i = 0;
-            for (; result && i < lnode->num_child_; ++i) {
-              result = parsenode_equal(lnode->children_[i], rnode->children_[i], ret);
-              if (ret && OB_PARSER_ERR_SIZE_OVERFLOW == *ret) {
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  return result;
-}
 // Find by name, return the index of the name if found, otherwise add the name and return the index
 int64_t get_question_mark(ObQuestionMarkCtx *ctx, void *malloc_pool, const char *name)
 {

@@ -108,9 +108,9 @@ int ObDbmsSpace::parse_ddl_sql(ObExecContext &ctx,
   } else {
     ObParser parser(ctx.get_allocator(), session->get_sql_mode());
     ParsedSql parsed;
-    ParseResult &parse_result = parsed.legacy();
     SMART_VAR(ObResolverParams, resolver_ctx) {
       resolver_ctx.allocator_  = &ctx.get_allocator();
+      resolver_ctx.syntax_ = &parsed;
       resolver_ctx.schema_checker_ = &schema_checker;
       resolver_ctx.session_info_ = session;
       resolver_ctx.expr_factory_ = ctx.get_expr_factory();
@@ -130,14 +130,11 @@ int ObDbmsSpace::parse_ddl_sql(ObExecContext &ctx,
 
       if (OB_SUCC(ret)) {
         HEAP_VAR(ObCreateIndexResolver, resolver, resolver_ctx) {
-          ParseNode *tree = nullptr;
           if (OB_FAIL(parser.parse(ddl_sql, parsed))) {
-          } else if (parsed.statement() != nullptr) {
-            ret = OB_ERR_UNEXPECTED;
-          } else if (OB_ISNULL(tree = parse_result.result_tree_->children_[0])) {
+          } else if (OB_ISNULL(parsed.statement())) {
             ret = OB_ERR_UNEXPECTED;
             SQL_ENG_LOG(WARN, "result tree is null", K(ret));
-          } else if (OB_FAIL(resolver.resolve(*tree))) {
+          } else if (OB_FAIL(resolver.resolve(*parsed.statement()))) {
           } else {         
             stmt = resolver.get_create_index_stmt();
           }

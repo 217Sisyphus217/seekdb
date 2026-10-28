@@ -34,52 +34,6 @@ extern "C" {
 
 struct ObCharsetInfo;
 
-enum SelectParserOffset
-{
-  PARSE_SELECT_WITH,
-  PARSE_SELECT_DISTINCT,
-  PARSE_SELECT_SELECT,
-  PARSE_SELECT_INTO, //into before from
-  PARSE_SELECT_FROM,
-  PARSE_SELECT_WHERE,
-  PARSE_SELECT_DYNAMIC_SW_CBY, // connect by node or start with node
-  PARSE_SELECT_DYNAMIC_CBY_SW, // connect by node or start with node
-  PARSE_SELECT_DYNAMIC_GROUP,
-  PARSE_SELECT_DYNAMIC_HAVING,
-  PARSE_SELECT_NAMED_WINDOWS,
-  PARSE_SELECT_SET,
-  PARSE_SELECT_FORMER,
-  PARSE_SELECT_LATER,
-  PARSE_SELECT_ORDER,
-  PARSE_SELECT_APPROX,
-  PARSE_SELECT_LIMIT,
-  PARSE_SELECT_VECTOR_INDEX_PARAMS,
-  PARSE_SELECT_FOR_UPD,
-  PARSE_SELECT_HINTS,
-  PARSE_SELECT_WHEN, // I find that it is no longer used.
-  PARSE_SELECT_FETCH,
-  PARSE_SELECT_FETCH_TEMP, //use to temporary store fetch clause in parser
-  PARSE_SELECT_WITH_CHECK_OPTION,
-  PARSE_SELECT_INTO_EXTRA,// ATTENTION!! SELECT_INTO_EXTRA must be the last one
-  PARSE_SELECT_MAX_IDX  // = 25, ATTENTION!! adjust malloc_select_node(node, malloc_pool) after adding a new enum value
-};
-
-enum GrantParseOffset
-{
-  PARSE_GRANT_ROLE_LIST,
-  PARSE_GRANT_ROLE_GRANTEE,
-  PARSE_GRANT_ROLE_OPT_WITH,
-  PARSE_GRANT_ROLE_MAX_IDX
-};
-
-enum GrantParseSysOffset
-{
-  PARSE_GRANT_SYS_PRIV_LIST,
-  PARSE_GRANT_SYS_PRIV_GRANTEE,
-  PARSE_GRANT_SYS_PRIV_OPT_WITH,
-  PARSE_GRANT_SYS_PRIV_MAX_IDX
-};
-
 enum ParseMode
 {
   STD_MODE = 0,
@@ -98,8 +52,6 @@ typedef struct
   char err_msg_[MAX_ERROR_MSG];
 } ErrStat;
 
-struct _ParseNode;
-
 typedef struct _ObStmtLoc
 {
   int first_column_;
@@ -108,101 +60,6 @@ typedef struct _ObStmtLoc
   int last_line_;
 } ObStmtLoc;
 
-enum UdtUdfType
-{
-  UDT_UDF_UNKNOWN,
-  UDT_UDF_CONS = 1,
-  UDT_UDF_MEMBER = 2,
-  UDT_UDF_STATIC = 4,
-  UDT_UDF_MAP = 8,
-  UDT_UDF_ORDER = 16,
-};
-
-typedef struct _ParseNode
-{
-  ObItemType type_;
-  int32_t num_child_;   /* attributes for non-terninal node, which has children */
-  int16_t param_num_; // record the number of constants in the original text corresponding to this node, temporarily only used by T_CAST_ARGUMENT
-  union {
-    uint32_t flag_;
-    struct {
-      uint32_t is_hidden_const_ : 1; // 1 indicates that a certain constant can be recognized by normal parse but not by fast parse, 0 indicates that both can recognize it.
-      uint32_t length_semantics_  :2; // length semantics for char/varbinary declarations
-      uint32_t is_assigned_from_child_: 1; // Is the constant node assigned from a child node, used for handling int64_min
-      uint32_t is_date_unit_ : 1; // 1 indicates it is a date unit constant, which needs to be reversed to a string during reverse parsing
-      uint32_t is_empty_ : 1; // indicates whether the node is default, 1 means default, 0 means not default, used in opt_asc_desc node
-      uint32_t is_multiset_ : 1; // for cast(multiset(...) as ...)
-      uint32_t is_forbid_anony_parameter_ : 1; // 1 indicates prohibiting anonymous block parameterization
-      uint32_t is_input_quoted_ : 1; // indicate name_ob input whether with double quote
-      uint32_t is_forbid_parameter_ : 1; //1 indicate forbid parameter
-      uint32_t is_default_literal_expression_ : 1; // 1 indicate in default literal expression, "DEFAULT NOW()"
-      uint32_t reserved_;
-    };
-  };
-  /* attributes for terminal node, it is real value */
-  /* Numeric type nodes will use value_ to store their value, but for string and decimal types, str_value is used to store the string pointer,
-   * str_len_ indicates the length of the string, do not use strlen(str_value_) to get the value of str_value_, because str_value_ does not guarantee to be null-terminated.
-   * In addition, why not make value_ and str_len_ a union? This is because when parsing
-   * a numeric type, not only do we need to store its value, we also need to store its original string, for example: select
-   * 1111; in this statement, we not only have to store the int value, but also the '1111' string*/
-  union {
-    int64_t value_;
-    int32_t int32_values_[2];
-    int16_t int16_values_[4];
-  };
-  const char *str_value_;
-  int64_t str_len_;
-  union {
-    int64_t pl_str_off_; // pl layer, record the start offset of str in the original string
-    int64_t sql_str_off_; // sql layer, record the start offset of str in the original string
-  };
-
-  /* Used to store text strings lost after special processing in the lexical phase eg: NULL, Date '2010-10-11',
-   * this text string, after fast parse parameterization, if the parameter is part of the stmtkey in the plan cache,
-   * then the original text string needs to be used instead of the value after losing the text string, otherwise it will lead to plan cache mismatch
-   * */
-  const char *raw_text_;
-  int64_t text_len_;
-  int64_t pos_; // record ? position in sql with ?
-
-  struct _ParseNode **children_; /* attributes for non-terminal node, which has children */
-  ObStmtLoc stmt_loc_; // temporarily place here, to be moved to parse_stmt_node.h later
-  int64_t raw_sql_offset_; // constant node character offset in sql
-
-} ParseNode;
-
-struct _ParamList;
-
-typedef struct _ParamList
-{
-  ParseNode *node_;
-  struct _ParamList *next_;
-} ParamList;
-// External dependency object type for parser use
-enum RefType
-{
-  REF_REL = 0,
-  REF_PROC,
-  REF_FUNC,
-};
-// External dependency object linked list
-typedef struct _RefObjList
-{
-  enum RefType type_;
-  ParseNode *node_;
-  struct _RefObjList *next_;
-} RefObjList;
-// Parse the attribute set needed when parsing SQL statements in PL
-typedef struct _PLParseInfo
-{
-  bool is_forbid_pl_fp_;
-  /*for mysql pl*/
-  void *pl_ns_; //ObPLBlockNS
-  // Supplied by PL preparation; ordinary SQL parsing has no PL runtime dependency.
-  int (*lookup_symbol_)(const void *, const char *, size_t, int64_t *);
-  RefObjList *ref_object_nodes_; // dependency object list head
-  RefObjList *tail_ref_object_node_; // tail of dependency object list
-} PLParseInfo;
 // Discuss with @Ruidian, the definition here will be changed to dynamic later, define 128 for now
 #define MAX_QUESTION_MARK 128
 
@@ -224,8 +81,6 @@ typedef struct ObParseResult
   ObQuestionMarkCtx question_mark_ctx_;
   ObSQLMode sql_mode_;
   const struct ObCharsetInfo *charset_info_; //client charset
-  ParamList *param_nodes_;
-  ParamList *tail_param_node_;
   struct {
     uint32_t is_fp_                            : 1;
     uint32_t is_ignore_hint_                   : 1;//used for outline
@@ -238,27 +93,17 @@ typedef struct ObParseResult
     uint32_t is_method_opt_parser_             : 1;
   };
 
-  ParseNode *result_tree_;
   char *error_msg_;
   int start_col_;
   int end_col_;
   int line_;
   char *no_param_sql_;
   int no_param_sql_len_;
-  /*for pl*/
-  PLParseInfo pl_parse_info_;
 
 } ParseResult;
 
 extern char *str_tolower(char *buff, int64_t len);
 extern char *str_toupper(char *buff, int64_t len);
-
-extern ParseNode *new_node(void *malloc_pool, ObItemType type, int num);
-extern ParseNode *new_non_terminal_node(void *malloc_pool, ObItemType node_tag, int num, ...);
-extern ParseNode *new_terminal_node(void *malloc_pool, ObItemType type);
-
-extern int check_mem_status();
-extern int try_check_mem_status(int64_t check_try_times);
 
 /// convert x'42ab' to binary string
 void ob_parse_binary(const char *src, int64_t len, char* dest);
@@ -269,36 +114,8 @@ int64_t ob_parse_binary_len(int64_t len);
 void ob_parse_bit_string(const char* src, int64_t len, char* dest);
 int64_t ob_parse_bit_string_len(int64_t len);
 
-// calculate hash value of syntax tree recursively
-// @param [in] node         syntax tree root
-// @return                  hash value of syntax tree
-extern uint64_t parsenode_hash(const ParseNode *node, int *ret);
-// compare syntax tree recursively
-// @param [in] node1        first syntax tree
-// @param [in] node2        second syntax tree
-extern bool parsenode_equal(const ParseNode *node1, const ParseNode *node2, int *ret);
-
 extern int64_t get_question_mark(ObQuestionMarkCtx *ctx, void *malloc_pool, const char *name);
 
-#define OB_NODE_CAST_TYPE_IDX 0
-#define OB_NODE_CAST_COLL_IDX 1
-#define OB_NODE_CAST_N_PREC_IDX 2
-#define OB_NODE_CAST_N_SCALE_IDX 3
-#define OB_NODE_CAST_NUMBER_TYPE_IDX 1
-#define OB_NODE_CAST_C_LEN_IDX 1
-#define OB_NODE_CAST_GEO_TYPE_IDX 1
-#define OB_NODE_CAST_CS_LEVEL_IDX 2
-
-typedef enum ObNumberParseType
-{
-  NPT_PERC_SCALE = 0,
-  NPT_STAR_SCALE,
-  NPT_STAR,
-  NPT_PERC,
-  NPT_EMPTY,
-} ObNumberParseType;
-
-bool check_stack_overflow_c();
 // Find the interface for external pl variables, get the index of the variable in the external symbol table, defined in ob_pl_stmt.cpp
 int lookup_pl_symbol(const void *pl_ns, const char *symbol, size_t len, int64_t *find_idx);
 
