@@ -936,8 +936,8 @@ peg::parser! {
         rule query_term(level: usize) -> Select
             = "(" _ value:query_expression(level+1) ")" _ { Select { parenthesized:true,..value } }
             / select_query(level) / values_query(level)
-        rule select_into() -> Node = kw("into") variables:((user_variable() / name:ident() { Node::name(name) }) ++ ("," _)) {
-            Node::new(Kind::IntoVariables,vec![Node::new(Kind::IntoVariableList,variables)])
+        rule select_into() -> Node = start:position!() kw("into") variables:((user_variable() / name:ident() { Node::name(name) }) ++ ("," _)) end:position!() {
+            Node::new(Kind::IntoVariables,vec![Node::new(Kind::IntoVariableList,variables)]).at(start,end)
         }
         rule select_option() -> Node
             = kind:((kw("distinct") / kw("distinctrow") / kw("unique")) { Kind::Distinct } / kw("all") { Kind::All }

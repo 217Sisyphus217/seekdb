@@ -23,6 +23,9 @@
 #include "parse_node.h"
 #include "ob_sql_parser.h"
 #include "rust/sql_parser.h"
+#include "lib/container/ob_se_array.h"
+#include "lib/string/ob_sql_string.h"
+#include <algorithm>
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 
@@ -837,95 +840,172 @@ int ObParser::parse(const ObString &query,
                           is_parse_dynamic_sql));
 }
 
+namespace {
+enum class RewriteKind { Parameter, TriggerColumn, Alias, Into };
+
+struct SqlRewrite {
+  int64_t start;
+  int64_t end;
+  ParseNode *node;
+  RewriteKind kind;
+  int64_t parameter = -1;
+};
+
+int record_reference(ParseResult &result, ParseNode *node, RefType type)
+{
+  auto *reference = static_cast<RefObjList *>(parse_malloc(sizeof(RefObjList), result.malloc_pool_));
+  if (reference == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+  reference->node_ = node;
+  reference->type_ = type;
+  if (result.pl_parse_info_.tail_ref_object_node_ == nullptr) result.pl_parse_info_.ref_object_nodes_ = reference;
+  else result.pl_parse_info_.tail_ref_object_node_->next_ = reference;
+  result.pl_parse_info_.tail_ref_object_node_ = reference;
+  return OB_SUCCESS;
+}
+
+int collect_pl_rewrites(ParseNode *node, ParseResult &result, ObIArray<SqlRewrite> &rewrites,
+                        bool diagnostics = false)
+{
+  if (node == nullptr) return OB_SUCCESS;
+  int ret = OB_SUCCESS;
+  if (node->type_ == T_INTO_VARIABLES) {
+    return rewrites.push_back({node->sql_str_off_, node->stmt_loc_.last_column_, node, RewriteKind::Into});
+  }
+  if (node->type_ == T_OBJ_ACCESS_REF && node->num_child_ == 2
+      && node->children_[0] != nullptr && node->children_[0]->type_ == T_IDENT
+      && node->children_[1] != nullptr && node->children_[1]->type_ == T_OBJ_ACCESS_REF
+      && node->children_[1]->children_[0] != nullptr
+      && node->children_[1]->children_[0]->type_ == T_FUN_SYS) {
+    ParseNode *function = node->children_[1]->children_[0];
+    ParseNode *reference = new_node(result.malloc_pool_, T_FUN_UDF, 4);
+    if (reference == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+    reference->children_[0] = function->children_[0];
+    reference->children_[1] = function->num_child_ > 1 ? function->children_[1] : nullptr;
+    reference->children_[2] = node->children_[0];
+    if (OB_FAIL(record_reference(result, reference, REF_FUNC))) return ret;
+    return collect_pl_rewrites(reference->children_[1], result, rewrites);
+  }
+  for (int i = 0; i < node->num_child_; ++i) {
+    if (OB_FAIL(collect_pl_rewrites(node->children_[i], result, rewrites,
+                                   diagnostics || node->type_ == T_DIAGNOSTICS))) return ret;
+  }
+  if (node->type_ == T_RELATION_FACTOR) {
+    return record_reference(result, node, REF_REL);
+  }
+  if (node->type_ == T_FUN_SYS || node->type_ == T_FUN_UDF) {
+    return record_reference(result, node, REF_FUNC);
+  }
+  if (node->type_ == T_JSON_TABLE_EXPRESSION) result.pl_parse_info_.is_forbid_pl_fp_ = true;
+  if (node->type_ == T_COLUMN_REF || (diagnostics && node->type_ == T_IDENT)) {
+    ParseNode *name = node->type_ == T_IDENT ? node : node->children_[2];
+    if (name->type_ == T_STAR) return OB_SUCCESS;
+    ParseNode *qualifier = node->type_ == T_IDENT ? nullptr : node->children_[1];
+    if (qualifier != nullptr) {
+      const ObString prefix(qualifier->str_len_, qualifier->str_value_);
+      if (node->children_[0] == nullptr && (prefix.case_compare("NEW") == 0 || prefix.case_compare("OLD") == 0)) {
+        ret = rewrites.push_back({node->sql_str_off_, node->stmt_loc_.last_column_, node, RewriteKind::TriggerColumn});
+      }
+    } else {
+      int64_t parameter = -1;
+      if (OB_FAIL(result.pl_parse_info_.lookup_symbol_(result.pl_parse_info_.pl_ns_,
+                                                       name->str_value_, name->str_len_, &parameter))) return ret;
+      if (parameter != -1) {
+        ret = rewrites.push_back({node->sql_str_off_, node->stmt_loc_.last_column_, node,
+                                  RewriteKind::Parameter, parameter});
+        node->str_value_ = name->str_value_;
+        node->str_len_ = name->str_len_;
+      }
+    }
+  } else if (node->type_ == T_PROJECT_STRING) {
+    const ParseNode *expression = node->children_[0];
+    bool alias = expression->type_ != T_ALIAS && expression->type_ != T_EXPR_WITH_ALIAS
+        && expression->type_ != T_VARCHAR && expression->type_ != T_STAR;
+    if (alias && expression->type_ == T_COLUMN_REF) {
+      int64_t parameter = -1;
+      if (expression->children_[2]->type_ != T_STAR) {
+        if (OB_FAIL(result.pl_parse_info_.lookup_symbol_(result.pl_parse_info_.pl_ns_,
+                                                         node->str_value_, node->str_len_, &parameter))) return ret;
+      }
+      alias = parameter != -1;
+    }
+    if (alias) {
+      ret = rewrites.push_back({node->stmt_loc_.last_column_, node->stmt_loc_.last_column_, node, RewriteKind::Alias});
+    }
+  }
+  return ret;
+}
+
+int bind_pl_sql(ParseResult &result)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<SqlRewrite, 16> rewrites;
+  if (result.pl_parse_info_.pl_ns_ != nullptr
+      && OB_FAIL(collect_pl_rewrites(result.result_tree_, result, rewrites))) return ret;
+  if (rewrites.count() > 1) {
+    std::stable_sort(&rewrites.at(0), &rewrites.at(0) + rewrites.count(), [](const SqlRewrite &a, const SqlRewrite &b) {
+      return a.start < b.start;
+    });
+  }
+  ObSqlString output;
+  int64_t offset = 0;
+  for (int64_t i = 0; i < rewrites.count(); ++i) {
+    const auto &rewrite = rewrites.at(i);
+    if (OB_FAIL(output.append(result.input_sql_ + offset, rewrite.start - offset))) return ret;
+    switch (rewrite.kind) {
+      case RewriteKind::Parameter:
+        ret = output.append_fmt(":%ld", rewrite.parameter);
+        break;
+      case RewriteKind::TriggerColumn:
+        ret = output.append_fmt(":%.*s.%.*s",
+            static_cast<int>(rewrite.node->children_[1]->str_len_), rewrite.node->children_[1]->str_value_,
+            static_cast<int>(rewrite.node->children_[2]->str_len_), rewrite.node->children_[2]->str_value_);
+        break;
+      case RewriteKind::Alias:
+        if (OB_FAIL(output.append(" AS `"))) return ret;
+        for (int64_t i = 0; i < rewrite.node->str_len_; ++i) {
+          if (OB_FAIL(output.append(rewrite.node->str_value_ + i, 1))) return ret;
+          if (rewrite.node->str_value_[i] == '`' && OB_FAIL(output.append("`"))) return ret;
+        }
+        ret = output.append("` ");
+        break;
+      case RewriteKind::Into:
+        break;
+    }
+    if (OB_FAIL(ret)) return ret;
+    if (rewrite.kind == RewriteKind::Parameter || rewrite.kind == RewriteKind::TriggerColumn) {
+      auto *parameter = static_cast<ParamList *>(parse_malloc(sizeof(ParamList), result.malloc_pool_));
+      if (parameter == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+      parameter->node_ = rewrite.node;
+      if (result.tail_param_node_ == nullptr) result.param_nodes_ = parameter;
+      else result.tail_param_node_->next_ = parameter;
+      result.tail_param_node_ = parameter;
+    }
+    offset = rewrite.end;
+  }
+  if (OB_FAIL(output.append(result.input_sql_ + offset, result.input_sql_len_ - offset))) return ret;
+  result.no_param_sql_ = parse_strndup(output.ptr(), output.length(), result.malloc_pool_);
+  if (result.no_param_sql_ == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
+  result.no_param_sql_len_ = output.length();
+  result.no_param_sql_buf_len_ = output.length() + 1;
+  return OB_SUCCESS;
+}
+}
+
 // Through parser for prepare interface, for spi_prepare call in mysql mode
 int ObParser::prepare_parse(const ObString &query, void *ns, ParseResult &parse_result)
 {
-  int ret = OB_SUCCESS;
-  // Delete spaces at the end of the SQL statement
-  int64_t len = query.length();
-  while (len > 0 && ISSPACE(query[len - 1])) {
-    --len;
-  }
-  if (len > 0 && '\0' == query[len - 1]) {
-    --len;
-  }
-  // Remove trailing spaces
-  while (len > 0 && ISSPACE(query[len - 1])) {
-    --len;
-  }
-
-  const ObString stmt(len, query.ptr());
-
-  memset(&parse_result, 0, sizeof(ParseResult));
+  int64_t length = query.length();
+  while (length > 0 && ISSPACE(query[length - 1])) --length;
+  if (length > 0 && query[length - 1] == '\0') --length;
+  while (length > 0 && ISSPACE(query[length - 1])) --length;
+  parse_result = {};
   parse_result.pl_parse_info_.pl_ns_ = ns;
   parse_result.pl_parse_info_.lookup_symbol_ = lookup_pl_symbol;
+  parse_result.pl_parse_info_.is_pl_parse_ = true;
   parse_result.malloc_pool_ = allocator_;
   parse_result.sql_mode_ = sql_mode_;
-  parse_result.pl_parse_info_.is_pl_parse_ = true;
-  parse_result.pl_parse_info_.is_pl_parse_expr_ = false;
-  parse_result.enable_compatible_comment_ = true;
-  char *buf = (char *)parse_malloc(stmt.length() * 2, parse_result.malloc_pool_); // because we need to replace the pl variable with the :num form, we need to expand the memory
-  if (OB_UNLIKELY(NULL == buf)) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("no memory for parser");
-  } else {
-    parse_result.param_nodes_ = NULL;
-    parse_result.tail_param_node_ = NULL;
-    parse_result.no_param_sql_ = buf;
-    parse_result.no_param_sql_buf_len_ = stmt.length() * 2;
-    parse_result.may_bool_value_ = false;
-  }
-
-  if (OB_SUCC(ret)) {
-    ObSQLParser sql_parser(*(ObIAllocator*)(parse_result.malloc_pool_), sql_mode_);
-    if (OB_FAIL(sql_parser.parse(stmt.ptr(), stmt.length(), parse_result))) {
-      LOG_WARN("failed to parse the statement",
-               K(parse_result.yyscan_info_),
-               K(parse_result.result_tree_),
-               K(parse_result.malloc_pool_),
-               "message", parse_result.error_msg_,
-               "start_col", parse_result.start_col_,
-               "end_col", parse_result.end_col_,
-               K(parse_result.line_),
-               K(parse_result.yycolumn_),
-               K(parse_result.yylineno_),
-               K(parse_result.extra_errno_));
-
-      int32_t error_offset = parse_result.start_col_ > 0 ? (parse_result.start_col_ - 1) : 0;
-      int32_t error_length = stmt.empty() ? 0 : get_well_formed_errlen(parse_result.charset_info_,
-                                                    stmt.ptr() + error_offset,
-                                                    stmt.length() - error_offset);
-
-      if (OB_ERR_PARSE_SQL == ret) {
-        LOG_USER_ERROR(OB_ERR_PARSE_SQL, ob_errpkt_strerror(OB_ERR_PARSER_SYNTAX),
-                       error_length,
-                       stmt.empty() ? NULL : stmt.ptr() + error_offset,
-                       parse_result.line_ + 1);
-      } else {
-        // other errors handle outer side.
-      }
-    } else {
-      int req_size = parse_result.no_param_sql_len_ + parse_result.input_sql_len_ - parse_result.pl_parse_info_.last_pl_symbol_pos_;
-      if (parse_result.no_param_sql_buf_len_ < req_size) {
-        int64_t new_buf_length = req_size + 1;
-        char *new_buf = (char *)parse_malloc(new_buf_length, parse_result.malloc_pool_);
-        if (OB_UNLIKELY(NULL == new_buf)) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-          LOG_ERROR("no memory for parser");
-        } else {
-          MEMCPY(new_buf, parse_result.no_param_sql_, parse_result.no_param_sql_len_);
-          parse_result.no_param_sql_ = new_buf;
-          parse_result.no_param_sql_buf_len_ = new_buf_length;
-        }
-      }
-      if (OB_SUCC(ret)) {
-        memmove(parse_result.no_param_sql_ + parse_result.no_param_sql_len_,
-              parse_result.input_sql_ + parse_result.pl_parse_info_.last_pl_symbol_pos_,
-              parse_result.input_sql_len_ - parse_result.pl_parse_info_.last_pl_symbol_pos_);
-        parse_result.no_param_sql_len_ += parse_result.input_sql_len_ - parse_result.pl_parse_info_.last_pl_symbol_pos_;
-      }
-    }
-  }
+  int ret = parse_rust_sql(ObString(length, query.ptr()), parse_result);
+  if (OB_SUCC(ret)) ret = bind_pl_sql(parse_result);
   return ret;
 }
 // Parse trace_id from the comment at the beginning of the line

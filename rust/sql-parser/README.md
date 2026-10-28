@@ -13,7 +13,8 @@
 统计采集的 `METHOD_OPT`（`FOR ALL COLUMNS SIZE AUTO` 等）也由 Rust 解析。
 全文检索布尔表达式由 `src/fts.rs` 解析，通过同一个 CXX 桥接接口供 C++ 检索模块使用。
 多语句切分复用同一套 Rust 语法，存储过程和全文检索的 Bison/Flex 实现已删除。
-快速参数化和 PL 内部 SQL 的变量绑定仍沿用原有实现；旧 SQL 词法处理仍在迁移，最终全量验证尚未完成。
+PL 内部 SQL 也由 Rust 解析，C++ 按语法树绑定过程变量、收集对象依赖和处理 `SELECT INTO`。
+快速参数化及提示过滤中的旧 SQL 词法处理仍在迁移，最终全量验证尚未完成。
 
 已接入基本 SELECT、表和列别名、DISTINCT、表达式、WHERE、ORDER BY、LIMIT，
 以及 INNER／LEFT／RIGHT／FULL／CROSS JOIN、ON／USING、普通函数调用、
