@@ -45,6 +45,8 @@ SHOW CHARSET／COLLATION、SET TRANSACTION 和 MAJOR／MINOR FREEZE。
 支持 POSITION／TRIM／WEIGHT_STRING、IS UNKNOWN、GROUP BY 排序和 ROLLUP、ENUM／SET，
 以及 UTF-8／二进制字符串前缀、相邻字符串、列 ON UPDATE、表字符集转换和 TABLE(GENERATOR(...))。
 支持外键声明、增删约束和引用动作，以及 STRING、TINY／MEDIUM 文本和二进制大对象类型。
+支持数组、向量、MAP 和稀疏向量类型，数组字面量、lambda、集合聚合与向量距离函数；
+支持 APPROX LIMIT 和查询参数、函数索引、括号 JOIN，以及标准差、方差和位聚合。
 系统视图及统计采样支持 CAST 的 IGNORE 和 CHARSET 选项；未知优化器 hint 按原有规则忽略。
 这些语句与 SELECT 共用 `ParseTree` 接口。
 

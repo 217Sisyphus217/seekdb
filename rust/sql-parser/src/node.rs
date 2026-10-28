@@ -32,6 +32,8 @@ pub(crate) struct Select {
     pub projection: Vec<Node>,
     pub into: Option<Node>,
     pub into_end: Option<Node>,
+    pub approximate: Option<Node>,
+    pub vector_parameters: Option<Node>,
     pub from: Vec<Node>,
     pub filter: Option<Node>,
     pub group_by: Option<Node>,
@@ -70,7 +72,18 @@ impl Select {
         limit: Option<Node>,
         lock: Option<Node>,
         into: Option<Node>,
+        approximate: Option<Node>,
+        vector_parameters: Option<Node>,
     ) -> Result<Self, &'static str> {
+        if approximate.is_some()
+            && (order.is_empty()
+                || limit.is_none()
+                || self.from.is_empty()
+                || self.parenthesized
+                || self.set.is_some())
+        {
+            return Err("APPROX requires a simple table query with ORDER BY and LIMIT");
+        }
         if self.parenthesized && (!order.is_empty() || limit.is_some()) {
             self = Self {
                 projection: vec![Node::new(
@@ -87,6 +100,8 @@ impl Select {
         self.limit = limit.or(self.limit);
         self.lock = lock.or(self.lock);
         self.into_end = into.or(self.into_end);
+        self.approximate = approximate.or(self.approximate);
+        self.vector_parameters = vector_parameters.or(self.vector_parameters);
         Ok(self)
     }
 }
@@ -220,7 +235,8 @@ impl Node {
                 .any(|parameter| !matches!(parameter.kind, Kind::Int | Kind::Uint))
             || (name == "double" && parameters.len() == 1)
             || (matches!(name, "varchar" | "varbinary") && parameters.is_empty())
-            || (matches!(name, "bool" | "boolean" | "date" | "json") && !parameters.is_empty())
+            || (matches!(name, "bool" | "boolean" | "date" | "json" | "geometry")
+                && !parameters.is_empty())
             || (matches!(
                 name,
                 "tinytext"
@@ -337,7 +353,7 @@ impl Node {
                     start,
                     end: start + 6,
                 }],
-                false,
+                None,
                 vec![value, target],
                 None,
                 start,
@@ -367,14 +383,14 @@ impl Node {
 
     pub fn call(
         mut name: Vec<Name>,
-        distinct: bool,
+        modifier: Option<Kind>,
         arguments: Vec<Self>,
         window: Option<Self>,
         start: usize,
         end: usize,
     ) -> Result<Self, &'static str> {
         if name.len() > 1 {
-            if name.len() > 3 || distinct || window.is_some() {
+            if name.len() > 3 || modifier.is_some() || window.is_some() {
                 return Err("qualified function call");
             }
             let function = Self::new(
@@ -391,6 +407,7 @@ impl Node {
             return access.expression(start, end);
         }
         let mut name = name.pop().unwrap();
+        let distinct = modifier == Some(Kind::Distinct);
         let function = if !name.quoted {
             name.text.to_ascii_lowercase()
         } else {
@@ -418,7 +435,7 @@ impl Node {
             return Err("date function syntax");
         }
         if function == "mod" {
-            if window.is_some() || distinct || arguments.len() != 2 {
+            if window.is_some() || modifier.is_some() || arguments.len() != 2 {
                 return Err("MOD requires two arguments");
             }
             return Self::new(Kind::Binary, arguments)
@@ -432,6 +449,15 @@ impl Node {
             "min" => Kind::Min,
             "max" => Kind::Max,
             "avg" => Kind::Avg,
+            "std" | "stddev" => Kind::Stddev,
+            "stddev_pop" => Kind::StddevPop,
+            "stddev_samp" => Kind::StddevSamp,
+            "variance" => Kind::Variance,
+            "var_pop" => Kind::VarPop,
+            "var_samp" => Kind::VarSamp,
+            "bit_and" => Kind::BitAnd,
+            "bit_or" => Kind::BitOr,
+            "bit_xor" => Kind::BitXor,
             "approx_count_distinct" => Kind::ApproxCountDistinct,
             "approx_count_distinct_synopsis" => Kind::ApproxCountDistinctSynopsis,
             "approx_count_distinct_synopsis_merge" => Kind::ApproxCountDistinctSynopsisMerge,
@@ -489,8 +515,21 @@ impl Node {
             Kind::ApproxCountDistinct | Kind::ApproxCountDistinctSynopsis
         );
         let histogram = matches!(kind, Kind::TopFreHist | Kind::HybridHist);
+        let non_distinct_aggregate = matches!(
+            kind,
+            Kind::Stddev
+                | Kind::StddevPop
+                | Kind::StddevSamp
+                | Kind::Variance
+                | Kind::VarPop
+                | Kind::VarSamp
+                | Kind::BitAnd
+                | Kind::BitOr
+                | Kind::BitXor
+        );
         let aggregate = approximate
             || histogram
+            || non_distinct_aggregate
             || matches!(
                 kind,
                 Kind::Count
@@ -523,16 +562,17 @@ impl Node {
         if star && !count_star {
             return Err("only COUNT(*) accepts a wildcard argument");
         }
-        if distinct
+        if modifier.is_some()
             && (!aggregate
                 || approximate
                 || histogram
+                || distinct && non_distinct_aggregate
                 || matches!(
                     kind,
                     Kind::ApproxCountDistinctSynopsisMerge | Kind::SumOpnsize
                 ))
         {
-            return Err("DISTINCT requires an aggregate function");
+            return Err("invalid aggregate modifier");
         }
         let argument_count = match kind {
             Kind::TopFreHist => 4,
@@ -683,6 +723,8 @@ impl Node {
                 query.lock.unwrap_or_else(Self::missing),
                 Self::list(Kind::Hints, query.hints),
                 Self::optional(query.into_end),
+                Self::optional(query.approximate),
+                Self::optional(query.vector_parameters),
             ],
         )
         .expression(0, 0)

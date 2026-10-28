@@ -124,6 +124,8 @@ ObItemType node_type(const peg::Node &node)
     case Kind::StoreFormat: return T_STORE_FORMAT;
     case Kind::TableAutoIncrement: return T_AUTO_INCREMENT;
     case Kind::BlockSize: return T_BLOCK_SIZE;
+    case Kind::TabletSize: return T_TABLET_SIZE;
+    case Kind::PctFree: return T_PCTFREE;
     case Kind::Index: return T_INDEX;
     case Kind::IndexColumns: return T_INDEX_COLUMN_LIST;
     case Kind::IndexColumn: return T_SORT_COLUMN_KEY;
@@ -153,6 +155,19 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Double: return T_DOUBLE;
     case Kind::String: return T_VARCHAR;
     case Kind::StringColumnName: return T_CONCAT_STRING;
+    case Kind::CollectionType: return T_COLLECTION;
+    case Kind::ArrayLiteral: return T_FUN_SYS_ARRAY;
+    case Kind::MapLiteral: return T_FUN_SYS_MAP;
+    case Kind::ArrayAgg: return T_FUNC_SYS_ARRAY_AGG;
+    case Kind::ArrayMap: return T_FUNC_SYS_ARRAY_MAP;
+    case Kind::ArrayFilter: return T_FUNC_SYS_ARRAY_FILTER;
+    case Kind::ArrayFirst: return T_FUNC_SYS_ARRAY_FIRST;
+    case Kind::ArraySortBy: return T_FUNC_SYS_ARRAY_SORTBY;
+    case Kind::Lambda: return T_FUNC_SYS_LAMBDA;
+    case Kind::VectorDistance: return T_FUN_SYS_VECTOR_DISTANCE;
+    case Kind::VectorSimilarity: return T_FUN_SYS_VECTOR_SIMILARITY;
+    case Kind::Approximate: return T_APPROX;
+    case Kind::VectorParameters: return T_VEC_INDEX_PARAMS;
     case Kind::CharsetLiteral: return T_VARCHAR;
     case Kind::CharsetName: return T_CHAR_CHARSET;
     case Kind::ConvertTableCharset: return T_CONVERT_TO_CHARACTER;
@@ -196,6 +211,15 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Min: return T_FUN_MIN;
     case Kind::Max: return T_FUN_MAX;
     case Kind::Avg: return T_FUN_AVG;
+    case Kind::Stddev: return T_FUN_STDDEV;
+    case Kind::StddevPop: return T_FUN_STDDEV_POP;
+    case Kind::StddevSamp: return T_FUN_STDDEV_SAMP;
+    case Kind::Variance: return T_FUN_VARIANCE;
+    case Kind::VarPop: return T_FUN_VAR_POP;
+    case Kind::VarSamp: return T_FUN_VAR_SAMP;
+    case Kind::BitAnd: return T_FUN_SYS_BIT_AND;
+    case Kind::BitOr: return T_FUN_SYS_BIT_OR;
+    case Kind::BitXor: return T_FUN_SYS_BIT_XOR;
     case Kind::All: return T_ALL;
     case Kind::Any: return T_ANY;
     case Kind::Exists: return T_OP_EXISTS;
@@ -674,6 +698,8 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   else if (name == "date") type = T_DATE;
   else if (name == "json") type = T_JSON;
   else if (name == "year") type = T_YEAR;
+  else if (name == "bit") type = T_BIT;
+  else if (name == "geometry") type = T_GEOMETRY;
   if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
   const bool integer = type == T_TINYINT || type == T_SMALLINT || type == T_MEDIUMINT
       || type == T_INT32 || type == T_INT;
@@ -717,6 +743,8 @@ int build_type(const peg::Node &source, void *pool, ParseNode *&node)
   } else if (string) {
     node->int32_values_[0] = size == 0 && type == T_CHAR ? 1 : precision;
     node->int32_values_[1] = name == "string" ? 2 : binary;
+  } else if (type == T_BIT) {
+    node->int16_values_[0] = size == 0 ? 1 : short_precision;
   } else if (integer) {
     node->int16_values_[0] = size == 0 ? -1 : short_precision;
     if (name == "bool" || name == "boolean") {
@@ -767,7 +795,8 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
   const int select_slots[] = {PARSE_SELECT_DISTINCT, PARSE_SELECT_SELECT, PARSE_SELECT_INTO, PARSE_SELECT_FROM,
                              PARSE_SELECT_WHERE, PARSE_SELECT_DYNAMIC_GROUP, PARSE_SELECT_DYNAMIC_HAVING,
                              PARSE_SELECT_NAMED_WINDOWS, PARSE_SELECT_SET, PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT,
-                             PARSE_SELECT_FOR_UPD, PARSE_SELECT_HINTS, PARSE_SELECT_INTO_EXTRA};
+                             PARSE_SELECT_FOR_UPD, PARSE_SELECT_HINTS, PARSE_SELECT_INTO_EXTRA,
+                             PARSE_SELECT_APPROX, PARSE_SELECT_VECTOR_INDEX_PARAMS};
   for (size_t child = 0; child < source.children.size(); ++child) {
     const size_t slot = type == T_SELECT ? select_slots[child] : child;
     const int ret = build_node(sql, expression_sql, source.children[child], parameters, pool, node->children_[slot], pl);
@@ -781,8 +810,9 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
   }
   if (type == T_CREATE_VIEW) node->reserved_ = source.value;
   if (source.kind == Kind::StringConcat) node->children_[0]->reserved_ = 1;
-  if ((type == T_COLUMN_DEFINITION && node->num_child_ == 7) || (type == T_CHECK_CONSTRAINT && node->num_child_ == 3)) {
-    const size_t slot = type == T_COLUMN_DEFINITION ? 3 : 1;
+  if ((type == T_COLUMN_DEFINITION && node->num_child_ == 7) || (type == T_CHECK_CONSTRAINT && node->num_child_ == 3)
+      || (type == T_SORT_COLUMN_KEY && source.children[0].kind != Kind::Ident)) {
+    const size_t slot = type == T_COLUMN_DEFINITION ? 3 : type == T_CHECK_CONSTRAINT ? 1 : 0;
     const auto &expression = source.children[slot];
     ParseNode *child = node->children_[slot];
     child->str_len_ = expression.end - expression.start;
@@ -826,6 +856,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
       || source.kind == Kind::ObjectAccess || source.kind == Kind::KeyPartition || source.kind == Kind::HashPartition
       || source.kind == Kind::ListPartition || source.kind == Kind::ListColumnsPartition
       || source.kind == Kind::RangePartition || source.kind == Kind::RangeColumnsPartition
+      || source.kind == Kind::VectorParameters
       || (source.kind == Kind::DateUnit && raw_length != 0)) {
     text = raw;
     length = raw_length;

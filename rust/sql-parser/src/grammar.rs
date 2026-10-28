@@ -280,11 +280,12 @@ peg::parser! {
             Node::new(Kind::UserVariable, vec![]).text(name.text).at(start,end)
         }
         rule atom(level: usize) -> Node
-            = depth(level) value:date_function(level+1) { value }
+            = depth(level) value:collection_expression(level+1) { value }
+            / depth(level) value:date_function(level+1) { value }
             / depth(level) value:string_function(level+1) { value }
             / depth(level) start:position!() value:(kw("cast") "(" _ value:expr(level+1) kw("as") target:cast_type() ignore:kw("ignore")? { (value,target,ignore.is_some()) }
                 / kw("convert") "(" _ value:expr(level+1) "," _ target:cast_type() { (value,target,false) }) ")" end:position!() _ {?
-                Ok(Node::call(vec![Name { text:"cast".into(),quoted:false,start,end:start+4 }],false,vec![value.0,value.1],None,start,end)?.value(u64::from(value.2)))
+                Ok(Node::call(vec![Name { text:"cast".into(),quoted:false,start,end:start+4 }],None,vec![value.0,value.1],None,start,end)?.value(u64::from(value.2)))
             }
             / depth(level) start:position!() kw("case") operand:expr(level+1)?
                 branches:(kw("when") condition:expr(level+1) kw("then") value:expr(level+1)
@@ -330,22 +331,48 @@ peg::parser! {
                 }
             / charset_literal() / temporal_literal() / binary_literal() / number() / string_expression() / bool_null() / parameter()
             / depth(level) start:position!() !(['x'|'X'] "'" hex_digit()* "'") parts:expression_name() tail:("." _ "*" end:position!() _ { (None, end) }
-                / enabled(parts.len()!=1 || parts[0].quoted || !["row","trim","position","weight_string"].iter().any(|name| parts[0].text.eq_ignore_ascii_case(name)))
-                    "(" _ distinct:kw("distinct")? args:expr_list(level+1)? ")" close:position!() _
+                / enabled(parts.len()!=1 || parts[0].quoted || !["row","trim","position","weight_string","array","map","array_agg",
+                    "array_map","array_filter","array_first","array_sortby","vector_distance","vector_similarity"].iter().any(|name| parts[0].text.eq_ignore_ascii_case(name)))
+                    "(" _ modifier:((kw("distinct") / kw("unique")) { Kind::Distinct } / kw("all") { Kind::All })? args:expr_list(level+1)? ")" close:position!() _
                     window:(kw("over") value:window(level+1) { value })?
-                    { let end=window.as_ref().map_or(close,|value| value.end); (Some((distinct.is_some(), args.unwrap_or_default(),window)), end) })?
+                    { let end=window.as_ref().map_or(close,|value| value.end); (Some((modifier, args.unwrap_or_default(),window)), end) })?
                 {? match tail {
                     None => {
                         let end=parts.last().unwrap().end;
                         let keyword_function=parts.len()==1 && !parts[0].quoted && ["current_timestamp","localtime","localtimestamp",
                             "current_date","current_time","current_user","utc_timestamp","utc_date","utc_time"]
                             .iter().any(|name| parts[0].text.eq_ignore_ascii_case(name));
-                        if keyword_function { Node::call(parts,false,vec![],None,start,end) }
+                        if keyword_function { Node::call(parts,None,vec![],None,start,end) }
                         else { Node::column(parts,false,start,end) }
                     },
                     Some((None, end)) => Node::column(parts, true, start, end),
-                    Some((Some((distinct, arguments, window)), end)) => Node::call(parts, distinct, arguments, window, start, end),
+                    Some((Some((modifier, arguments, window)), end)) => Node::call(parts, modifier, arguments, window, start, end),
                 } }
+        rule lambda(level: usize) -> Node = parameters:(name:ident() { vec![name] }
+                / "(" _ names:(ident() ++ ("," _)) ")" _ { names }) "->" _ value:expr(level) {
+                Node::new(Kind::Lambda,vec![Node::new(Kind::ExprList,parameters.into_iter().map(Node::name).collect()),value])
+            }
+        rule vector_metric() -> Node = value:(kw("cosine") { 0 } / kw("dot") { 1 } / kw("euclidean") { 2 } / kw("manhattan") { 3 }) {
+            Node::new(Kind::HiddenInt,vec![]).value(value)
+        }
+        rule collection_expression(level: usize) -> Node = start:position!() value:(
+                "[" _ args:expr_list(level) "]" { Node::new(Kind::ArrayLiteral,vec![Node::new(Kind::ExprList,args)]) }
+                / kind:(kw("array") { Kind::ArrayLiteral } / kw("map") { Kind::MapLiteral })
+                    "(" _ args:expr_list(level) ")" { Node::new(kind,vec![Node::new(Kind::ExprList,args)]) }
+                / kw("array_agg") "(" _ distinct:kw("distinct")? value:expr(level)
+                    order:(kw("order") kw("by") keys:(order_item(level) ++ ("," _)) { keys })? ")" {
+                    let mut args=vec![if distinct.is_some() { Node::new(Kind::Distinct,vec![]) } else { Node::missing() },value];
+                    if let Some(keys)=order { args.push(Node::order_clause(keys)); }
+                    Node::new(Kind::ArrayAgg,args)
+                }
+                / kind:(kw("array_map") { Kind::ArrayMap } / kw("array_filter") { Kind::ArrayFilter }
+                    / kw("array_first") { Kind::ArrayFirst } / kw("array_sortby") { Kind::ArraySortBy })
+                    "(" _ function:lambda(level) "," _ args:expr_list(level) ")" { Node::new(kind,vec![function,Node::new(Kind::ExprList,args)]) }
+                / kind:(kw("vector_distance") { Kind::VectorDistance } / kw("vector_similarity") { Kind::VectorSimilarity })
+                    "(" _ left:expr(level) "," _ right:expr(level) metric:("," _ value:vector_metric() { value })? ")" {
+                    let mut args=vec![left,right];args.extend(metric);Node::new(kind,args)
+                }
+            ) end:position!() _ {? value.expression(start,end) }
         rule charset_literal() -> Node = charset:((kw("_utf8") / kw("_utf8mb4") / kw("_utf8mb3")) { "utf8mb4" } / kw("_binary") { "binary" })
             value:(string() / binary_literal()) {
                 let (start,end)=(value.start,value.end);
@@ -509,6 +536,7 @@ peg::parser! {
                 table.value=u64::from(lateral.is_some());
                 Ok(table)
             }
+            / depth(level) "(" _ value:table(level+1) ")" _ { value.value(1) }
         rule snapshot(level: usize) -> Node = kw("as") kw("of") kw("snapshot") value:expr(level) {
             Node::new(Kind::Snapshot,vec![value,Node::new(Kind::Ident,vec![])])
         }
@@ -785,9 +813,18 @@ peg::parser! {
         rule query_expression(level: usize) -> Select = depth(level) first:query_term(level)
             rest:((kind:set_operator() right:query_term(level) { (kind,right) })*)
             order:(kw("order") kw("by") values:(order_item(level) ++ ("," _)) { values })?
-            limit:limit()? lock:lock()? into:select_into()? {?
+            approximate:((kw("approx") / kw("approximate")) { Node::new(Kind::Approximate,vec![]) })?
+            limit:limit()? parameters:(enabled(approximate.is_some()) value:vector_parameters() { value })? lock:lock()? into:select_into()? {?
                 let value=rest.into_iter().try_fold(first,|left,(kind,right)| left.combine(kind,right))?;
-                value.finish(order.unwrap_or_default(),limit,lock,into)
+                value.finish(order.unwrap_or_default(),limit,lock,into,approximate,parameters)
+            }
+        rule vector_parameter_value() -> Node
+            = value:number() {? if value.kind==Kind::Double { Err("decimal vector query parameter") } else { Ok(Node { kind:Kind::Number,..value }) } }
+            / value:bool_null() {? if value.kind==Kind::Bool { Ok(value) } else { Err("boolean vector query parameter") } }
+            / name:ident() { Node::name(name) }
+        rule vector_parameters() -> Node = kw("parameters") "(" _ start:position!()
+            values:((name:ident() "=" _ value:vector_parameter_value() { vec![Node::name(name),value] }) ++ ("," _)) end:position!() ")" _ {
+                Node::new(Kind::VectorParameters,values.into_iter().flatten().collect()).at(start,end)
             }
         rule query_term(level: usize) -> Select
             = "(" _ value:query_expression(level+1) ")" _ { Select { parenthesized:true,..value } }
@@ -890,6 +927,7 @@ peg::parser! {
             / kw("varbinary") { "varbinary" } / kw("binary") { "binary" }
             / kw("datetime") { "datetime" } / kw("timestamp") { "timestamp" }
             / kw("time") { "time" } / kw("date") { "date" } / kw("year") { "year" } / kw("json") { "json" }
+            / kw("bit") { "bit" } / kw("geometry") { "geometry" }
         rule type_size() -> Node = start:position!() text:$(['0'..='9']+) !cont() end:position!() _ {? Node::number(text, start, end) }
         rule charset_keyword() = kw("charset") / (kw("character") / kw("char")) kw("set")
         rule cast_type() -> Node = start:position!() name:(kw("signed") kw("integer")? { "signed" }
@@ -907,7 +945,23 @@ peg::parser! {
                 if parameters.len()>max || parameters.iter().any(|value| !matches!(value.kind,Kind::Int|Kind::Uint)) { Err("invalid cast type parameters") }
                 else { parameters.extend(charset);Ok(Node::new(Kind::CastType,parameters).text(name.into()).at(start,end)) }
             }
-        rule data_type() -> Node
+        rule data_type() -> Node = collection_type(0)
+        rule collection_type(level: usize) -> Node = depth(level) start:position!() value:(
+                kw("array") "(" _ value:collection_type(level+1) ")" end:position!() _ {
+                    Node::new(Kind::CollectionType,vec![value]).at(start,end)
+                }
+                / kw("vector") "(" _ length:type_size() ")" end:position!() _ {
+                    Node::new(Kind::CollectionType,vec![length]).value(1).at(start,end)
+                }
+                / kw("map") "(" _ key:collection_type(level+1) "," _ value:collection_type(level+1) ")" end:position!() _ {
+                    Node::new(Kind::CollectionType,vec![key,value]).value(2).at(start,end)
+                }
+                / kw("sparsevector") { Node::new(Kind::CollectionType,vec![]).value(3).at(start,start+12) }
+                / scalar_type()
+            ) dimensions:("[" _ "]" end:position!() _ { end })* {?
+                dimensions.into_iter().try_fold(value,|value,end| Node::new(Kind::CollectionType,vec![value]).expression(start,end))
+            }
+        rule scalar_type() -> Node
             = start:position!() kind:(kw("enum") { Kind::EnumType } / kw("set") { Kind::SetType })
                 "(" _ values:(string() ++ ("," _)) ")" _ binary:(kw("binary") { Node::new(Kind::BinaryAttribute,vec![]).value(1) })?
                 charset:(charset_keyword() value:collation_name() { Node { kind:Kind::Charset,..value } })? end:position!() {
@@ -991,7 +1045,8 @@ peg::parser! {
             = kw("default")? charset_keyword() ("=" _)? value:charset_name() { Node::new(Kind::TableCharset,vec![value]) }
             / kw("default")? kw("collate") ("=" _)? value:collation_name() { Node { kind:Kind::Collation,..value } }
             / kind:(kw("compression") { Kind::Compression } / kw("comment") { Kind::ColumnComment }) ("=" _)? value:string() { Node::new(kind,vec![value]) }
-            / kind:(kw("auto_increment") { Kind::TableAutoIncrement } / kw("block_size") { Kind::BlockSize }) ("=" _)? value:type_size() { Node::new(kind,vec![value]) }
+            / kind:(kw("auto_increment") { Kind::TableAutoIncrement } / kw("block_size") { Kind::BlockSize }
+                / kw("tablet_size") { Kind::TabletSize } / kw("pctfree") { Kind::PctFree }) ("=" _)? value:type_size() { Node::new(kind,vec![value]) }
             / kw("row_format") ("=" _)? value:(kw("redundant") { 1 } / kw("compact") { 2 }
                 / (kw("dynamic") / kw("default")) { 3 } / kw("compressed") { 4 } / kw("condensed") { 5 }) {
                     Node::new(Kind::StoreFormat,vec![Node::new(Kind::HiddenInt,vec![]).value(value)])
@@ -1000,9 +1055,10 @@ peg::parser! {
             = kw("default")? charset_keyword() ("=" _)? value:charset_name() { Node { kind:Kind::Charset,..value } }
             / kw("default")? kw("collate") ("=" _)? value:collation_name() { Node { kind:Kind::Collation,..value } }
         rule index_method() -> Node = kw("using") value:(kw("btree") { Node::missing() } / kw("hash") { Node::new(Kind::UsingHash,vec![]) }) { value }
-        rule index_column() -> Node = name:ident() prefix:("(" _ value:type_size() ")" _ { value })?
+        rule index_column() -> Node = value:(name:ident() prefix:("(" _ value:type_size() ")" _ { value })? { (Node::name(name),Node::optional(prefix)) }
+                / "(" _ start:position!() value:expr(0) end:position!() ")" _ { (value.at(start,end),Node::missing()) })
             direction:(kw("asc") { Kind::Asc } / kw("desc") { Kind::Desc })? {
-                Node::new(Kind::IndexColumn,vec![Node::name(name),Node::optional(prefix),direction.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing)])
+                Node::new(Kind::IndexColumn,vec![value.0,value.1,direction.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing)])
             }
         rule index_option() -> Node
             = global:(kw("global") { true } / kw("local") { false }) {
