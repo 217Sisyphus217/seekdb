@@ -1040,3 +1040,17 @@ void ObParser::free_result(ParseResult &parse_result)
 {
   UNUSED(parse_result);
 }
+
+int ObParser::parse_expression(const ObString &text, const ParseNode *&node, bool is_for_trigger)
+{
+  ParseResult result{};
+  result.malloc_pool_ = allocator_;
+  result.sql_mode_ = sql_mode_;
+  result.charset_info_ = ObCharset::get_charset(charsets4parser_.string_collation_);
+  result.is_expression_ = true;
+  result.is_for_trigger_ = is_for_trigger;
+  node = nullptr;
+  const int ret = parse_rust_sql(text, result);
+  if (OB_SUCCESS == ret) node = result.result_tree_->children_[0];
+  return ret;
+}

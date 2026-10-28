@@ -95,6 +95,8 @@ public:
                     const bool is_parser_dynamic_sql = false);
 
   virtual void free_result(ParseResult &parse_result);
+  int parse_expression(const common::ObString &text, const ParseNode *&node,
+                       bool is_for_trigger = false);
   /**
    * @brief  parse interface for prepare usage
    * @param [in] query      - statement to be parsed

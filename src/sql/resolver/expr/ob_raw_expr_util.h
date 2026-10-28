@@ -227,39 +227,11 @@ private:
 class ObRawExprUtils
 {
 public:
-  /**
-   * make expression from string
-   *
-   * @param expr_str [in] expression string
-   * @param buf_len [in] expression string length
-   * @param allocator [in] allocator used by parser
-   * @param resolve_ctx [in] expression resolver context
-   * @param expr [out] resolved expression
-   * @param columns [out] columns in the expr
-   * @param sys_vars [out] system variables in the expr
-   * @param sub_query_info [out] subqueries in the expr
-   *
-   * @return
-   */
-  static int make_raw_expr_from_str(const char *expr_str, const int64_t buf_len,
-                                    ObExprResolveContext &resolve_ctx,
-                                    ObRawExpr *&expr,
-                                    common::ObIArray<ObQualifiedName> &columns,
-                                    common::ObIArray<ObVarInfo> &sys_vars,
-                                    common::ObIArray<ObSubQueryInfo> *sub_query_info,
-                                    common::ObIArray<ObAggFunRawExpr*> &aggr_exprs,
-                                    common::ObIArray<ObWinFunRawExpr*> &win_exprs,
-                                    common::ObIArray<ObUDFInfo> &udf_info);
   static int parse_default_expr_from_str(const common::ObString &expr_str,
                                          ObCharsets4Parser expr_str_cs_type,
                                          common::ObIAllocator &allocator,
                                          const ParseNode *&node,
                                          bool is_for_trigger = false);
-  static int parse_expr_list_node_from_str(const common::ObString &expr_str,
-                                           ObCharsets4Parser expr_str_cs_type,
-                                           common::ObIAllocator &allocator,
-                                           const ParseNode *&node,
-                                           const ObSQLMode &sql_mode);
   static int parse_expr_node_from_str(const common::ObString &expr_str,
                                       ObCharsets4Parser expr_str_cs_type,
                                       common::ObIAllocator &allocator,

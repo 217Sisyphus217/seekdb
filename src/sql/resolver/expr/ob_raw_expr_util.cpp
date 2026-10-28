@@ -18,7 +18,6 @@
 
 #include "ob_raw_expr_util.h"
 #include "lib/json/ob_json_print_utils.h"
-#include "sql/parser/rust_sql_parser.h"
 #include "sql/engine/expr/ob_expr_to_type.h"
 #include "sql/engine/expr/ob_expr_type_to_str.h"
 #include "sql/engine/expr/ob_expr_column_conv.h"
@@ -1108,197 +1107,12 @@ int ObRawExprUtils::function_alias(ObRawExprFactory &expr_factory, ObSysFunRawEx
   return ret;
 }
 
-int ObRawExprUtils::make_raw_expr_from_str(const char *expr_str,
-                                           const int64_t buf_len,
-                                           ObExprResolveContext &resolve_ctx,
-                                           ObRawExpr *&expr,
-                                           ObIArray<ObQualifiedName> &columns,
-                                           ObIArray<ObVarInfo> &sys_vars,
-                                           ObIArray<ObSubQueryInfo> *sub_query_info,
-                                           ObIArray<ObAggFunRawExpr*> &aggr_exprs,
-                                           ObIArray<ObWinFunRawExpr*> &win_exprs,
-                                           ObIArray<ObUDFInfo> &udf_info)
-{
-  int ret = OB_SUCCESS;
-  ObSqlString sql_str;
-  ParseResult parse_result;
-  ObParser parser(resolve_ctx.expr_factory_.get_allocator(), SMO_DEFAULT);
-  if (OB_ISNULL(expr_str) || OB_ISNULL(sub_query_info)) {
-    ret = OB_INVALID_ARGUMENT;
-    _LOG_WARN("expr_str is %p, sub_query_info = %p", expr_str, sub_query_info);
-  } else if (OB_FAIL(sql_str.append_fmt("SELECT %.*s", static_cast<int>(buf_len), expr_str))) {
-  } else if (OB_FAIL(parser.parse(sql_str.string(), parse_result))) {
-  } else {
-    if (OB_UNLIKELY(OB_LOGGER.get_log_level() >= OB_LOG_LEVEL_DEBUG)) {
-      LOG_DEBUG("", "parser result", SJ(ObParserResultPrintWrapper(*parse_result.result_tree_)));
-    }
-    ParseNode *stmt_node = NULL;
-    ParseNode *select_node = NULL;
-    ParseNode *select_expr_list = NULL;
-    ParseNode *select_expr = NULL;
-    ParseNode *parsed_expr = NULL;
-    stmt_node = parse_result.result_tree_;
-    if (NULL == stmt_node) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("internal arg is not correct", KP(stmt_node));
-    } else if (T_STMT_LIST != stmt_node->type_) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("internal arg is not correct", K(stmt_node->type_));
-    }
-    if (OB_SUCC(ret)) {
-      select_node = stmt_node->children_[0];
-      if (NULL == select_node) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", KP(select_node));
-      } else if (T_SELECT != select_node->type_) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", K(select_node->type_));
-      }
-    }
-    if (OB_SUCC(ret)) {
-      select_expr_list = select_node->children_[PARSE_SELECT_SELECT];
-      if (NULL == select_expr_list) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", KP(select_expr_list));
-      } else if (T_PROJECT_LIST != select_expr_list->type_) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", K(select_expr_list->type_));
-      }
-    }
-    if (OB_SUCC(ret)) {
-      select_expr = select_expr_list->children_[0];
-      if (NULL == select_expr) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", KP(select_expr));
-      } else if (T_PROJECT_STRING != select_expr->type_) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", K(select_expr->type_));
-      }
-    }
-
-    if (OB_SUCC(ret)) {
-      parsed_expr = select_expr->children_[0];
-      if (OB_ISNULL(parsed_expr)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", KP(parsed_expr));
-      }
-    }
-    if (OB_SUCC(ret)) {
-      ObArray<ObOpRawExpr*> op_exprs;
-      ObSEArray<ObUserVarIdentRawExpr*, 1> user_var_exprs;
-      ObArray<ObInListInfo> inlist_infos;
-      ObSEArray<ObMatchFunRawExpr*, 1> match_exprs;
-      ObRawExprResolverImpl expr_resolver(resolve_ctx);
-      // generate raw expr
-      if (OB_FAIL(expr_resolver.resolve(parsed_expr, expr, columns, sys_vars,
-                                        *sub_query_info, aggr_exprs, win_exprs,
-                                        udf_info, op_exprs, user_var_exprs, inlist_infos, match_exprs))) {
-        _LOG_WARN("failed to resolve expr tree, err=%d", ret);
-      } else if (OB_UNLIKELY(!inlist_infos.empty())) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("in expr is not supported here", K(parsed_expr->type_));
-      } else {/* do nothing */}
-    }
-    // destroy syntax tree
-    parser.free_result(parse_result);
-  }
-  return ret;
-}
-
-
 int ObRawExprUtils::parse_default_expr_from_str(const ObString &expr_str,
   ObCharsets4Parser expr_str_cs_type, ObIAllocator &allocator, const ParseNode *&node,
   bool is_for_trigger)
 {
-  int ret = OB_SUCCESS;
-  ParseResult parse_result;
-  ObSQLMode sql_mode = SMO_DEFAULT;
-  MEMSET(&parse_result, 0, sizeof(ParseResult));
-  parse_result.malloc_pool_ = &allocator;
-  parse_result.is_expression_ = true;
-  parse_result.sql_mode_ = sql_mode;
-  parse_result.charset_info_ = ObCharset::get_charset(expr_str_cs_type.string_collation_);
-  parse_result.is_for_trigger_ = is_for_trigger;
-  if (OB_FAIL(parse_rust_sql(expr_str, parse_result))) {
-  } else {
-    if (OB_UNLIKELY(OB_LOGGER.get_log_level() >= OB_LOG_LEVEL_DEBUG)) {
-      LOG_DEBUG("", "parser result", SJ(ObParserResultPrintWrapper(*parse_result.result_tree_)));
-    }
-    ParseNode *expr_node = NULL;
-    if (OB_ISNULL(expr_node = parse_result.result_tree_->children_[0])) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_UNLIKELY(T_DEFAULT != expr_node->type_)
-               || OB_UNLIKELY(1 != expr_node->num_child_)
-               || OB_ISNULL(expr_node->children_)
-               || OB_ISNULL(expr_node->children_[0])) {
-      ret = OB_ERR_UNEXPECTED;
-    } else {
-      node = expr_node->children_[0];
-    }
-  }
-  return ret;
-}
-
-int ObRawExprUtils::parse_expr_list_node_from_str(const ObString &expr_str,
-                                                  ObCharsets4Parser expr_str_cs_type,
-                                                  ObIAllocator &allocator,
-                                                  const ParseNode *&node,
-                                                  const ObSQLMode &sql_mode)
-{
-  int ret = OB_SUCCESS;
-  ObSqlString sql_str;
-  ParseResult parse_result;
-  ObSQLMode inner_sql_mode = SMO_DEFAULT;
-  // in NO_BACKSLASH_ESCAPES mode, the inner sql should also follow the rule of NO_BACKSLASH_ESCAPES
-  bool is_no_backslash_escapes = false;
-  IS_NO_BACKSLASH_ESCAPES(sql_mode, is_no_backslash_escapes);
-  if (is_no_backslash_escapes) {
-    inner_sql_mode = inner_sql_mode | SMO_NO_BACKSLASH_ESCAPES;
-  }
-
-  ObParser parser(allocator, inner_sql_mode, expr_str_cs_type);
-  if (OB_FAIL(sql_str.append_fmt("SELECT %.*s FROM DUAL", expr_str.length(), expr_str.ptr()))) {
-  } else if (OB_FAIL(parser.parse(sql_str.string(), parse_result))) {
-  } else {
-    if (OB_UNLIKELY(OB_LOGGER.get_log_level() >= OB_LOG_LEVEL_DEBUG)) {
-      LOG_DEBUG("", "parser result", SJ(ObParserResultPrintWrapper(*parse_result.result_tree_)));
-    }
-    ParseNode *stmt_node = NULL;
-    ParseNode *select_node = NULL;
-    ParseNode *select_expr_list = NULL;
-    stmt_node = parse_result.result_tree_;
-    if (NULL == stmt_node) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("internal arg is not correct", KP(stmt_node));
-    } else if (T_STMT_LIST != stmt_node->type_) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("internal arg is not correct", K(stmt_node->type_));
-    }
-    if (OB_SUCC(ret)) {
-      select_node = stmt_node->children_[0];
-      if (NULL == select_node) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", KP(select_node));
-      } else if (T_SELECT != select_node->type_) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", K(select_node->type_));
-      }
-    }
-    if (OB_SUCC(ret)) {
-      select_expr_list = select_node->children_[PARSE_SELECT_SELECT];
-      if (NULL == select_expr_list) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", KP(select_expr_list));
-      } else if (T_PROJECT_LIST != select_expr_list->type_) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", K(select_expr_list->type_));
-      }
-    }
-    if (OB_SUCC(ret)) {
-      node = select_expr_list;
-    }
-  }
-  return ret;
+  ObParser parser(allocator, SMO_DEFAULT, expr_str_cs_type);
+  return parser.parse_expression(expr_str, node, is_for_trigger);
 }
 
 int ObRawExprUtils::parse_expr_node_from_str(const ObString &expr_str,
@@ -1307,90 +1121,17 @@ int ObRawExprUtils::parse_expr_node_from_str(const ObString &expr_str,
                                              const ParseNode *&node,
                                              const ObSQLMode &sql_mode)
 {
-  int ret = OB_SUCCESS;
-  const ParseNode *expr_list = NULL;
-  const ParseNode *select_expr = NULL;
-  if (OB_FAIL(parse_expr_list_node_from_str(expr_str, expr_str_cs_type, allocator,
-                                            expr_list, sql_mode))) {
-  } else if (OB_ISNULL(expr_list)){
-    ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("internal arg is not correct", KP(expr_list));
-  } else {
-    select_expr = expr_list->children_[0];
-    if (NULL == select_expr) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("internal arg is not correct", KP(select_expr));
-    } else if (T_PROJECT_STRING != select_expr->type_) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("internal arg is not correct", K(select_expr->type_));
-    } else {
-      node = select_expr->children_[0];
-    }
-  }
-  return ret;
+  const ObSQLMode inner_sql_mode = SMO_DEFAULT | (sql_mode & SMO_NO_BACKSLASH_ESCAPES);
+  ObParser parser(allocator, inner_sql_mode, expr_str_cs_type);
+  return parser.parse_expression(expr_str, node);
 }
 
-int ObRawExprUtils::parse_bool_expr_node_from_str(const common::ObString &expr_str,
-                                                  common::ObIAllocator &allocator,
+int ObRawExprUtils::parse_bool_expr_node_from_str(const ObString &expr_str,
+                                                  ObIAllocator &allocator,
                                                   const ParseNode *&node)
 {
-  int ret = OB_SUCCESS;
-  ObSqlString sql_str;
-  ParseResult parse_result;
-  ObSQLMode sql_mode = SMO_DEFAULT;
-
-  ObParser parser(allocator, sql_mode);
-  if (OB_FAIL(sql_str.append_fmt("SELECT 1 FROM DUAL WHERE %.*s", expr_str.length(), expr_str.ptr()))) {
-  } else if (OB_FAIL(parser.parse(sql_str.string(), parse_result))) {
-  } else {
-    if (OB_UNLIKELY(OB_LOGGER.get_log_level() >= OB_LOG_LEVEL_DEBUG)) {
-      LOG_DEBUG("", "parser result", SJ(ObParserResultPrintWrapper(*parse_result.result_tree_)));
-    }
-    ParseNode *stmt_node = NULL;
-    ParseNode *select_node = NULL;
-    ParseNode *where_node = NULL;
-    ParseNode *expr_node = NULL;
-    stmt_node = parse_result.result_tree_;
-    if (NULL == stmt_node) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("internal arg is not correct", KP(stmt_node));
-    } else if (T_STMT_LIST != stmt_node->type_) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("internal arg is not correct", K(stmt_node->type_));
-    }
-    if (OB_SUCC(ret)) {
-      select_node = stmt_node->children_[0];
-      if (NULL == select_node) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", KP(select_node));
-      } else if (T_SELECT != select_node->type_) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", K(select_node->type_));
-      }
-    }
-    if (OB_SUCC(ret)) {
-      where_node = select_node->children_[PARSE_SELECT_WHERE];
-      if (NULL == where_node) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", KP(where_node));
-      } else if (T_WHERE_CLAUSE != where_node->type_) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", K(where_node->type_));
-      }
-    }
-    if (OB_SUCC(ret)) {
-      expr_node = where_node->children_[0];
-      if (NULL == expr_node) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_ERROR("internal arg is not correct", KP(expr_node));
-      }
-    }
-    if (OB_SUCC(ret)) {
-      node = expr_node;
-    }
-  }
-
-  return ret;
+  ObParser parser(allocator, SMO_DEFAULT);
+  return parser.parse_expression(expr_str, node);
 }
 
 int ObRawExprUtils::build_generated_column_expr(const ObString &expr_str,

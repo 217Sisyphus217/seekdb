@@ -4650,54 +4650,21 @@ int ObDMLResolver::resolve_partition_expr(
   } else if (OB_UNLIKELY(part_str.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    ObSqlString sql_str;
-    ParseResult parse_result;
-    ParseNode *stmt_node = NULL;
-    ParseNode *select_node = NULL;
-    ParseNode *select_expr_list = NULL;
-    ParseNode *select_expr_node = NULL;
-    ParseNode *part_expr_node = NULL;
-    ObSQLMode sql_mode = params_.session_info_->get_sql_mode();
-    // Used by both foreground workers and local management RPC workers.
-    ObParser parser(*allocator_, sql_mode);
+    ObSqlString expression;
+    const ParseNode *part_expr_node = nullptr;
+    ObParser parser(*allocator_, params_.session_info_->get_sql_mode());
     if (PARTITION_FUNC_TYPE_KEY == part_type) {
-      if (OB_FAIL(sql_str.append_fmt("SELECT %s(%.*s) FROM DUAL", N_PART_KEY,
-                                     part_str.length(), part_str.ptr()))) {
-      }
+      ret = expression.append_fmt("%s(%.*s)", N_PART_KEY, part_str.length(), part_str.ptr());
     } else {
-      if (OB_FAIL(sql_str.append_fmt("SELECT (%.*s) FROM DUAL",
-                                            part_str.length(),
-                                            part_str.ptr()))) {
-      }
+      ret = expression.append_fmt("(%.*s)", part_str.length(), part_str.ptr());
     }
-
-    if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(parser.parse(sql_str.string(), parse_result))) {
-      ret = OB_ERR_PARSE_SQL;
-      LOG_WARN("failed to parse partition expression", K(ret), K(sql_str),
-             "error", parse_result.error_msg_, "offset", parse_result.start_col_);
-    } else {
-      if (OB_ISNULL(stmt_node = parse_result.result_tree_) || OB_UNLIKELY(stmt_node->type_ != T_STMT_LIST)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("stmt node is invalid", K(stmt_node));
-      } else if (OB_ISNULL(select_node = stmt_node->children_[0]) || OB_UNLIKELY(select_node->type_ != T_SELECT)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("select node is invalid", K(select_node));
-      } else if (OB_ISNULL(select_expr_list =
-                           select_node->children_[PARSE_SELECT_SELECT]) || OB_UNLIKELY(select_expr_list->type_ != T_PROJECT_LIST)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (OB_ISNULL(select_expr_node = select_expr_list->children_[0])
-                 || OB_UNLIKELY(select_expr_node->type_ != T_PROJECT_STRING)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (OB_ISNULL(part_expr_node = select_expr_node->children_[0])) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("part expr node is invalid", K(part_expr_node));
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(parser.parse_expression(expression.string(), part_expr_node))) {
+        LOG_WARN("failed to parse partition expression", K(ret), K(expression));
       } else if (OB_FAIL(resolve_partition_expr(*part_expr_node, expr, columns))) {
       } else if (OB_ISNULL(expr)) {
         ret = OB_ERR_UNEXPECTED;
       }
-      //destroy syntax tree
-      parser.free_result(parse_result);
     }
   }
   if (OB_SUCC(ret)) {

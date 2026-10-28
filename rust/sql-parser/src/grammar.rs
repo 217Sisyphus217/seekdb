@@ -1843,7 +1843,7 @@ peg::parser! {
                 }
             ) { method }
         pub rule statistics_options() -> Node = _ methods:stats_method()+ (";" _)* { Node::new(Kind::StatsOptions,methods) }
-        pub rule expression() -> Node = _ value:expr(0) { Node::new(Kind::Default,vec![value]) }
+        pub rule expression() -> Node = _ value:expr(0) { value }
         rule explain() -> Node = (kw("explain") / kw("describe") / kw("desc")) hints()?
             format:(kw("basic") { Kind::ExplainBasic } / kw("outline") { Kind::ExplainOutline }
                 / kw("extended") { Kind::ExplainExtended } / kw("extended_noaddr") { Kind::ExplainExtendedNoAddr }
