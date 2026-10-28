@@ -23,14 +23,8 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <setjmp.h>
-#ifdef SQL_PARSER_COMPILATION
-#include "ob_sql_mode.h"
-#include "query/parser/ob_item_type.h"
-#else
 #include "common/sql_mode/ob_sql_mode.h"
 #include "query/parser/ob_item_type.h"
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,13 +84,11 @@ enum ParseMode
 {
   STD_MODE = 0,
   FP_MODE, /* fast parse, retain hint, and do parameterization */
-  MULTI_MODE ,/* multi query ultra-fast parse */
   FP_PARAMERIZE_AND_FILTER_HINT_MODE,/*Filter out hint, and do parameterization*/
   FP_NO_PARAMERIZE_AND_FILTER_HINT_MODE,/*Filter out hint, and do not parameterize*/
   TRIGGER_MODE, /* treat ':xxx' as identifier */
   DYNAMIC_SQL_MODE, /*Parse dynamic SQL, :idx and :identifier need to be determined whether to check the placeholder name based on the statement type*/
   DBMS_SQL_MODE,
-  INS_MULTI_VALUES,
   METHOD_OPT_MODE,
 };
 
@@ -188,10 +180,6 @@ typedef struct _ParseNode
     int64_t raw_sql_offset_; // constant node character offset in sql
   };
 
-#ifdef SQL_PARSER_COMPILATION
-  int token_off_;
-  int token_len_;
-#endif
 } ParseNode;
 
 struct _ParamList;
@@ -218,13 +206,7 @@ typedef struct _RefObjList
 // Parse the attribute set needed when parsing SQL statements in PL
 typedef struct _PLParseInfo
 {
-  bool is_pl_parse_;//Used to indicate whether the current parser logic is a PLParse call
-  bool is_pl_parse_expr_; // used to indicate whether the current parser logic is parsing the expr of PLParser
   bool is_forbid_pl_fp_;
-  bool is_inner_parse_;
-  int last_pl_symbol_pos_; // the end position of the last pl variable
-  bool is_parse_dynamic_sql_;
-  int plsql_line_;
   /*for mysql pl*/
   void *pl_ns_; //ObPLBlockNS
   // Supplied by PL preparation; ordinary SQL parsing has no PL runtime dependency.
@@ -245,160 +227,47 @@ typedef struct _ObQuestionMarkCtx
   bool by_defined_name_;
 } ObQuestionMarkCtx;
 
-
-// record the minus status while parsing the sql
-// for example, 'select - -1 from dual'
-// when parser sees the first '-', pos_ = 7, raw_sql_offset = 7, has_minus_ = true, is_cur_numeric_ = false
-// after seeing the second '-', members are reseted, pos_ = 9, raw_sql_offset_ = 9, has_minus_ = true,  is_cur_numeric = false
-// after seeing '1', is_cur_numeric = true, then param node '-1' is returned
-typedef struct _ObMinusStatuCtx
-{
-  int pos_; // The position where negative numbers appear in the parameterized SQL
-  int raw_sql_offset_; // The position where the minus sign appears in the original sql
-  bool has_minus_; // retain the state of the minus sign, when encountering a numeric type, the lexer returns a negative number node
-  bool is_cur_numeric_; // Is the current constant node a numeric node
-} ObMinusStatusCtx;
-
-#ifdef SQL_PARSER_COMPILATION
-// for comment_list_ in ParseResult
-typedef struct TokenPosInfo
-{
-  int token_off_;
-  int token_len_;
-} TokenPosInfo;
-#endif
-// External dependency object linked list
-typedef struct _ParenthesesOffset
-{
-  int left_parentheses_;
-  int right_parentheses_;
-  struct _ParenthesesOffset *next_;
-} ParenthesesOffset;
-
-typedef struct _ParseNodeOptParens {
-  struct _ParseNode *select_node_;
-  bool is_parenthesized_;
-} ParseNodeOptParens;
-
-//dml base runtime context definition
-typedef struct _InsMultiValuesResult
-{
-  ParenthesesOffset *ref_parentheses_;
-  ParenthesesOffset *tail_parentheses_;
-  int values_col_;
-  int values_count_;
-  int on_duplicate_pos_; // the start position of on duplicate key in insert ... on duplicate key update statement
-  int ret_code_;
-} InsMultiValuesResult;
-
-
 typedef struct ObParseResult
 {
-  void *yyscan_info_;
   const char *input_sql_;
   int input_sql_len_;
   int param_node_num_;
-  int token_num_;
   void *malloc_pool_; // ObIAllocator
   ObQuestionMarkCtx question_mark_ctx_;
   ObSQLMode sql_mode_;
   const struct ObCharsetInfo *charset_info_; //client charset
-  const struct ObCharsetInfo *charset_info_nls_db_; // NLS collation charset for identifier validation
   ParamList *param_nodes_;
   ParamList *tail_param_node_;
   struct {
-    uint32_t has_encount_comment_              : 1;
     uint32_t is_fp_                            : 1;
-    uint32_t is_multi_query_                   : 1;
     uint32_t is_ignore_hint_                   : 1;//used for outline
-    uint32_t is_ignore_token_                  : 1;//used for outline
     uint32_t need_parameterize_                : 1;//used for outline, to support signature of outline can contain hint
-    uint32_t in_q_quote_                       : 1;
     uint32_t is_for_trigger_                   : 1;
     uint32_t is_dynamic_sql_                   : 1;
-    uint32_t is_dbms_sql_                      : 1;
     uint32_t is_batched_multi_enabled_split_   : 1;
-    uint32_t is_not_utf8_connection_           : 1;
-    uint32_t may_bool_value_                   : 1; // used for true/false in sql parser
-    uint32_t is_include_old_new_in_trigger_    : 1;
-    uint32_t is_normal_ps_prepare_             : 1;
-    uint32_t is_multi_values_parser_           : 1;
-    uint32_t is_for_remap_                     : 1;
     uint32_t contain_sensitive_data_           : 1;
-    uint32_t may_contain_sensitive_data_       : 1;
-    uint32_t is_external_table_                : 1;
-    uint32_t is_returning_                     : 1;
-    uint32_t is_into_cluster_                  : 1;
+    uint32_t is_expression_                    : 1;
     uint32_t is_method_opt_parser_             : 1;
   };
 
   ParseNode *result_tree_;
-  jmp_buf *jmp_buf_;//handle fatal error
-  int extra_errno_;
   char *error_msg_;
   int start_col_;
   int end_col_;
   int line_;
-  int yycolumn_;
-  int yylineno_;
-  char *tmp_literal_;
-  /* for multi query fast parse (split queries) */
   char *no_param_sql_;
   int no_param_sql_len_;
-  int no_param_sql_buf_len_;
   /*for pl*/
   PLParseInfo pl_parse_info_;
-  /*for  q-quote*/
-  ObMinusStatusCtx minus_ctx_; // for fast parser to parse negative value
-  int64_t last_escape_check_pos_;  // A temporary variable when parsing quoted string%parse-param, to handle escape character issues encountered when connecting with the gbk character set
-  int connection_collation_;//connection collation
-  bool mysql_compatible_comment_; //whether the parser is parsing "/*! xxxx */"
-  bool enable_compatible_comment_;
-  int semicolon_start_col_;
 
-  InsMultiValuesResult *ins_multi_value_res_;
-
-
-#ifdef SQL_PARSER_COMPILATION
-  TokenPosInfo *comment_list_;
-  int comment_cnt_;
-  int comment_cap_;
-  int realloc_cnt_;
-  bool stop_add_comment_;
-#endif
 } ParseResult;
 
-typedef struct _ObFastParseCtx
-{
-  bool is_fp_;
-} ObFastParseCtx;
-
-typedef enum ObSizeUnitType
-{
-  SIZE_UNIT_TYPE_INVALID = -1,
-  SIZE_UNIT_TYPE_K,
-  SIZE_UNIT_TYPE_M,
-  SIZE_UNIT_TYPE_G,
-  SIZE_UNIT_TYPE_T,
-  SIZE_UNIT_TYPE_P,
-  SIZE_UNIT_TYPE_E,
-  SIZE_UNIT_TYPE_MAX
-} ObSizeUnitType;
-
-extern int parse_init(ParseResult *p);
-extern int parse_terminate(ParseResult *p);
-extern int parse_sql(ParseResult *p, const char *pszSql, size_t iLen);
-extern void destroy_tree(ParseNode *pRoot);
-extern unsigned char escaped_char(unsigned char c, int *with_back_slash);
 extern char *str_tolower(char *buff, int64_t len);
 extern char *str_toupper(char *buff, int64_t len);
-extern int64_t str_remove_space(char *buff, int64_t len);
-//extern int64_t ob_parse_string(const char *src, char *dest, int64_t len, int quote_type);
 
 extern ParseNode *new_node(void *malloc_pool, ObItemType type, int num);
 extern ParseNode *new_non_terminal_node(void *malloc_pool, ObItemType node_tag, int num, ...);
 extern ParseNode *new_terminal_node(void *malloc_pool, ObItemType type);
-extern ParseNode *new_list_node(void *malloc_pool, ObItemType node_tag, int capacity, int num, ...);
 
 extern int check_mem_status();
 extern int try_check_mem_status(int64_t check_try_times);
@@ -426,19 +295,9 @@ extern uint64_t parsenode_hash(const ParseNode *node, int *ret);
 extern bool parsenode_equal(const ParseNode *node1, const ParseNode *node2, int *ret);
 
 extern int64_t get_question_mark(ObQuestionMarkCtx *ctx, void *malloc_pool, const char *name);
-extern int64_t get_question_mark_by_defined_name(ObQuestionMarkCtx *ctx, const char *name);
 extern int64_t get_need_reserve_capacity(int64_t n);
 extern ParseNode *push_back_child(void *malloc_pool, int *error_code, ParseNode *left_node, ParseNode *node);
-extern ParseNode *push_front_child(void *malloc_pool, int *error_code, ParseNode *right_node, ParseNode *node);
 extern ParseNode *append_child(void *malloc_pool, int *error_code, ParseNode *left_node, ParseNode *right_node);
-extern ParseNode *adjust_inner_join_inner(int *error_code, ParseNode *inner_join, ParseNode *table_node);
-extern ParseNodeOptParens *new_parse_node_opt_parens(void *malloc_pool);
-
-// compare ParseNode str_value_ to pattern
-// @param [in] node        ParseNode
-// @param [in] pattern     pattern_str
-// @param [in] pat_len     length of pattern
-extern bool nodename_equal(const ParseNode *node, const char *pattern, int64_t pat_len);
 
 #define OB_NODE_CAST_TYPE_IDX 0
 #define OB_NODE_CAST_COLL_IDX 1
@@ -458,26 +317,9 @@ typedef enum ObNumberParseType
   NPT_EMPTY,
 } ObNumberParseType;
 
-#ifndef SQL_PARSER_COMPILATION
 bool check_stack_overflow_c();
 // Find the interface for external pl variables, get the index of the variable in the external symbol table, defined in ob_pl_stmt.cpp
 int lookup_pl_symbol(const void *pl_ns, const char *symbol, size_t len, int64_t *find_idx);
-#endif
-
-typedef struct _ParserLinkNode
-{
-  struct _ParserLinkNode *next_;
-  struct _ParserLinkNode *prev_;
-  void *val_;
-} ParserLinkNode;
-
-ParserLinkNode *new_link_node(void *malloc);
-
-typedef enum ObTranslateCharset
-{
-  TRANSLATE_CHAR_CS = 0,
-  TRANSLATE_NCHAR_CS = 1,
-} ObTranslateCharset;
 
 #ifdef __cplusplus
 }

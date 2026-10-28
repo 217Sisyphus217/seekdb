@@ -76,7 +76,6 @@ SQL_PUBLIC_HEADER_ROOTS = [
     "optimizer/stat/ob_opt_stat_manager.h",
     "optimizer/stat/ob_opt_stat_monitor_manager.h",
     "optimizer/stat/ob_opt_stat_service.h",
-    "parser/ob_non_reserved_keywords.h",
     "parser/ob_parser.h",
     "parser/parse_define.h",
     "parser/parse_malloc.h",

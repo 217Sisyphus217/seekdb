@@ -18,42 +18,12 @@
 #include <string.h>
 #include "lib/utility/alloc_assist.h"
 #include "sql/parser/parse_node_hash.h"
-#include "sql/parser/sql_parser_base.h"
+#include "sql/parser/parse_define.h"
+#include "sql/parser/parse_malloc.h"
+#include <stdio.h>
+#include <ctype.h>
 #include "sql/executor/ob_memory_tracker_wrapper.h"
 extern const char *get_type_name(int type);
-
-int count_child(ParseNode *root, void *malloc_pool, int *count);
-
-//merge_child:if succ ,return 0, else return 1
-int merge_child(ParseNode *node, void *malloc_pool, ParseNode *source_tree, int *index);
-
-void destroy_tree(ParseNode *root)
-{
-  (void)root;
-  /*
-  if (OB_UNLIKELY(NULL == root)) {
-    //do nothing
-  } else {
-    int64_t i = 0;
-    if (root->num_child_ > 0) {
-      if (OB_UNLIKELY(NULL == root->children_)) {
-        (void)fprintf(stderr, "ERROR children of root is NULL\n");
-      } else {
-        for (; i < root->num_child_; ++i) {
-          destroy_tree(root->children_[i]);
-          root->children_[i] = NULL;
-        }
-        parse_free(root->children_);
-        root->children_ = NULL;
-      }
-    }
-    if (NULL != root->str_value_) {
-      parse_free((char *)root->str_value_);
-      root->str_value_ = NULL;
-    }
-    parse_free(root);
-    }*/
-}
 
 int get_deep_copy_size(const ParseNode *node, int64_t *size)
 {
@@ -209,162 +179,6 @@ ParseNode *new_node(void *malloc_pool, ObItemType type, int num)
   return node;
 }
 
-int count_child(ParseNode *root, void *malloc_pool, int *count)
-{
-  int ret = OB_PARSER_SUCCESS;
-  ParserLinkNode *stack_top = NULL;
-  if (NULL == count) {
-    ret = OB_PARSER_ERR_UNEXPECTED;
-    (void)fprintf(stderr, "ERROR invalid parameter ret=%d\n", ret);
-  } else if (NULL == root) {
-    *count = 0;
-  } else if (NULL == (stack_top = new_link_node(malloc_pool))) {
-    ret = OB_PARSER_ERR_NO_MEMORY;
-    (void)fprintf(stderr, "ERROR failed to malloc memory\n");
-  } else {
-    *count = 0;
-    stack_top->val_ = root;
-
-    do {
-      ParseNode *tree = NULL;
-      if (NULL == stack_top || NULL == (tree = (ParseNode *)stack_top->val_)) {
-        ret = OB_PARSER_ERR_UNEXPECTED;
-        (void)fprintf(stderr, "ERROR invalid null argument\n");
-      } else {
-        stack_top = stack_top->next_;
-      }
-
-      if (OB_PARSER_SUCCESS != ret) {
-      } else if (T_LINK_NODE != tree->type_) {
-        *count += 1;
-      } else if (tree->num_child_ <= 0) {
-        // do nothing
-      } else {
-        if (NULL == tree->children_) {
-          ret = OB_PARSER_ERR_UNEXPECTED;
-          (void)fprintf(stderr, "ERROR invalid null children\n");
-        }
-        ParserLinkNode *tmp_node = NULL;
-        for (int64_t i = tree->num_child_ - 1; OB_PARSER_SUCCESS == ret && i >= 0; i--) {
-          ParseNode *child = tree->children_[i];
-          if (NULL == child) {
-            // do nothing
-          } else if (NULL == (tmp_node = new_link_node(malloc_pool))) {
-            ret = OB_PARSER_ERR_NO_MEMORY;
-            (void)fprintf(stderr, "ERROR failed to allocate memory\n");
-          } else {
-            tmp_node->val_ = child;
-            tmp_node->next_ = stack_top;
-            stack_top = tmp_node;
-          }
-        } // for end
-      }
-    } while (OB_PARSER_SUCCESS == ret && NULL != stack_top);
-  }
-  return ret;
-}
-
-//merge_child:if succ ,return 0, else return 1
-int merge_child(ParseNode *node, void *malloc_pool, ParseNode *source_tree, int *index)
-{
-  int ret = 0;
-  ParserLinkNode *stack_top = NULL;
-  if (OB_UNLIKELY(NULL == node || NULL == index)) {
-    ret = OB_PARSER_ERR_UNEXPECTED;
-    (void)fprintf(stderr, "ERROR node%p or index:%p is NULL\n", node, index);
-  } else if (NULL == source_tree) {
-    //do nothing
-  } else if (NULL == (stack_top = new_link_node(malloc_pool))) {
-    ret = OB_PARSER_ERR_NO_MEMORY;
-    (void)fprintf(stderr, "ERROR failed to malloc memory\n");
-  } else {
-    stack_top->val_ = source_tree;
-
-    do {
-      ParseNode *tree = NULL;
-      if (NULL == stack_top || NULL == (tree = (ParseNode *)stack_top->val_)) {
-        ret = OB_PARSER_ERR_UNEXPECTED;
-        (void)fprintf(stderr, "ERROR invalid null argument\n");
-      } else {
-        // pop stack
-        stack_top = stack_top->next_;
-      }
-      if (OB_PARSER_SUCCESS != ret) {
-        // do nothing
-      } else if (T_LINK_NODE != tree->type_) {
-        if (OB_UNLIKELY(*index < 0 || *index >= node->num_child_)) {
-          ret = OB_PARSER_ERR_UNEXPECTED;
-          (void)fprintf(stderr, "ERROR invalid index: %d, num_child:%d\n tree: %d",
-                        *index, node->num_child_, tree->type_);
-        } else if (NULL == node->children_) {
-          ret = OB_PARSER_ERR_UNEXPECTED;
-          (void)fprintf(stderr, "ERROR invalid null children pointer\n");
-        } else {
-          node->children_[*index] = tree;
-          ++(*index);
-        }
-      } else if (tree->num_child_ <= 0) {
-        // do nothing
-      } else if (NULL == tree->children_) {
-        ret = OB_PARSER_ERR_UNEXPECTED;
-        (void)fprintf(stderr, "ERROR invalid children pointer\n");
-      } else {
-        ParserLinkNode *tmp_node = NULL;
-        for (int64_t i = tree->num_child_ - 1; OB_PARSER_SUCCESS == ret && i >= 0; i--) {
-          if (NULL == tree->children_[i]) {
-            // do nothing
-          } else if (NULL == (tmp_node = new_link_node(malloc_pool))) {
-            ret = OB_PARSER_ERR_NO_MEMORY;
-            (void)fprintf(stderr, "ERROR failed to malloc memory\n");
-          } else {
-            // push stack
-            tmp_node->val_ = tree->children_[i];
-            tmp_node->next_ = stack_top;
-            stack_top = tmp_node;
-          }
-        } // for end
-      }
-    } while (OB_PARSER_SUCCESS == ret && (stack_top != NULL));
-  }
-  return ret;
-}
-
-ParseNode *merge_tree(void *malloc_pool, int *fatal_error,
-                      ObItemType node_tag, ParseNode *source_tree)
-{
-  ParseNode *node = NULL;
-  ParseNode *ret_node = NULL;
-  if (OB_UNLIKELY(NULL == malloc_pool) || OB_UNLIKELY(NULL == fatal_error)) {
-    (void)fprintf(stderr, "ERROR parser result is NULL\n");
-  } else if (NULL == source_tree) {
-    //source_tree may be NULL, do nothing
-  } else {
-    int index = 0;
-    int num = 0;
-    int tmp_ret = 0;
-    if (OB_UNLIKELY(OB_PARSER_SUCCESS != (tmp_ret = count_child(source_tree,
-                                                                malloc_pool, &num)))) {
-      (void)fprintf(stderr, "ERROR fail to , count child num code : %d\n", tmp_ret);
-      *fatal_error = tmp_ret;
-    } else if (OB_LIKELY(NULL != (node = new_node(malloc_pool, node_tag, num)))) {
-      if (OB_UNLIKELY(OB_PARSER_SUCCESS != (tmp_ret = merge_child(node,
-                                                                  malloc_pool,
-                                                                  source_tree,
-                                                                  &index)))) {
-        (void)fprintf(stderr, "ERROR fail to merge_child, error code : %d\n", tmp_ret);
-        *fatal_error = tmp_ret;
-      } else if (index != num) {
-        (void)fprintf(stderr, "ERROR index:%d is not equal to num:%d\n", index, num);
-      } else {
-        ret_node = node;
-      }
-    } else {
-      *fatal_error = OB_PARSER_ERR_NO_MEMORY;
-    }
-  }
-  return ret_node;
-}
-
 ParseNode *new_terminal_node(void *malloc_pool, ObItemType type)
 {
   int children_num = 0;
@@ -390,134 +204,6 @@ ParseNode *new_non_terminal_node(void *malloc_pool, ObItemType node_tag, int num
   }
   return ret_node;
 }
-
-ParseNode *new_list_node(void *malloc_pool, ObItemType node_tag, int capacity, int num, ...)
-{
-  ParseNode *ret_node = NULL;
-  if (OB_UNLIKELY(capacity <= 0 || num <= 0 || num > capacity)) {
-    (void)fprintf(stderr, "ERROR invalid num:%d capacity:%d\n", num, capacity);
-  } else {
-    int32_t i = 0;
-    va_list va;
-    ret_node = new_node(malloc_pool, node_tag, capacity);
-    if (OB_LIKELY(NULL != ret_node)) {
-      ret_node->value_ = capacity;
-      ret_node->num_child_ = num;
-      va_start(va, num);
-      for (; i < num; ++i) {
-        ret_node->children_[i] = va_arg(va, ParseNode *);
-      }
-      va_end(va);
-    }
-  }
-  return ret_node;
-}
-
-char *copy_expr_string(ParseResult *p, int expr_start, int expr_end)
-{
-  char *expr_string = NULL;
-  if (OB_UNLIKELY(NULL == p)) {
-    (void)fprintf(stderr, "ERROR parser result is NULL\n");
-  } else if (OB_UNLIKELY(NULL == p->input_sql_)) {
-    (void)fprintf(stderr, "ERROR input sql is NULL\n");
-  } else if (OB_UNLIKELY(expr_start < 0 || expr_end < 0 || expr_end < expr_start)) {
-    (void)fprintf(stderr, "ERROR invalid argument, expr_start:%d, expr_end:%d\n", expr_start, expr_end);
-  } else {
-    int len = expr_end - expr_start + 1;
-    expr_string = (char *)parse_malloc(len + 1, p->malloc_pool_);
-    if (OB_UNLIKELY(NULL == expr_string)) {
-     (void)printf("malloc memory failed\n");
-    } else {
-      memmove(expr_string, p->input_sql_ + expr_start - 1, len);
-      expr_string[len] = '\0';
-    }
-  }
-  return expr_string;
-}
-int store_prentthese_info(int left, int right, ParseResult *result)
-{
-  int ret = 0;
-  if (OB_UNLIKELY(NULL == result)) {
-    ret = -1;
-    (void)fprintf(stderr, "ERROR invalid parentheses pointer\n");
-  } else {
-    ParenthesesOffset *object =
-      (ParenthesesOffset *)malloc_parentheses_info(sizeof(ParenthesesOffset), result->malloc_pool_);
-    if (OB_UNLIKELY(NULL == object)) {
-      ret = OB_PARSER_ERR_NO_MEMORY;
-      (void)fprintf(stderr, "ERROR invalid parentheses pointer\n");
-    } else {
-      object->left_parentheses_ = left;
-      object->right_parentheses_ = right;
-      object->next_ = NULL;
-      if (NULL == result->ins_multi_value_res_->ref_parentheses_) {
-        result->ins_multi_value_res_->ref_parentheses_ = object;
-        result->ins_multi_value_res_->values_count_ = 1;
-      } else {
-        result->ins_multi_value_res_->tail_parentheses_->next_ = object;
-        result->ins_multi_value_res_->values_count_++;
-      }
-      result->ins_multi_value_res_->tail_parentheses_ = object;
-    }
-  }
-  return ret;
-}
-
-unsigned char escaped_char(unsigned char c, int *with_back_slash)
-{
-  *with_back_slash = 0;
-  switch (c) {
-  case 'n':
-    return '\n';
-  case 't':
-    return '\t';
-  case 'r':
-    return '\r';
-  case 'b':
-    return '\b';
-  case '0':
-    return '\0';
-  case 'Z':
-    return '\032';
-  case '_':
-  case '%':
-    *with_back_slash = 1;
-    return c;
-  default:
-    return c;
-  }
-}
-
-///* quote_type: 0 - single quotes; 1 - double quotation marks */
-//int64_t ob_parse_string(const char *src, char *dest, int64_t len, int quote_type)
-//{
-//  int64_t i;
-//  int64_t index = 0;
-//  int with_back_slash = 1;
-//  for (i = 0; i < len; ++i) {
-//    unsigned char c = src[i];
-//    if (c == '\\') {
-//      if (i < len - 1) {
-//        c = src[++i];
-//      } else {
-//        break;
-//      }
-//      c = escaped_char(c, &with_back_slash);
-//      if (with_back_slash)
-//      {
-//        dest[index++] = '\\';
-//      }
-//    } else if (quote_type == 0 && c == '\'' && i + 1 < len && src[i + 1] == '\'') {
-//      ++i;
-//    } else if (quote_type == 1 && c == '"' && i + 1 < len && src[i + 1] == '"') {
-//      ++i;
-//    }
-//    dest[index++] = c;
-//  }
-//  assert(index <= len);
-//  dest[index] = '\0';
-//  return index;
-//}
 
 static char char_int(char c)
 {
@@ -634,19 +320,6 @@ char *str_toupper(char *buff, int64_t len)
     }
   }
   return buff;
-}
-
-int64_t str_remove_space(char *buff, int64_t len)
-{
-  int64_t length = 0;
-  if (OB_LIKELY(NULL != buff)) {
-    for (int i = 0; i < len; i++) {
-      if (!isspace(buff[i])) {
-        buff[length++] = buff[i];
-      }
-    }
-  }
-  return length;
 }
 
 // calculate hash value of syntax tree recursively
@@ -790,55 +463,6 @@ int64_t get_question_mark(ObQuestionMarkCtx *ctx, void *malloc_pool, const char 
   return idx;
 }
 
-int64_t get_question_mark_by_defined_name(ObQuestionMarkCtx *ctx, const char *name)
-{
-  int64_t idx = -1;
-  if (OB_UNLIKELY(NULL == ctx || NULL == name)) {
-    (void)fprintf(stderr, "ERROR question mark ctx or name is NULL\n");
-  } else if (ctx->name_ != NULL) {
-    for (int64_t i = 0; -1 == idx && i < ctx->count_; ++i) {
-      if (NULL == ctx->name_[i]) {
-        (void)fprintf(stderr, "ERROR name_ in question mark ctx is null\n");
-      } else if (0 == STRCASECMP(ctx->name_[i], name)) {
-        idx = i;
-        break;
-      }
-    }
-  } else {
-    (void)fprintf(stderr, "ERROR name_ in question mark ctx is null\n");
-  }
-  return idx;
-}
-
-ParserLinkNode *new_link_node(void *malloc)
-{
-  ParserLinkNode *new_node = (ParserLinkNode *)parse_malloc(sizeof(ParserLinkNode), malloc);
-  if (NULL == new_node) {
-    (void)printf("ERROR malloc memory failed\n");
-  } else {
-    new_node->next_ = NULL;
-    new_node->prev_ = NULL;
-    new_node->val_ = NULL;
-  }
-  return new_node;
-}
-
-bool nodename_equal(const ParseNode *node, const char *pattern, int64_t pat_len)
-{
-  bool result = true;
-  if (NULL == node || NULL == node->str_value_ || NULL == pattern || node->str_len_ != pat_len) {
-    result = false;
-  } else {
-    result = true;
-    for (int64_t i = 0; result && i < pat_len; ++i) {
-      if (toupper(node->str_value_[i]) != toupper(pattern[i])) {
-        result = false;
-      }
-    }
-  }
-  return result;
-}
-
 int64_t get_need_reserve_capacity(int64_t n)
 {
   int64_t capacity = 0;
@@ -904,39 +528,6 @@ ParseNode *push_back_child(void *malloc_pool, int *error_code, ParseNode *left_n
   return ret_node;
 }
 
-// A OR (B OR C) --> OR (A, B, C)
-ParseNode *push_front_child(void *malloc_pool, int *error_code, ParseNode *right_node, ParseNode *node)
-{
-  ParseNode *ret_node = NULL;
-  if (OB_ISNULL(error_code)) {
-    (void)fprintf(stderr, "ERROR parser result is NULL\n");
-  } else if (OB_ISNULL(malloc_pool) ||
-             OB_ISNULL(right_node) ||
-             OB_ISNULL(node) ||
-             OB_UNLIKELY(INT64_MAX == right_node->value_)) {
-    *error_code = OB_PARSER_ERR_UNEXPECTED;
-  } else if (OB_UNLIKELY(!(T_OP_OR == right_node->type_ ||
-                           T_OP_AND == right_node->type_ ||
-                           T_EXPR_LIST == right_node->type_ ||
-                           T_SET_UNION == right_node->type_ ||
-                           T_SET_UNION_ALL == right_node->type_))) {
-    *error_code = OB_PARSER_ERR_UNEXPECTED;
-  } else {
-    int64_t capacity = get_need_reserve_capacity(right_node->num_child_ + 1);
-    ParseNode *new_op = new_node(malloc_pool, right_node->type_, capacity);
-    if (OB_ISNULL(new_op)) {
-      *error_code = OB_PARSER_ERR_NO_MEMORY;
-    } else {
-      new_op->children_[0] = node;
-      MEMCPY(new_op->children_ + 1, right_node->children_, sizeof(ParseNode*) * right_node->num_child_);
-      new_op->value_ = capacity;
-      new_op->num_child_ = right_node->num_child_ + 1;
-      ret_node = new_op;
-    }
-  }
-  return ret_node;
-}
-
 // (A OR B) OR (C OR D) --> OR (A, B, C, D)
 ParseNode *append_child(void *malloc_pool, int *error_code, ParseNode *left_node, ParseNode *right_node)
 {
@@ -976,49 +567,4 @@ ParseNode *append_child(void *malloc_pool, int *error_code, ParseNode *left_node
     }
   }
   return ret_node;
-}
-
-ParseNode *adjust_inner_join_inner(int *error_code, ParseNode *inner_join, ParseNode *table_node)
-{
-  ParseNode *ret_node = NULL;
-  if (OB_ISNULL(error_code)) {
-    (void)fprintf(stderr, "ERROR parser error code is NULL\n");
-  } else if (OB_ISNULL(inner_join) || OB_ISNULL(table_node)) {
-    *error_code = OB_PARSER_ERR_UNEXPECTED;
-  } else if (table_node->type_ == T_JOINED_TABLE && table_node->value_ != 1) {
-    // table_node is a join table and without a parenthese.
-    table_node->children_[1] = adjust_inner_join_inner(error_code, inner_join, table_node->children_[1]);
-    if (OB_PARSER_SUCCESS != *error_code) {
-      /* do nothing */
-    } else if (OB_ISNULL(table_node->children_[1])) {
-      *error_code = OB_PARSER_ERR_UNEXPECTED;
-    } else {
-      ret_node = table_node;
-    }
-  } else {
-    inner_join->children_[2] = table_node;
-    ret_node = inner_join;
-  }
-  return ret_node;
-}
-
-ParseNodeOptParens *new_parse_node_opt_parens(void *malloc)
-{
-  ParseNodeOptParens *new_node = (ParseNodeOptParens *)parse_malloc(sizeof(ParseNodeOptParens), malloc);
-  if (NULL == new_node) {
-    (void)printf("ERROR malloc memory failed\n");
-  } else {
-    new_node->select_node_ = NULL;
-    new_node->is_parenthesized_ = false;
-  }
-  return new_node;
-}
-
-extern int ob_backtrace_c(void **buffer, int size);
-extern char *parray_c(char *buf, int64_t len, int64_t *array, int size);
-char *parser_lbt(void **addr_buff, const size_t addr_size,
-                 char *str_buff, const size_t str_size)
-{
-  int size = ob_backtrace_c(addr_buff, addr_size);
-  return parray_c(str_buff, str_size, (int64_t *)addr_buff, size);
 }

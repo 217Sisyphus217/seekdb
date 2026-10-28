@@ -34,7 +34,6 @@
 #include "sql/resolver/ddl/ob_create_view_resolver.h"
 #include "query/ob_sql_name_service.h"
 extern "C" {
-#include "sql/parser/ob_non_reserved_keywords.h"
 #include "share/schema/ob_schema_struct.h"  // relocated-definition owner
 }
 using namespace oceanbase;
@@ -3700,8 +3699,24 @@ int ObSQLUtils::print_identifier_require_quotes(ObCollationType collation_type,
     require = true;
   } else if (require) {
     //do nothing
-  } else if (-1 != mysql_sql_reserved_keyword_lookup(ident.ptr())) {
-    require = true;
+  } else {
+    static const char *const keywords[] = {
+        "alter", "analyze", "binary", "binlog", "cache", "call", "change",
+        "checksum", "commit", "create", "database", "delete", "do", "drop",
+        "errors", "flush", "function", "get", "grant", "index", "insert",
+        "into", "kill", "load", "lock", "logs", "master", "optimize",
+        "privileges", "procedure", "query", "read", "rename", "replace", "reset",
+        "revoke", "select", "set", "show", "slave", "start", "stop",
+        "table", "tables", "truncate", "update", "view", "warnings", "with",
+        "prepare", "execute", "deallocate", "unique", "temporary", "savepoint", "rollback",
+        "desc", "describe", "explain", "release",
+    };
+    for (const char *keyword : keywords) {
+      if (ident.case_compare(keyword) == 0) {
+        require = true;
+        break;
+      }
+    }
   }
   return ret;
 }

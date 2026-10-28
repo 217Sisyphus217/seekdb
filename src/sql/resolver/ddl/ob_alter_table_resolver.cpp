@@ -1612,18 +1612,8 @@ int ObAlterTableResolver::mock_part_func_node(const ObTableSchema &table_schema,
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(parser.parse(sql_str.string(), parse_result))) {
     ret = OB_ERR_PARSE_SQL;
-    _OB_LOG(WARN, "parse: %p, %p, %p, msg=[%s], start_col_=[%d], end_col_[%d], line_[%d], yycolumn[%d], yylineno_[%d], sql[%.*s]",
-            parse_result.yyscan_info_,
-            parse_result.result_tree_,
-            parse_result.malloc_pool_,
-            parse_result.error_msg_,
-            parse_result.start_col_,
-            parse_result.end_col_,
-            parse_result.line_,
-            parse_result.yycolumn_,
-            parse_result.yylineno_,
-            static_cast<int>(sql_str.length()),
-            sql_str.ptr());
+    LOG_WARN("failed to parse partition expression", K(ret), K(sql_str),
+             "error", parse_result.error_msg_, "offset", parse_result.start_col_);
   } else if (OB_ISNULL(stmt_node = parse_result.result_tree_) ||
              OB_UNLIKELY(stmt_node->type_ != T_STMT_LIST)) {
     ret = OB_ERR_UNEXPECTED;

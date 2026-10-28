@@ -21,7 +21,6 @@
 #include "lib/oblog/ob_log.h"
 #include "parse_malloc.h"
 #include "parse_node.h"
-#include "ob_sql_parser.h"
 #include "ob_fast_parser.h"
 #include "rust/sql_parser.h"
 #include "lib/container/ob_se_array.h"
@@ -632,7 +631,6 @@ int ObParser::parse_sql(const ObString &stmt,
   parse_result.question_mark_ctx_ = fast.question_mark_ctx_;
   parse_result.input_sql_ = stmt.ptr();
   parse_result.input_sql_len_ = stmt.length();
-  parse_result.no_param_sql_buf_len_ = parse_result.no_param_sql_len_ + 1;
   if (ret == OB_ERR_PARSER_SYNTAX) ret = OB_ERR_PARSE_SQL;
   return ret;
 }
@@ -652,57 +650,26 @@ int ObParser::parse_(const ObString &query,
     --len;
   }
   // For compatibility with mysql, after removing trailing spaces from the query sql, the last character can be removed if it is '\0', and only one '\0' can be removed.
-  // If it is MULTI_MODE, then the operation to remove the trailing '\0' has already been done
-  if (MULTI_MODE != parse_mode) {
-    // Remove the last '\0'
-    if (len > 0 && '\0' == query[len - 1]) {
-      --len;
-    }
-    // Remove trailing spaces
-    while (len > 0 && ISSPACE(query[len - 1])) {
-      --len;
-    }
-  }
+  if (len > 0 && '\0' == query[len - 1]) --len;
+  while (len > 0 && ISSPACE(query[len - 1])) --len;
 
   ObString stmt(len, query.ptr());
   memset(&parse_result, 0, sizeof(ParseResult));
-  parse_result.is_multi_values_parser_ = (INS_MULTI_VALUES == parse_mode);
   parse_result.is_method_opt_parser_ = (METHOD_OPT_MODE == parse_mode);
   parse_result.is_fp_ = (FP_MODE == parse_mode
                          || FP_PARAMERIZE_AND_FILTER_HINT_MODE == parse_mode
                          || FP_NO_PARAMERIZE_AND_FILTER_HINT_MODE== parse_mode);
-  parse_result.is_multi_query_ = (MULTI_MODE == parse_mode);
   parse_result.is_ignore_hint_ = (FP_PARAMERIZE_AND_FILTER_HINT_MODE == parse_mode
                                   || FP_NO_PARAMERIZE_AND_FILTER_HINT_MODE == parse_mode);
   parse_result.is_for_trigger_ = (TRIGGER_MODE == parse_mode);
   parse_result.is_dynamic_sql_ = (DYNAMIC_SQL_MODE == parse_mode);
   parse_result.is_batched_multi_enabled_split_ = is_batched_multi_stmt_split_on;
-  parse_result.is_not_utf8_connection_ = ObCharset::is_valid_collation(charsets4parser_.string_collation_) ?
-        (ObCharset::charset_type_by_coll(charsets4parser_.string_collation_) != CHARSET_UTF8MB4) : false;
   parse_result.malloc_pool_ = allocator_;
-  parse_result.semicolon_start_col_ = INT32_MAX;
   parse_result.sql_mode_ = sql_mode_;
   parse_result.need_parameterize_ = (FP_MODE == parse_mode
                          || FP_PARAMERIZE_AND_FILTER_HINT_MODE == parse_mode);
-  parse_result.minus_ctx_.pos_ = -1;
-  parse_result.minus_ctx_.raw_sql_offset_ = -1;
   parse_result.charset_info_ = ObCharset::get_charset(charsets4parser_.string_collation_);
-  parse_result.charset_info_nls_db_ = ObCharset::is_valid_collation(charsets4parser_.nls_collation_) ?
-        ObCharset::get_charset(charsets4parser_.nls_collation_) : NULL;
-  parse_result.connection_collation_ = charsets4parser_.string_collation_;
-  parse_result.mysql_compatible_comment_ = false;
-  parse_result.enable_compatible_comment_ = true;
 
-  parse_result.pl_parse_info_.is_inner_parse_ = is_pl_inner_parse;
-  parse_result.pl_parse_info_.is_parse_dynamic_sql_ = is_parse_dynamic_sql;
-  if (INS_MULTI_VALUES == parse_mode) {
-    void *buffer = nullptr;
-    if (OB_ISNULL(buffer = allocator_->alloc(sizeof(InsMultiValuesResult)))) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
-    } else {
-      parse_result.ins_multi_value_res_ = new(buffer)InsMultiValuesResult();
-    }
-  }
 
   if (OB_SUCC(ret) && stmt.empty()) {
     ret = OB_ERR_EMPTY_QUERY;
@@ -716,7 +683,6 @@ int ObParser::parse_(const ObString &query,
       LOG_ERROR("no memory for parser");
     } else {
       parse_result.no_param_sql_ = buf;
-      parse_result.no_param_sql_buf_len_ = new_length;
     }
   }
   //compatible mysql, mysql allow use the "--"
@@ -747,10 +713,9 @@ int ObParser::parse_(const ObString &query,
     bool is_create_func = false;
     bool is_call_procedure = false;
     // Determine if the first 6 characters of the statement are 'select', if so, directly follow the parse_sql logic, try to eliminate the overhead of parsing the is_pl_stmt character,
-    //  Even if the parser fails here, there is still a fallback logic with pl parser
     bool is_contain_select = (stmt.length() > 6 && 0 == STRNCASECMP(stmt.ptr(), "select", 6));
 
-    // check wether the stmt start with "/*!", if so, stmt should first go through pl parser.
+    // Whole-statement executable comments use the SQL parser.
     bool is_mysql_comment = false;
     {
       uint64_t pos = 0;
@@ -767,11 +732,7 @@ int ObParser::parse_(const ObString &query,
 
     if ((is_contain_select || !is_pl_stmt(stmt, &is_create_func, &is_call_procedure)
         || (is_call_procedure && parse_result.is_fp_)) && !is_mysql_comment) {
-      if (OB_FAIL(parse_sql(stmt, parse_result, no_throw_parser_error))) {
-        // if fail, regard /*! */ as comment, and retry;
-        if (!no_throw_parser_error) {
-        }
-      }
+      ret = parse_sql(stmt, parse_result, no_throw_parser_error);
     } else {
       if (OB_SUCC(ret = parse_rust_sql(stmt, parse_result, is_pl_inner_parse))) {
         parse_result.no_param_sql_ = const_cast<char *>(stmt.ptr());
@@ -946,7 +907,6 @@ int bind_pl_sql(ParseResult &result)
   result.no_param_sql_ = parse_strndup(output.ptr(), output.length(), result.malloc_pool_);
   if (result.no_param_sql_ == nullptr) return OB_ALLOCATE_MEMORY_FAILED;
   result.no_param_sql_len_ = output.length();
-  result.no_param_sql_buf_len_ = output.length() + 1;
   return OB_SUCCESS;
 }
 }
@@ -961,7 +921,6 @@ int ObParser::prepare_parse(const ObString &query, void *ns, ParseResult &parse_
   parse_result = {};
   parse_result.pl_parse_info_.pl_ns_ = ns;
   parse_result.pl_parse_info_.lookup_symbol_ = lookup_pl_symbol;
-  parse_result.pl_parse_info_.is_pl_parse_ = true;
   parse_result.malloc_pool_ = allocator_;
   parse_result.sql_mode_ = sql_mode_;
   int ret = parse_rust_sql(ObString(length, query.ptr()), parse_result);
@@ -1080,7 +1039,4 @@ bool ObParser::is_trace_id_end(char ch)
 void ObParser::free_result(ParseResult &parse_result)
 {
   UNUSED(parse_result);
-//  destroy_tree(parse_result.result_tree_);
-//  parse_terminate(&parse_result);
-//  parse_result.yyscan_info_ = NULL;
 }

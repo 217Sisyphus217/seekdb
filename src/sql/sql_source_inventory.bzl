@@ -1627,18 +1627,14 @@ SQL_EXTRA_SOURCES = [
 
 SQL_PARSER_SOURCES = [
     "src/sql/parser/fts_parse.cpp",
-    "src/sql/parser/non_reserved_keywords_mysql_mode.c",
     "src/sql/parser/ob_fast_parser.cpp",
     "src/sql/parser/ob_memory_tracker_wrapper.cpp",
-    "src/sql/parser/ob_non_reserved_keywords.c",
     "src/sql/parser/ob_parse_simd.cpp",
     "src/sql/parser/ob_parser.cpp",
     "src/sql/parser/ob_parser_charset_utils.cpp",
-    "src/sql/parser/ob_sql_parser.cpp",
     "src/sql/parser/parse_malloc.cpp",
     "src/sql/parser/parse_node.c",
     "src/sql/parser/parse_node_hash.cpp",
     "src/sql/parser/parser_utility.cpp",
     "src/sql/parser/rust_sql_parser.cpp",
-    "src/sql/parser/sql_parser_base.c",
 ]

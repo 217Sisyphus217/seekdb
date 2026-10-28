@@ -22,7 +22,6 @@
 #include "sql/engine/subquery/ob_subplan_filter_op.h"
 #include "sql/pl/ob_pl_resolver.h"
 
-// from sql_parser_base.h
 #define DEFAULT_STR_LENGTH -1
 
 namespace oceanbase

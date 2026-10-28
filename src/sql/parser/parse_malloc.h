@@ -46,7 +46,6 @@ extern bool check_real_escape(const struct ObCharsetInfo *cs, char *str, int64_t
                               int64_t last_escape_check_pos);
 extern void *parser_alloc(void *malloc_pool, const int64_t alloc_size);
 
-extern void *malloc_parentheses_info(const size_t nbyte, void *malloc_pool);
 #ifdef __cplusplus
 }
 #endif

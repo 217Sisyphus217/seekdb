@@ -34,7 +34,6 @@
 #include "share/geo/ob_geometry_cast.h"
 #include "share/object/ob_decint_scale_util.h"
 
-// from sql_parser_base.h
 #define DEFAULT_STR_LENGTH -1
 
 #define NEED_SCALE_DECIMAL_INT(in_obj, in_scale, res_acc)                                          \

@@ -705,6 +705,7 @@ pub(crate) mod ffi {
         Routine,
         Trigger,
         Statistics,
+        Expression,
     }
 
     enum SearchNodeKind {
@@ -871,6 +872,7 @@ fn parse_sql(
         ffi::ParseMode::Routine => grammar::sql::routine_body(text, mode),
         ffi::ParseMode::Trigger => grammar::sql::trigger(text, mode),
         ffi::ParseMode::Statistics => grammar::sql::statistics_options(text, mode),
+        ffi::ParseMode::Expression => grammar::sql::expression(text, mode),
         ffi::ParseMode::Sql => grammar::sql::query(text, mode),
         _ => unreachable!("unknown parser entry point"),
     };

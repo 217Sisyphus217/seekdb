@@ -2458,7 +2458,6 @@ inline ObItemType get_opposite_compare_type(ObItemType src_type)
 
 #ifdef __cplusplus
 }
-#ifndef SQL_PARSER_COMPILATION
 #include "lib/utility/ob_print_utils.h"
 namespace oceanbase
 {
@@ -2480,6 +2479,5 @@ inline int databuff_print_key_obj(char *buf, const int64_t buf_len, int64_t &pos
 }
 }  // namespace common
 } // end namespace oceanbase
-#endif // SQL_PARSER_COMPILATION
 #endif //__cplusplus
 #endif //OCEANBASE_SQL_OB_ITEM_TYPE_H_

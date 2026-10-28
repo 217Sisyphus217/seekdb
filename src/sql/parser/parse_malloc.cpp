@@ -72,19 +72,6 @@ char* charset_upper(const struct ObCharsetInfo* src_cs,
   return buf;
 }
 
-void *malloc_parentheses_info(const size_t nbyte, void *malloc_pool)
-{
-  void *ptr = NULL;
-  if (OB_ISNULL(malloc_pool)) {
-  } else if (OB_UNLIKELY(nbyte <= 0)) {
-  } else {
-    if (OB_UNLIKELY(NULL == (ptr = alloc_parser_buffer(malloc_pool, nbyte)))) {
-    } else {
-      MEMSET(ptr, 0, nbyte);
-    }
-  }
-  return ptr;
-}
 
 // get memory from the thread obStringBuf, and not release until thread quits
 void *parse_malloc(const size_t nbyte, void *malloc_pool)

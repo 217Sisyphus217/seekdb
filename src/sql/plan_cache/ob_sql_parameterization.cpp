@@ -1547,7 +1547,7 @@ int ObSqlParameterization::formalize_fast_parameter_sql(ObIAllocator &allocator,
   } else if (!is_contain_select && (!need_fast_parser(src_sql)
       || (ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
     // do nothing
-  } else if (config::_ob_enable_fast_parser()) {
+  } else {
     if (OB_FAIL(ObFastParser::parse(src_sql, fp_ctx_format, allocator, format_sql_ptr, format_sql_len,
                                     p_list, param_num, fp_result, fp_result.values_token_pos_))) {
     } else if (OB_ISNULL(p_list)) {
@@ -1575,8 +1575,6 @@ int ObSqlParameterization::formalize_fast_parameter_sql(ObIAllocator &allocator,
         } else { /*do nothing*/}
       }
     }
-  } else {
-    // do nothing
   }
   return ret;
 }
@@ -1600,7 +1598,7 @@ int ObSqlParameterization::formalize_sql_filter_hint(ObIAllocator &allocator,
   if (!is_contain_select && (!need_fast_parser(src_sql)
       || (ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
     // do nothing
-  } else if (config::_ob_enable_fast_parser()) {
+  } else {
     if (OB_FAIL(ObFastParser::parse(src_sql, fp_ctx, allocator, format_sql_ptr, format_sql_len,
                                     p_list, param_num, fp_result, fp_result.values_token_pos_))) {
     } else if (param_num != raw_params.count()) {
@@ -1623,8 +1621,6 @@ int ObSqlParameterization::formalize_sql_filter_hint(ObIAllocator &allocator,
         } else { /*do nothing*/}
       }
     }
-  } else {
-    // do nothing
   }
   return ret;
 }
@@ -1648,7 +1644,7 @@ int ObSqlParameterization::fast_parser(ObIAllocator &allocator,
   if (!is_contain_select && (!need_fast_parser(sql)
     || (ObParser::is_pl_stmt(sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
     (void)fp_result.pc_key_.name_.assign_ptr(sql.ptr(), sql.length());
-  } else if (config::_ob_enable_fast_parser()) {
+  } else {
     if (OB_FAIL(ObFastParser::parse(sql, fp_ctx, allocator, no_param_sql_ptr, no_param_sql_len,
                                     p_list, param_num, fp_result, fp_result.values_token_pos_))) {
     }
@@ -1673,36 +1669,6 @@ int ObSqlParameterization::fast_parser(ObIAllocator &allocator,
           }
         } // for end
       } else { /*do nothing*/}
-    }
-  } else {
-    ObParser parser(allocator, fp_ctx.sql_mode_, fp_ctx.charsets4parser_);
-    SMART_VAR(ParseResult, parse_result) {
-      if (OB_FAIL(parser.parse(sql, parse_result, FP_MODE, fp_ctx.enable_batched_multi_stmt_))) {
-      } else {
-        (void)fp_result.pc_key_.name_.assign_ptr(parse_result.no_param_sql_, parse_result.no_param_sql_len_);
-        int64_t param_num = parse_result.param_node_num_;
-        //copy raw params
-        if (param_num > 0) {
-          ObPCParam *pc_param = NULL;
-          ParamList *p_list = parse_result.param_nodes_;
-          char *ptr = (char *)allocator.alloc(param_num * sizeof(ObPCParam));
-          if (OB_ISNULL(ptr)) {
-            ret = OB_ALLOCATE_MEMORY_FAILED;
-            SQL_PC_LOG(WARN, "fail to alloc memory for pc param", K(ret), K(ptr));
-          }
-          for (int64_t i = 0;
-              OB_SUCC(ret) && i < param_num && NULL != p_list;//When p_list = NULL, it indicates the end of the list
-              i++) {
-            pc_param = new(ptr)ObPCParam();
-            ptr += sizeof(ObPCParam);
-            pc_param->node_ = p_list->node_;
-            if (OB_FAIL(fp_result.raw_params_.push_back(pc_param))) {
-            } else {
-              p_list = p_list->next_;
-            }
-          } // for end
-        } else { /*do nothing*/}
-      }
     }
   }
   return ret;

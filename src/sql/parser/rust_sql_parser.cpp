@@ -1115,8 +1115,6 @@ int build_tree(const common::ObString &sql, peg::ParseTree &tree, ParseResult &r
   result.result_tree_ = root;
   result.contain_sensitive_data_ = tree.root.kind == Kind::SetConfig
       || tree.root.kind == Kind::CreateUser || tree.root.kind == Kind::SetPassword || tree.root.kind == Kind::Grant;
-  result.may_contain_sensitive_data_ = result.contain_sensitive_data_
-      || tree.root.kind == Kind::DropUser || tree.root.kind == Kind::Revoke || tree.root.kind == Kind::RevokeAll;
   if (tree.parameter_names.empty()) {
     result.question_mark_ctx_.count_ = tree.parameters;
     result.question_mark_ctx_.by_ordinal_ = tree.parameters != 0;
@@ -1148,7 +1146,8 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
       reinterpret_cast<const uint8_t *>(sql.ptr()), sql.length()),
       result.sql_mode_ & SMO_ANSI_QUOTES, result.sql_mode_ & SMO_NO_BACKSLASH_ESCAPES,
       result.sql_mode_ & SMO_PIPES_AS_CONCAT, result.sql_mode_ & SMO_HIGH_NOT_PRECEDENCE,
-      routine_body ? peg::ParseMode::Routine : result.is_for_trigger_ ? peg::ParseMode::Trigger
+      routine_body ? peg::ParseMode::Routine : result.is_expression_ ? peg::ParseMode::Expression
+      : result.is_for_trigger_ ? peg::ParseMode::Trigger
       : result.is_method_opt_parser_ ? peg::ParseMode::Statistics : peg::ParseMode::Sql);
   if (!parsed.error.empty()) {
     snprintf(error, sizeof(error), "rust-peg: %s", parsed.error.c_str());

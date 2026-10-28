@@ -1,10 +1,9 @@
 load("//bazel:compile_config.bzl", "RELEASE_LOCAL_DEFINES")
-load("//bazel:parser.bzl", "parser", "parser_type_names")
+load("//bazel:parser.bzl", "parser_type_names")
 load(
     "//bazel:defs.bzl",
     "C_COPTS",
     "CXX_COPTS",
-    "unity_source",
     "cc_library",
 )
 load(
@@ -33,48 +32,20 @@ _PARSER_C_SOURCES = [
     for source in _PARSER_SOURCES
     if source.endswith(".c")
 ]
-_PARSER_DRIVER_UNITY_MEMBERS = [
-    "ob_sql_parser.cpp",
-    "parser_utility.cpp",
-]
-_PARSER_CXX_STANDALONE_SOURCES = [
+_PARSER_CXX_SOURCES = [
     source
     for source in _PARSER_SOURCES
     if (
         source.endswith(".cc")
         or source.endswith(".cpp")
         or source.endswith(".cxx")
-    ) and source not in _PARSER_DRIVER_UNITY_MEMBERS
+    )
 ]
-
-parser(
-    name = "generate_sql_parser",
-    grammar = "sql_parser_mysql_mode.y",
-    lexer_source = "sql_parser_mysql_mode.l",
-    parser = "bazel_generated/sql_parser_mysql_mode_tab.c",
-    parser_header = "bazel_generated/sql_parser_mysql_mode_tab.h",
-    lexer = "bazel_generated/sql_parser_mysql_mode_lex.c",
-    lexer_header = "bazel_generated/sql_parser_mysql_mode_lex.h",
-    flex_options = ["-Cfa", "-B", "-8"],
-    lexer_patch = "sql",
-)
 
 parser_type_names(
     name = "generate_type_names",
     src = "//src/query:_sql_item_type_definition",
     out = "bazel_generated/type_name.c",
-)
-
-cc_library(
-    name = "_generated_headers",
-    hdrs = [
-        "bazel_generated/sql_parser_mysql_mode_lex.h",
-        "bazel_generated/sql_parser_mysql_mode_tab.h",
-    ],
-    include_prefix = "sql/parser",
-    includes = ["bazel_generated"],
-    strip_include_prefix = "bazel_generated",
-    visibility = ["//src/sql:__subpackages__"],
 )
 
 _PARSER_PUBLIC_ROOTS = paths_under(
@@ -142,12 +113,9 @@ cc_library(
 cc_library(
     name = "_server_parser_c",
     srcs = [
-        "bazel_generated/sql_parser_mysql_mode_lex.c",
-        "bazel_generated/sql_parser_mysql_mode_tab.c",
         "bazel_generated/type_name.c",
     ] + _PARSER_C_SOURCES,
     implementation_deps = [
-        ":_generated_headers",
         ":parser_internal_headers",
         ":parser_public_headers",
         "//src/sql:sql_runtime_interface",
@@ -161,24 +129,10 @@ cc_library(
 )
 
 cc_library(
-    name = "_sql_parser_driver_unity_members",
-    textual_hdrs = _PARSER_DRIVER_UNITY_MEMBERS,
-)
-
-sql_parser_driver_unity = unity_source(
-    name = "sql_parser_driver_impl",
-    unity_members = _PARSER_DRIVER_UNITY_MEMBERS,
-    tags = ["manual"],
-)
-
-cc_library(
     name = "_server_parser_cxx",
-    srcs = [
-        sql_parser_driver_unity,
-    ] + _PARSER_CXX_STANDALONE_SOURCES,
+    srcs = _PARSER_CXX_SOURCES,
     local_defines = RELEASE_LOCAL_DEFINES,
     implementation_deps = [
-        ":_sql_parser_driver_unity_members",
         ":parser_internal_headers",
         ":parser_public_headers",
         "//src/sql:sql_runtime_interface",

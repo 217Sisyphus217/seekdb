@@ -40,7 +40,6 @@ namespace sql
 
 const size_t ObMaxItemMethod = ObJsonPathNodeType::JPN_END_FUNC_FLAG - ObJsonPathNodeType::JPN_BEGIN_FUNC_FLAG - 1;
 const size_t ObMaxJsonType = (size_t)ObJsonNodeType::J_MAX_TYPE;
-// from sql_parser_base.h
 #define DEFAULT_STR_LENGTH -1
 
 /* process on mismatch { error : 0, null : 1, ignore : 2 }*/

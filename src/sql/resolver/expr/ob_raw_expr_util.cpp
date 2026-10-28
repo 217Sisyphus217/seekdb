@@ -18,7 +18,7 @@
 
 #include "ob_raw_expr_util.h"
 #include "lib/json/ob_json_print_utils.h"
-#include "sql/parser/ob_sql_parser.h"
+#include "sql/parser/rust_sql_parser.h"
 #include "sql/engine/expr/ob_expr_to_type.h"
 #include "sql/engine/expr/ob_expr_type_to_str.h"
 #include "sql/engine/expr/ob_expr_column_conv.h"
@@ -1211,26 +1211,15 @@ int ObRawExprUtils::parse_default_expr_from_str(const ObString &expr_str,
   bool is_for_trigger)
 {
   int ret = OB_SUCCESS;
-  ObSqlString sql_str;
   ParseResult parse_result;
   ObSQLMode sql_mode = SMO_DEFAULT;
-  ObSQLParser parser(allocator, sql_mode);
   MEMSET(&parse_result, 0, sizeof(ParseResult));
   parse_result.malloc_pool_ = &allocator;
-  parse_result.pl_parse_info_.is_pl_parse_ = true;
-  parse_result.pl_parse_info_.is_pl_parse_expr_ = true;
+  parse_result.is_expression_ = true;
   parse_result.sql_mode_ = sql_mode;
   parse_result.charset_info_ = ObCharset::get_charset(expr_str_cs_type.string_collation_);
-  parse_result.charset_info_nls_db_ = ObCharset::is_valid_collation(expr_str_cs_type.nls_collation_) ?
-        ObCharset::get_charset(expr_str_cs_type.nls_collation_) : NULL;
-  parse_result.is_not_utf8_connection_ = ObCharset::is_valid_collation(expr_str_cs_type.string_collation_) ?
-        (ObCharset::charset_type_by_coll(expr_str_cs_type.string_collation_) != CHARSET_UTF8MB4) : false;
-  parse_result.connection_collation_ = expr_str_cs_type.string_collation_;
-  parse_result.semicolon_start_col_ = INT32_MAX;
   parse_result.is_for_trigger_ = is_for_trigger;
-  if (OB_FAIL(sql_str.append_fmt("DO %.*s", expr_str.length(), expr_str.ptr()))) {
-  } else if (OB_FAIL(parser.parse(
-    sql_str.string().ptr(), sql_str.string().length(), parse_result))) {
+  if (OB_FAIL(parse_rust_sql(expr_str, parse_result))) {
   } else {
     if (OB_UNLIKELY(OB_LOGGER.get_log_level() >= OB_LOG_LEVEL_DEBUG)) {
       LOG_DEBUG("", "parser result", SJ(ObParserResultPrintWrapper(*parse_result.result_tree_)));
