@@ -49,6 +49,8 @@ struct PreParseResult
   common::ObString trace_id_;
 };
 
+class ParsedSql;
+
 class ObParser
 {
 public:
@@ -84,7 +86,8 @@ private:
                     const bool is_batched_multi_stmt_split_on = false,
                     const bool no_throw_parser_error = false,
                     const bool is_pl_inner_parse = false,
-                    const bool is_parser_dynamic_sql = false);
+                    const bool is_parser_dynamic_sql = false,
+                    ParsedSql *owner = nullptr);
 public:
   virtual int parse(const common::ObString &stmt,
                     ParseResult &parse_result,
@@ -94,6 +97,13 @@ public:
                     const bool is_pl_inner_parse = false,
                     const bool is_parser_dynamic_sql = false);
 
+  int parse(const common::ObString &stmt, ParsedSql &parsed,
+            ParseMode mode = STD_MODE,
+            bool is_batched_multi_stmt_split_on = false,
+            bool no_throw_parser_error = false,
+            bool is_pl_inner_parse = false,
+            bool is_parser_dynamic_sql = false);
+
   virtual void free_result(ParseResult &parse_result);
   int parse_expression(const common::ObString &text, const ParseNode *&node,
                        bool is_for_trigger = false);
@@ -101,7 +111,7 @@ public:
    * @brief  parse interface for prepare usage
    * @param [in] query      - statement to be parsed
    * @param [in] ns      - external namespace
-   * @param [out] parse_result  - parse result
+   * @param [out] parsed  - owned parse result
    * @retval OB_SUCCESS execute success
    * @retval OB_SOME_ERROR special errno need to handle
    *
@@ -112,7 +122,7 @@ public:
    * At the same time, all objects (tables, views, functions) encountered are also recorded.
    *
    */
-  int prepare_parse(const common::ObString &query, void *ns, ParseResult &parse_result);
+  int prepare_parse(const common::ObString &query, void *ns, ParsedSql &parsed);
   static int pre_parse(const common::ObString &stmt,
                        PreParseResult &res);
 

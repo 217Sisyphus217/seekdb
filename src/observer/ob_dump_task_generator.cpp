@@ -22,6 +22,7 @@
 #endif
 #include "lib/alloc/memory_dump.h"
 #include "sql/parser/ob_parser.h"
+#include "sql/parser/parsed_sql.h"
 
 namespace oceanbase
 {
@@ -59,7 +60,8 @@ int ObDumpTaskGenerator::generate_task_from_file()
   ObMemAttr attr("dumpParser", ObCtxIds::DEFAULT_CTX_ID);
   allocator.set_attr(attr);
   ObParser parser(allocator, SMO_DEFAULT);
-  ParseResult parse_result;
+  ParsedSql parsed;
+  ParseResult &parse_result = parsed.legacy();
   ParseNode *stmt_node = nullptr;
   ParseNode *node = nullptr;
   const int64_t len = 128;
@@ -70,7 +72,10 @@ int ObDumpTaskGenerator::generate_task_from_file()
     ret = OB_NOT_INIT;
   } else if (OB_FAIL(read_cmd(buf, len, real_size))) {
   } else if(FALSE_IT(cmd.assign_ptr(buf, static_cast<int32_t>(real_size)))) {
-  } else if (OB_FAIL(parser.parse(cmd, parse_result))) {
+  } else if (OB_FAIL(parser.parse(cmd, parsed))) {
+  } else if (parsed.statement() != nullptr) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("not support", K(cmd));
   } else if(nullptr == parse_result.result_tree_) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(stmt_node = parse_result.result_tree_->children_[0])) {

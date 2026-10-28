@@ -1256,11 +1256,8 @@ SQL_UNITY_GROUPS = [
             "src/sql/resolver/ob_schema_checker.cpp",
             "src/sql/resolver/ob_stmt.cpp",
             "src/sql/resolver/ob_stmt_resolver.cpp",
-            "src/sql/resolver/tcl/ob_end_trans_resolver.cpp",
-            "src/sql/resolver/tcl/ob_savepoint_resolver.cpp",
             "src/sql/resolver/tcl/ob_savepoint_stmt.cpp",
-            "src/sql/resolver/tcl/ob_start_trans_resolver.cpp",
-            "src/sql/resolver/tcl/ob_tcl_resolver.cpp",
+            "src/sql/resolver/tcl/transaction_resolver.cpp",
         ],
     ),
     struct(

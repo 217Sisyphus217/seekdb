@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_PARSER
 #include "sql/parser/rust_sql_parser.h"
+#include "sql/parser/parsed_sql.h"
 #include "ob_parser.h"
 #include "lib/utility/ob_smart_call.h"
 #include "lib/oblog/ob_log.h"
@@ -641,7 +642,8 @@ int ObParser::parse_(const ObString &query,
                     const bool is_batched_multi_stmt_split_on,
                     const bool no_throw_parser_error,
                     const bool is_pl_inner_parse,
-                    const bool is_parse_dynamic_sql)
+                    const bool is_parse_dynamic_sql,
+                    ParsedSql *owner)
 {
   int ret = OB_SUCCESS;
   // Delete spaces at the end of the SQL statement
@@ -707,7 +709,7 @@ int ObParser::parse_(const ObString &query,
   }
   if (OB_SUCC(ret) && (parse_mode == STD_MODE || parse_mode == DYNAMIC_SQL_MODE
       || parse_mode == TRIGGER_MODE || parse_mode == METHOD_OPT_MODE)) {
-    return parse_rust_sql(stmt, parse_result);
+    return parse_rust_sql(stmt, parse_result, false, owner);
   }
   if (OB_SUCC(ret)) {
     bool is_create_func = false;
@@ -734,7 +736,9 @@ int ObParser::parse_(const ObString &query,
         || (is_call_procedure && parse_result.is_fp_)) && !is_mysql_comment) {
       ret = parse_sql(stmt, parse_result, no_throw_parser_error);
     } else {
-      if (OB_SUCC(ret = parse_rust_sql(stmt, parse_result, is_pl_inner_parse))) {
+      ParsedSql syntax;
+      if (OB_SUCC(ret = parse_rust_sql(stmt, parse_result, is_pl_inner_parse,
+                                      owner == nullptr ? &syntax : owner))) {
         parse_result.no_param_sql_ = const_cast<char *>(stmt.ptr());
         parse_result.no_param_sql_len_ = stmt.length();
         parse_result.end_col_ = stmt.length();
@@ -759,6 +763,14 @@ int ObParser::parse(const ObString &query,
                           no_throw_parser_error,
                           is_pl_inner_parse,
                           is_parse_dynamic_sql));
+}
+
+int ObParser::parse(const ObString &query, ParsedSql &parsed, ParseMode mode,
+                    bool split, bool no_throw, bool pl_inner, bool dynamic_sql)
+{
+  parsed.reset();
+  return SMART_CALL(parse_(query, parsed.legacy(), mode, split, no_throw,
+                          pl_inner, dynamic_sql, &parsed));
 }
 
 namespace {
@@ -912,19 +924,31 @@ int bind_pl_sql(ParseResult &result)
 }
 
 // Through parser for prepare interface, for spi_prepare call in mysql mode
-int ObParser::prepare_parse(const ObString &query, void *ns, ParseResult &parse_result)
+int ObParser::prepare_parse(const ObString &query, void *ns, ParsedSql &parsed)
 {
   int64_t length = query.length();
   while (length > 0 && ISSPACE(query[length - 1])) --length;
   if (length > 0 && query[length - 1] == '\0') --length;
   while (length > 0 && ISSPACE(query[length - 1])) --length;
-  parse_result = {};
+  parsed.reset();
+  ParseResult &parse_result = parsed.legacy();
   parse_result.pl_parse_info_.pl_ns_ = ns;
   parse_result.pl_parse_info_.lookup_symbol_ = lookup_pl_symbol;
   parse_result.malloc_pool_ = allocator_;
   parse_result.sql_mode_ = sql_mode_;
-  int ret = parse_rust_sql(ObString(length, query.ptr()), parse_result);
-  if (OB_SUCC(ret)) ret = bind_pl_sql(parse_result);
+  int ret = parse_rust_sql(ObString(length, query.ptr()), parse_result, false, &parsed);
+  if (OB_SUCC(ret)) {
+    if (parsed.statement() != nullptr) {
+      parse_result.no_param_sql_ = parse_strndup(query.ptr(), length, parse_result.malloc_pool_);
+      if (parse_result.no_param_sql_ == nullptr) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        parse_result.no_param_sql_len_ = length;
+      }
+    } else {
+      ret = bind_pl_sql(parse_result);
+    }
+  }
   return ret;
 }
 // Parse trace_id from the comment at the beginning of the line

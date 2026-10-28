@@ -1759,9 +1759,6 @@ stmt::StmtType ObResolverUtils::get_stmt_type_by_item_type(const ObItemType item
       SET_STMT_TYPE(T_SHOW_CREATE_FUNCTION);
       SET_STMT_TYPE(T_SHOW_PROCEDURE_STATUS);
       SET_STMT_TYPE(T_SHOW_FUNCTION_STATUS);
-      SET_STMT_TYPE(T_CREATE_SAVEPOINT);
-      SET_STMT_TYPE(T_RELEASE_SAVEPOINT);
-      SET_STMT_TYPE(T_ROLLBACK_SAVEPOINT);
       SET_STMT_TYPE(T_CREATE_USER);
       SET_STMT_TYPE(T_DROP_USER);
       SET_STMT_TYPE(T_RENAME_USER);
@@ -1778,15 +1775,6 @@ stmt::StmtType ObResolverUtils::get_stmt_type_by_item_type(const ObItemType item
       SET_STMT_TYPE(T_ACTIVATE_STANDBY);
       SET_STMT_TYPE(T_SHOW_CREATE_USER);
 #undef SET_STMT_TYPE
-      case T_ROLLBACK:
-      case T_COMMIT: {
-        type = stmt::T_END_TRANS;
-      }
-      break;
-      case T_BEGIN: {
-        type = stmt::T_START_TRANS;
-      }
-      break;
       case T_ALTER_SYSTEM_KILL: {
         type = stmt::T_KILL;
       }

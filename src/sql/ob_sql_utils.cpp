@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_OPT
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "ob_sql_utils.h"
+#include "sql/parser/parsed_sql.h"
 #include "sql/executor/ob_maintain_dependency_info_task.h"
 #include "share/rc/ob_server_runtime.h"
 #include "sql/ob_sql.h"
@@ -993,29 +994,6 @@ bool ObSQLUtils::cause_implicit_commit(ParseResult &result)
   return ret;
 }
 
-bool ObSQLUtils::is_end_trans_stmt(const ParseResult &result)
-{
-  bool bret = false;
-  if (NULL != result.result_tree_ &&
-      NULL != result.result_tree_->children_ &&
-      NULL != result.result_tree_->children_[0]) {
-    bret = (T_COMMIT == result.result_tree_->children_[0]->type_
-            || T_ROLLBACK == result.result_tree_->children_[0]->type_) ? true : false;
-  }
-  return bret;
-}
-
-bool ObSQLUtils::is_commit_stmt(const ParseResult &result)
-{
-  bool bret = false;
-  if (NULL != result.result_tree_ &&
-      NULL != result.result_tree_->children_ &&
-      NULL != result.result_tree_->children_[0]) {
-    bret = T_COMMIT == result.result_tree_->children_[0]->type_ ? true : false;
-  }
-  return bret;
-}
-
 // Used to determine the statement types not supported by prepare statements in mysql mode
 bool ObSQLUtils::is_mysql_ps_not_support_stmt(const ParseResult &result)
 {
@@ -1057,9 +1035,6 @@ bool ObSQLUtils::is_readonly_stmt(ParseResult &result)
     } else if (IS_SHOW_STMT(type)
                || T_USE_DATABASE == type
                || T_TRANSACTION == type
-               || T_BEGIN == type
-               || T_COMMIT == type
-               || T_ROLLBACK == type
                || T_VARIABLE_SET == type
                || T_SET_NAMES == type //read only not restrict it
                || T_SET_CHARSET == type  //read only not restrict it
@@ -1442,7 +1417,8 @@ int ObSQLUtils::get_outline_key(ObIAllocator &allocator,
   } else {
     // Quick parameterization SQL with ?
     ObString no_param_sql;
-    ParseResult parse_result;
+    ParsedSql parsed;
+    ParseResult &parse_result = parsed.legacy();
     ObParser parser(allocator, session->get_sql_mode(), session->get_charsets4parser());
     ObSEArray<ObPCParam *, OB_PC_SPECIAL_PARAM_COUNT> special_params;
     ObString param_sql;
@@ -1461,7 +1437,9 @@ int ObSQLUtils::get_outline_key(ObIAllocator &allocator,
     ParseNode *type_node = NULL;
     sql_info.need_check_fp_ = false;
     int64_t format_len = query_sql.length() * 2;
-    if (OB_FAIL(parser.parse(query_sql, parse_result))) {
+    if (OB_FAIL(parser.parse(query_sql, parsed))) {
+    } else if (parsed.statement() != nullptr) {
+      ret = OB_SQL_DML_ONLY;
     } else if (OB_ISNULL(parse_result.result_tree_)) {
       ret = OB_NOT_INIT;
     } else if (OB_ISNULL(parse_result.result_tree_->children_)

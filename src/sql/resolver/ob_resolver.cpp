@@ -22,8 +22,8 @@
 #include "sql/resolver/dml/ob_insert_resolver.h"
 #include "sql/resolver/dml/ob_update_resolver.h"
 #include "sql/resolver/dml/ob_delete_resolver.h"
-#include "sql/resolver/tcl/ob_start_trans_resolver.h"
-#include "sql/resolver/tcl/ob_end_trans_resolver.h"
+#include "sql/resolver/tcl/transaction_resolver.h"
+#include "sql/parser/parsed_sql.h"
 #include "sql/resolver/prepare/ob_prepare_resolver.h"
 #include "sql/resolver/prepare/ob_execute_resolver.h"
 #include "sql/resolver/prepare/ob_deallocate_resolver.h"
@@ -72,9 +72,8 @@
 #include "sql/resolver/dcl/ob_create_role_resolver.h"
 #include "sql/resolver/dcl/ob_drop_role_resolver.h"
 #include "sql/resolver/dcl/ob_alter_user_role_resolver.h"
-#include "sql/resolver/tcl/ob_start_trans_resolver.h"
-#include "sql/resolver/tcl/ob_end_trans_resolver.h"
-#include "tcl/ob_savepoint_resolver.h"
+#include "sql/resolver/tcl/transaction_resolver.h"
+#include "sql/parser/parsed_sql.h"
 #include "sql/resolver/cmd/ob_variable_set_resolver.h"
 #include "sql/resolver/cmd/ob_show_resolver.h"
 #include "sql/resolver/cmd/ob_diff_table_resolver.h"
@@ -133,6 +132,30 @@ int ObResolver::select_stmt_resolver_func(ObResolverParams &params, const ParseN
     if (OB_FAIL(SMART_CALL(stmt_resolver.resolve(parse_tree)))) {
     }
     stmt = stmt_resolver.get_basic_stmt();
+  }
+  return ret;
+}
+
+int ObResolver::resolve(const ParsedSql &parsed, ObStmt *&stmt)
+{
+  if (parsed.statement() == nullptr) {
+    return resolve(IS_NOT_PREPARED_STMT, *parsed.legacy().result_tree_->children_[0], stmt);
+  }
+  ACTIVE_SESSION_FLAG_SETTER_GUARD(in_resolve);
+  int ret = OB_SUCCESS;
+  stmt::StmtType type = stmt::T_NONE;
+  if (OB_ISNULL(params_.allocator_) || OB_ISNULL(params_.schema_checker_)
+      || OB_ISNULL(params_.session_info_) || OB_ISNULL(params_.expr_factory_)
+      || OB_ISNULL(params_.query_ctx_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(parsed.statement_type(type))) {
+  } else {
+    params_.session_info_->set_stmt_type(type);
+    ObExecContext *exec_ctx = params_.session_info_->get_cur_exec_ctx();
+    if (exec_ctx != nullptr && exec_ctx->get_sql_ctx() != nullptr) {
+      exec_ctx->get_sql_ctx()->stmt_type_ = type;
+    }
+    ret = resolve_transaction(*parsed.statement(), params_, stmt);
   }
   return ret;
 }
@@ -248,16 +271,6 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_DELETE: {
         REGISTER_STMT_RESOLVER(Delete);
-        break;
-      }
-      case T_BEGIN: {
-        REGISTER_STMT_RESOLVER(StartTrans);
-        break;
-      }
-      case T_ROLLBACK:
-        //fall through
-      case T_COMMIT: {
-        REGISTER_STMT_RESOLVER(EndTrans);
         break;
       }
       case T_FREEZE: {
@@ -592,12 +605,6 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_ALTER_ROLE: {
         REGISTER_STMT_RESOLVER(AlterRole);
-        break;
-      }
-      case T_CREATE_SAVEPOINT:
-      case T_ROLLBACK_SAVEPOINT:
-      case T_RELEASE_SAVEPOINT: {
-        REGISTER_STMT_RESOLVER(SavePoint);
         break;
       }
       case T_TG_CREATE: {

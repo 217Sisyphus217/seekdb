@@ -72,6 +72,8 @@ cc_library(
     hdrs = _PARSER_PUBLIC_ROOTS,
     textual_hdrs = _PARSER_INTERFACE_CLOSURE,
     deps = [
+        "//rust:sql_parser_headers",
+        "//src/share:statement_type",
         "//src/oblib:common_sql_mode",
         "//src/query:_sql_parser_types",
     ],

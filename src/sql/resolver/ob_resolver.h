@@ -24,6 +24,7 @@ namespace oceanbase
 namespace sql
 {
 class ObSQLSessionInfo;
+class ParsedSql;
 
 /// the interface of this module
 class ObResolver
@@ -39,6 +40,7 @@ public:
   virtual ~ObResolver();
 
   virtual int resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObStmt *&stmt);
+  int resolve(const ParsedSql &parsed, ObStmt *&stmt);
   ObResolverParams &get_params() { return params_; }
 
 private:

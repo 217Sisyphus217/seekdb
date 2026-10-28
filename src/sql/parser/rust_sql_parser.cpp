@@ -15,6 +15,9 @@
 #define USING_LOG_PREFIX SQL_PARSER
 #include "rust/sql_parser.h"
 #include "sql/parser/rust_sql_parser.h"
+#include "sql/parser/parsed_sql.h"
+#include "sql/ob_sql_utils.h"
+#include "sql/resolver/ob_resolver_utils.h"
 #include "sql/parser/parse_node.h"
 #include "sql/parser/parse_malloc.h"
 #include "lib/string/ob_string.h"
@@ -302,12 +305,9 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Update: return T_UPDATE;
     case Kind::Delete: return T_DELETE;
     case Kind::DeleteTables: return T_DELETE_TABLE_NODE;
-    case Kind::Begin: return T_BEGIN;
-    case Kind::SetTransaction: return T_TRANSACTION;
+      case Kind::SetTransaction: return T_TRANSACTION;
     case Kind::TransactionCharacteristics: return T_TRANSACTION_CHARACTERISTICS;
-    case Kind::Commit: return T_COMMIT;
-    case Kind::Rollback: return T_ROLLBACK;
-    case Kind::UseDatabase: return T_USE_DATABASE;
+        case Kind::UseDatabase: return T_USE_DATABASE;
     case Kind::CreateDatabase: return T_CREATE_DATABASE;
     case Kind::DatabaseOptions: return T_DATABASE_OPTION_LIST;
     case Kind::DropDatabase: return T_DROP_DATABASE;
@@ -430,10 +430,7 @@ ObItemType node_type(const peg::Node &node)
     case Kind::WhenList: return T_WHEN_LIST;
     case Kind::When: return T_WHEN;
     case Kind::DefaultNull: return T_DEFAULT_NULL;
-    case Kind::Savepoint: return T_CREATE_SAVEPOINT;
-    case Kind::RollbackSavepoint: return T_ROLLBACK_SAVEPOINT;
-    case Kind::ReleaseSavepoint: return T_RELEASE_SAVEPOINT;
-    case Kind::LockWait: return T_SFU_INT;
+          case Kind::LockWait: return T_SFU_INT;
     case Kind::LockWaitDecimal: return T_SFU_DECIMAL;
     case Kind::SkipLocked: return T_SKIP_LOCKED;
     case Kind::HexString:
@@ -888,14 +885,17 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
   pl = pl || type == T_SP_CREATE || type == T_SF_CREATE || type == T_SP_CALL_STMT
       || type == T_PACKAGE_CREATE || type == T_PACKAGE_CREATE_BODY;
   if (type == T_INVALID) return common::OB_ERR_UNEXPECTED;
-  node = new_node(pool, type, type == T_SELECT ? PARSE_SELECT_MAX_IDX : source.children.size());
+  const bool native_sql = source.kind == Kind::PlSql && source.children.size() == 1
+      && peg::is_transaction(source.children[0]);
+  const size_t child_count = native_sql ? 0 : source.children.size();
+  node = new_node(pool, type, type == T_SELECT ? PARSE_SELECT_MAX_IDX : child_count);
   if (node == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   const int select_slots[] = {PARSE_SELECT_DISTINCT, PARSE_SELECT_SELECT, PARSE_SELECT_INTO, PARSE_SELECT_FROM,
                              PARSE_SELECT_WHERE, PARSE_SELECT_DYNAMIC_GROUP, PARSE_SELECT_DYNAMIC_HAVING,
                              PARSE_SELECT_NAMED_WINDOWS, PARSE_SELECT_SET, PARSE_SELECT_ORDER, PARSE_SELECT_LIMIT,
                              PARSE_SELECT_FOR_UPD, PARSE_SELECT_HINTS, PARSE_SELECT_INTO_EXTRA,
                              PARSE_SELECT_APPROX, PARSE_SELECT_VECTOR_INDEX_PARAMS, PARSE_SELECT_WITH};
-  for (size_t child = 0; child < source.children.size(); ++child) {
+  for (size_t child = 0; child < child_count; ++child) {
     const size_t slot = type == T_SELECT ? select_slots[child] : child;
     const int ret = build_node(sql, expression_sql, source.children[child], parameters, pool, node->children_[slot], pl);
     if (ret != common::OB_SUCCESS) return ret;
@@ -1112,6 +1112,11 @@ int build_tree(const common::ObString &sql, peg::ParseTree &tree, ParseResult &r
   if (root == nullptr) return common::OB_ALLOCATE_MEMORY_FAILED;
   root->children_[0] = query;
   result.result_tree_ = root;
+  return common::OB_SUCCESS;
+}
+
+int fill_parse_metadata(const common::ObString &sql, peg::ParseTree &tree, ParseResult &result)
+{
   result.contain_sensitive_data_ = tree.root.kind == Kind::SetConfig
       || tree.root.kind == Kind::CreateUser || tree.root.kind == Kind::SetPassword || tree.root.kind == Kind::Grant;
   if (tree.parameter_names.empty()) {
@@ -1148,7 +1153,7 @@ int report_parse_error(const common::ObString &sql, size_t offset)
   return common::OB_ERR_PARSE_SQL;
 }
 
-int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routine_body)
+int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routine_body, ParsedSql *owner)
 {
   static thread_local char error[MAX_ERROR_MSG];
   error[0] = '\0';
@@ -1168,6 +1173,51 @@ int parse_rust_sql(const common::ObString &sql, ParseResult &result, bool routin
     result.end_col_ = parsed.error_offset + 1;
     return report_parse_error(sql, parsed.error_offset);
   }
+  int ret = fill_parse_metadata(sql, parsed, result);
+  if (ret != common::OB_SUCCESS) return ret;
+  if (peg::is_transaction(parsed.root)) {
+    if (owner == nullptr) return common::OB_ERR_UNEXPECTED;
+    owner->syntax_.emplace(std::move(parsed));
+    return common::OB_SUCCESS;
+  }
   return build_tree(sql, parsed, result, routine_body);
 }
+
+int ParsedSql::statement_type(stmt::StmtType &type) const
+{
+  if (!syntax_) return ObResolverUtils::resolve_stmt_type(legacy_, type);
+  switch (syntax_->root.kind) {
+    case peg::NodeKind::Begin: type = stmt::T_START_TRANS; break;
+    case peg::NodeKind::Commit:
+    case peg::NodeKind::Rollback: type = stmt::T_END_TRANS; break;
+    case peg::NodeKind::Savepoint: type = stmt::T_CREATE_SAVEPOINT; break;
+    case peg::NodeKind::RollbackSavepoint: type = stmt::T_ROLLBACK_SAVEPOINT; break;
+    case peg::NodeKind::ReleaseSavepoint: type = stmt::T_RELEASE_SAVEPOINT; break;
+    default: return common::OB_ERR_UNEXPECTED;
+  }
+  return common::OB_SUCCESS;
+}
+
+bool ParsedSql::is_end_transaction() const
+{
+  return syntax_ && (syntax_->root.kind == peg::NodeKind::Commit
+      || syntax_->root.kind == peg::NodeKind::Rollback);
+}
+
+void ParsedSql::sql_traits(ObSqlTraits &traits)
+{
+  statement_type(traits.stmt_type_);
+  if (syntax_) {
+    traits.is_readonly_stmt_ = syntax_->root.kind == peg::NodeKind::Begin || is_end_transaction();
+    traits.is_cause_implicit_commit_ = false;
+    traits.is_commit_stmt_ = syntax_->root.kind == peg::NodeKind::Commit;
+    traits.allowed_on_standby_ = false;
+  } else {
+    traits.is_readonly_stmt_ = ObSQLUtils::is_readonly_stmt(legacy_);
+    traits.is_cause_implicit_commit_ = ObSQLUtils::cause_implicit_commit(legacy_);
+    traits.is_commit_stmt_ = false;
+    traits.allowed_on_standby_ = ObSQLUtils::is_allowed_on_standby(ObSQLUtils::get_sql_item_type(legacy_));
+  }
+}
+
 }

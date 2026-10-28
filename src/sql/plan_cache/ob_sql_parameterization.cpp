@@ -173,7 +173,8 @@ int ObSqlParameterization::transform_syntax_tree(ObIAllocator &allocator,
     SQL_PC_LOG(WARN, "invalid argument", K(tree), K(ret));
   } else if (OB_FAIL(session.get_collation_connection(collation_connection))) {
   } else {
-    sql_info.sql_traits_.stmt_type_ = children_node->type_;
+    sql_info.sql_traits_.stmt_type_ = ObResolverUtils::get_stmt_type_by_item_type(children_node->type_);
+    sql_info.sql_traits_.allowed_on_standby_ = ObSQLUtils::is_allowed_on_standby(children_node->type_);
     TransformTreeCtx ctx;
     ctx.collation_type_ = collation_connection;
     ctx.national_collation_type_ = session.get_nls_collation_nation();
@@ -550,7 +551,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
           } else if (fmt_int_or_ch_decint
                      && OB_FAIL(ctx.sql_info_->fmt_int_or_ch_decint_idx_.add_member(ctx.sql_info_->total_))) {
           } else if (OB_FAIL(ObResolverUtils::resolve_const(node,
-                              static_cast<stmt::StmtType>(ctx.sql_info_->sql_traits_.stmt_type_),
+                              stmt::T_NONE, // Parameters use execution precision, including SQL inside outline DDL.
                               *(ctx.allocator_),
                               ctx.collation_type_,
                               ctx.national_collation_type_,

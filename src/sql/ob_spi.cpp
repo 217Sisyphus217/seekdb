@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL
 #include "ob_spi.h"
+#include "sql/parser/parsed_sql.h"
 #include "share/rc/ob_server_runtime.h"
 #include "ob_sql.h"
 #include "sql/ob_query_retry_ctrl.h"
@@ -1873,8 +1874,9 @@ int ObSPIService::spi_parse_prepare(common::ObIAllocator &allocator,
     ret = OB_INVALID_ARGUMENT;
   } else {
     ObParser parser(allocator, session.get_sql_mode(), session.get_charsets4parser());
-    ParseResult parse_result;
-    if (OB_FAIL(parser.prepare_parse(sql, static_cast<void*>(secondary_namespace), parse_result))) {
+    ParsedSql parsed;
+    ParseResult &parse_result = parsed.legacy();
+    if (OB_FAIL(parser.prepare_parse(sql, static_cast<void*>(secondary_namespace), parsed))) {
     } else if (OB_FAIL(ob_write_string(allocator, ObString(parse_result.no_param_sql_len_, parse_result.no_param_sql_), prepare_result.route_sql_))) {
     } else {
       PLPrepareCtx pl_prepare_ctx(session, NULL, false, false, false);
@@ -1894,6 +1896,8 @@ int ObSPIService::spi_parse_prepare(common::ObIAllocator &allocator,
           prepare_result.for_update_ = pl_prepare_result.result_set_->get_is_select_for_update();
           prepare_result.has_hidden_rowid_ = false;
           if (OB_FAIL(ret)) {
+          } else if (parsed.statement() != nullptr) {
+            // Transaction commands have no PL bindings, INTO targets, or object references.
           } else if (OB_FAIL(resolve_exec_params(parse_result,
                                           session,
                                           schema_guard,

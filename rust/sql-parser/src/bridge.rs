@@ -299,6 +299,9 @@ pub(crate) mod ffi {
         Delete,
         DeleteTables,
         Begin,
+        ConsistentSnapshot,
+        ReadOnly,
+        ReadWrite,
         SetTransaction,
         TransactionCharacteristics,
         Commit,
@@ -747,6 +750,17 @@ pub(crate) mod ffi {
         depth: usize,
     }
 
+    enum TransactionAccess {
+        Default,
+        ReadOnly,
+        ReadWrite,
+    }
+
+    struct TransactionOptions {
+        consistent_snapshot: bool,
+        access: TransactionAccess,
+    }
+
     struct ParseTree {
         root: Node,
         expanded_sql: String,
@@ -814,6 +828,8 @@ pub(crate) mod ffi {
         ) -> StatementSplits;
         fn parse_search_query(input: &[u8]) -> SearchTree;
         fn inspect_expression(sql: &[u8], mode: SqlMode) -> ExpressionInfo;
+        fn is_transaction(node: &Node) -> bool;
+        fn transaction_options(node: &Node) -> TransactionOptions;
         fn parse_sql(
             sql: &[u8],
             mode: SqlMode,
@@ -825,6 +841,30 @@ pub(crate) mod ffi {
 use crate::fts::parse_search_query;
 use crate::inspect::inspect_expression;
 use crate::scan::{begin_scan, finish_scan, Scanner};
+
+fn is_transaction(node: &Node) -> bool {
+    matches!(
+        node.kind,
+        Kind::Begin | Kind::Commit | Kind::Rollback | Kind::Savepoint
+            | Kind::ReleaseSavepoint | Kind::RollbackSavepoint
+    )
+}
+
+fn transaction_options(node: &Node) -> ffi::TransactionOptions {
+    let mut options = ffi::TransactionOptions {
+        consistent_snapshot: false,
+        access: ffi::TransactionAccess::Default,
+    };
+    for option in &node.children {
+        match option.kind {
+            Kind::ConsistentSnapshot => options.consistent_snapshot = true,
+            Kind::ReadOnly => options.access = ffi::TransactionAccess::ReadOnly,
+            Kind::ReadWrite => options.access = ffi::TransactionAccess::ReadWrite,
+            _ => {}
+        }
+    }
+    options
+}
 
 fn split_sql(
     input: &[u8],

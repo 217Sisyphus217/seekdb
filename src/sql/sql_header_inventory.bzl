@@ -80,6 +80,7 @@ SQL_PUBLIC_HEADER_ROOTS = [
     "parser/parse_define.h",
     "parser/parse_malloc.h",
     "parser/parse_node.h",
+    "parser/parsed_sql.h",
     "parser/rust_sql_parser.h",
     "pl/ob_pl.h",
     "pl/ob_pl_allocator.h",

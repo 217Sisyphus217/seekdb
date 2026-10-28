@@ -983,21 +983,32 @@ peg::parser! {
                     Node::missing(), Node::list(Kind::Hints,hints.unwrap_or_default()), Node::missing(), Node::missing(),
                     if ignore.is_some() { Node::new(Kind::Ignore,vec![]) } else { Node::missing() }])
             }
-        rule transaction_access() -> u64 = kw("read") value:(kw("only") { 2 } / kw("write") { 4 }) { value }
-        rule transaction_options() -> u64
-            = kw("with") kw("consistent") kw("snapshot") access:("," _ value:transaction_access() { value })? { 1|access.unwrap_or(0) }
-            / access:transaction_access() snapshot:("," _ kw("with") kw("consistent") kw("snapshot"))? { access|u64::from(snapshot.is_some()) }
+        rule transaction_access() -> Node
+            = start:position!() kw("read") kind:(kw("only") { Kind::ReadOnly } / kw("write") { Kind::ReadWrite }) end:position!() {
+                Node::new(kind,vec![]).at(start,end)
+            }
+        rule consistent_snapshot() -> Node
+            = start:position!() kw("with") kw("consistent") kw("snapshot") end:position!() {
+                Node::new(Kind::ConsistentSnapshot,vec![]).at(start,end)
+            }
+        rule transaction_options() -> Vec<Node>
+            = snapshot:consistent_snapshot() access:("," _ value:transaction_access() { value })? {
+                let mut options=vec![snapshot]; options.extend(access); options
+            }
+            / access:transaction_access() snapshot:("," _ value:consistent_snapshot() { value })? {
+                let mut options=vec![access]; options.extend(snapshot); options
+            }
         rule transaction() -> Node
             = kw("savepoint") name:ident() { Node::new(Kind::Savepoint,vec![]).text(name.text).at(name.start,name.end) }
             / kw("release") kw("savepoint") name:ident() { Node::new(Kind::ReleaseSavepoint,vec![]).text(name.text).at(name.start,name.end) }
             / kw("rollback") kw("work")? kw("to") kw("savepoint")? name:ident() {
                 Node::new(Kind::RollbackSavepoint,vec![]).text(name.text).at(name.start,name.end)
             }
-            / options:(kw("begin") kw("work")? { 0 } / kw("start") kw("transaction") options:transaction_options()? { options.unwrap_or(0) }) {
-                Node::new(Kind::Begin, vec![Node::new(Kind::HiddenInt, vec![]).value(options), Node::missing()])
+            / options:(kw("begin") kw("work")? { vec![] } / kw("start") kw("transaction") options:transaction_options()? { options.unwrap_or_default() }) {
+                Node::new(Kind::Begin,options)
             }
-            / kw("commit") kw("work")? { Node::new(Kind::Commit, vec![Node::missing()]) }
-            / kw("rollback") kw("work")? { Node::new(Kind::Rollback, vec![Node::missing()]) }
+            / kw("commit") kw("work")? { Node::new(Kind::Commit,vec![]) }
+            / kw("rollback") kw("work")? { Node::new(Kind::Rollback,vec![]) }
         rule if_not_exists() -> Node = kw("if") kw("not") kw("exists") { Node::new(Kind::IfNotExists, vec![]) }
         rule if_exists() -> Node = kw("if") kw("exists") { Node::new(Kind::IfExists, vec![]) }
         rule temporary() -> Node = kw("temporary") { Node::new(Kind::Temporary,vec![]) }
@@ -1403,10 +1414,12 @@ peg::parser! {
         }
         rule transaction_characteristics() -> Node
             = access:transaction_access() isolation:("," _ value:isolation_level() { value })? {
+                let access=if access.kind==Kind::ReadOnly { 2 } else { 4 };
                 Node::new(Kind::TransactionCharacteristics,vec![Node::new(Kind::HiddenInt,vec![]).value(access),Node::optional(isolation)])
             }
             / isolation:isolation_level() access:("," _ value:transaction_access() { value })? {
-                Node::new(Kind::TransactionCharacteristics,vec![Node::optional(access.map(|value| Node::new(Kind::HiddenInt,vec![]).value(value))),isolation])
+                let access=access.map(|node| Node::new(Kind::HiddenInt,vec![]).value(if node.kind==Kind::ReadOnly { 2 } else { 4 }));
+                Node::new(Kind::TransactionCharacteristics,vec![Node::optional(access),isolation])
             }
         rule setting() -> Node
             = kw("set") scope:scope()? kw("transaction") options:transaction_characteristics() {

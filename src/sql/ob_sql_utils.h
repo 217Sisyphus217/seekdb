@@ -335,8 +335,6 @@ public:
   static int check_and_copy_column_alias_name(const common::ObCollationType cs_type, const bool is_auto_gen,
                                               common::ObIAllocator *allocator, common::ObString &name);
   static bool cause_implicit_commit(ParseResult &result);
-  static bool is_end_trans_stmt(const ParseResult &result);
-  static bool is_commit_stmt(const ParseResult &result);
   static bool is_mysql_ps_not_support_stmt(const ParseResult &result);
   static bool is_readonly_stmt(ParseResult &result);
   static bool is_allowed_on_standby(const ObItemType stmt_type);
@@ -830,12 +828,14 @@ struct ObSqlTraits
   bool is_readonly_stmt_;
   bool is_cause_implicit_commit_;
   bool is_commit_stmt_;
-  ObItemType stmt_type_;
+  stmt::StmtType stmt_type_;
+  bool allowed_on_standby_;
 
   ObSqlTraits() : is_readonly_stmt_(false),
                   is_cause_implicit_commit_(false),
                   is_commit_stmt_(false),
-                  stmt_type_(T_INVALID)
+                  stmt_type_(stmt::T_NONE),
+                  allowed_on_standby_(false)
   {
     sql_id_[common::OB_MAX_SQL_ID_LENGTH] = '\0';
   }
@@ -845,12 +845,13 @@ struct ObSqlTraits
     is_readonly_stmt_ = false;
     is_cause_implicit_commit_ = false;
     is_commit_stmt_ = false;
-    stmt_type_ = T_INVALID;
+    stmt_type_ = stmt::T_NONE;
+    allowed_on_standby_ = false;
   }
    TO_STRING_KV(K(is_readonly_stmt_),
                 K(is_cause_implicit_commit_),
                 K(is_commit_stmt_),
-                K(stmt_type_));
+                K(stmt_type_), K(allowed_on_standby_));
 };
 
 template<typename ValueType>

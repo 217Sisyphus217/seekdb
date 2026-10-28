@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_expr_statement_digest.h"
+#include "sql/parser/parsed_sql.h"
 
 #include "sql/plan_cache/ob_sql_parameterization.h"
 #include "sql/engine/expr/ob_datum_cast.h"
@@ -39,11 +40,19 @@ int calc_digest_text_inner(const ObString &query,
                            ObString &digest_str)
 {
   int ret = OB_SUCCESS;
-  ParseResult parse_result;
+  ParsedSql parsed;
+  ParseResult &parse_result = parsed.legacy();
   ParamStore tmp_params((ObWrapperAllocator(allocator)));
   stmt::StmtType stmt_type = stmt::T_NONE;
   ObItemType item_type = T_NULL;
-  if (OB_FAIL(parser.parse(query, parse_result))) {
+  if (OB_FAIL(parser.parse(query, parsed))) {
+  } else if (parsed.statement() != nullptr) {
+    if (i > 0) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "digest function");
+    } else {
+      digest_str = query;
+    }
   } else if (OB_ISNULL(parse_result.result_tree_)
             || OB_ISNULL(parse_result.result_tree_->children_[0])) {
     ret = OB_ERR_UNEXPECTED;
