@@ -20,7 +20,7 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持 ANSI_QUOTES、NO_BACKSLASH_ESCAPES、PIPES_AS_CONCAT、HIGH_NOT_PRECEDENCE。
 
 已接入多行 INSERT、INSERT SELECT、INSERT SET、REPLACE、冲突更新、UPDATE、DELETE
-和事务提交／回滚、保存点；基础建删库表、USE、常用列类型、默认值、自增、列唯一约束和主键。
+（含多表删除）和事务提交／回滚、保存点；基础建删库表、USE、常用列类型、默认值、自增、列唯一约束和主键。
 支持 CASE、系统／用户变量、SET、字符集设置，以及基础 SHOW／DESCRIBE。
 已接入 CAST／CONVERT、二进制字面量、行锁、VALUES、LATERAL、排名和聚合窗口函数、
 命名窗口和数值窗口边界，以及启动和 schema 刷新使用的 ALTER SYSTEM 和基础 hint。
@@ -41,7 +41,7 @@ IN 子查询和派生表。语义检查、相关子查询绑定与执行沿用�
 支持日期时间字面量、REGEXP／RLIKE、SELECT ALL、RANGE 分区、ROW_FORMAT、数据库字符集选项、
 SHOW CHARSET／COLLATION、SET TRANSACTION 和 MAJOR／MINOR FREEZE。
 支持模板和逐分区定义的二级分区、ANY／SOME／ALL 子查询、SQL_CALC_FOUND_ROWS，
-以及分布式扫描、聚合、集合运算和常用查询改写的 outline 提示。
+以及分布式扫描、聚合、集合运算、OR 展开和常用查询改写的 outline 提示。
 支持 POSITION／TRIM／WEIGHT_STRING、IS UNKNOWN、GROUP BY 排序和 ROLLUP、ENUM／SET，
 以及 UTF-8／二进制字符串前缀、相邻字符串、列 ON UPDATE、表字符集转换和 TABLE(GENERATOR(...))。
 支持外键声明、增删约束和引用动作，以及 STRING、TINY／MEDIUM 文本和二进制大对象类型。

@@ -482,7 +482,7 @@ impl Node {
             "current_user" => Kind::CurrentUser,
             _ => Kind::Function,
         };
-        if function == "substring" {
+        if matches!(function.as_str(), "substr" | "substring") {
             name.text = "substr".into();
         } else if function == "schema" {
             name.text = "database".into();

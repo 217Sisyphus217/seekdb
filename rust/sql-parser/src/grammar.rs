@@ -452,7 +452,7 @@ peg::parser! {
             / negated:kw("not")? tail:(kw("between") low:bit_or(level) kw("and") high:bit_or(level) { Tail::Between(false, low, high) }
                 / kw("like") right:bit_or(level) escape:(kw("escape") value:bit_or(level) { value })? { Tail::Like(false,right,escape) }
                 / (kw("regexp") / kw("rlike")) right:bit_or(level) { Tail::Compare("regexp".into(),right) }
-                / kw("in") "(" _ values:(select(level+1) / values:expr_list(level+1) { Node::new(Kind::ExprList, values) }) ")" end:position!() _ { Tail::In(false, values, end) })
+                / kw("in") "(" _ values:(query:select(level+1) &")" { query } / values:expr_list(level+1) { Node::new(Kind::ExprList, values) }) ")" end:position!() _ { Tail::In(false, values, end) })
                 { match tail {
                     Tail::Between(_, low, high) => Tail::Between(negated.is_some(), low, high),
                     Tail::In(_, values, end) => Tail::In(negated.is_some(), values, end),
@@ -681,6 +681,8 @@ peg::parser! {
                     Node::new(Kind::PqDistribute,vec![Node::optional(qb),tables,outer,inner])
                 }
             / kw("pq_map") "(" _ qb:hint_qb()? tables:hint_join_item() ")" _ { Node::new(Kind::PqMap,vec![Node::optional(qb),tables]) }
+            / kw("pq_set") "(" _ qb:hint_qb() target:(!distribute_method() value:hint_qb_name() { value })?
+                methods:(distribute_method() ** (("," _)?)) ")" _ { Node::new(Kind::PqSet,vec![qb,Node::optional(target),Node::list(Kind::DistributeMethods,methods)]) }
             / kind:(kw("pq_gby") { Kind::PqGroupBy } / kw("pq_distinct") { Kind::PqDistinct }) "(" _ qb:hint_qb()?
                 method:distribute_method() sort:(enabled(kind==Kind::PqGroupBy) ("," _)? value:type_size() { value })? ")" _ {
                     Node::new(kind,vec![Node::optional(qb),method,Node::optional(sort)])
@@ -721,6 +723,10 @@ peg::parser! {
                     Node::new(kind,vec![Node::optional(qb),Node::new(Kind::JoinHintTables,tables)])
                 }
             / kw("use_plan_cache") "(" _ policy:(kw("none") { 1 } / kw("default") { 2 }) ")" _ { Node::new(Kind::UsePlanCache,vec![]).value(policy) }
+            / kind:(kw("use_concat") { Kind::UseConcat } / kw("no_expand") { Kind::NoExpand })
+                args:("(" _ qb:hint_qb()? condition:(enabled(kind==Kind::UseConcat) value:string() { value })? ")" _ { (qb,condition) })? {
+                    let (qb,condition)=args.unwrap_or_default();Node::new(kind,vec![Node::optional(qb),Node::optional(condition)])
+                }
             / kind:(kw("merge") { Kind::MergeView } / kw("no_merge") { Kind::NoMergeView })
                 args:("(" _ qb:hint_qb()? target:(enabled(kind==Kind::MergeView) direction:("<" _ { 1 } / ">" _ { 0 }) name:hint_qb_name() { (direction,name) })? ")" _ { (qb,target) })? {
                     let (qb,target)=args.unwrap_or_default();
@@ -802,7 +808,8 @@ peg::parser! {
         rule ignored_hint_arguments(level: usize) = depth(level) "(" _
             (ignored_hint_arguments(level+1) / string() / hint_name() / !['('|')'|'\''|'"'|'`'] !"*/" [_])* ")" _
         rule hints() -> Vec<Node> = "/*+" _ options:((value:hint_option() { value }
-                / word() _ ignored_hint_arguments(0)? { Node::missing() }) ** (("," _)?)) "*/" _ {
+                / word() _ ignored_hint_arguments(0)? { Node::missing() }
+                / !['('|')'|'\''|'"'|'`'|','|'@'|'0'..='9'] !"*/" [_] _ { Node::missing() }) ** (("," _)?)) "*/" _ {
             options.into_iter().filter(|value| value.kind!=Kind::Missing).collect()
         }
         rule select(level: usize) -> Node = value:query_expression(level) {? Node::select(value) }
@@ -887,11 +894,20 @@ peg::parser! {
                     Node::optional(limit), Node::missing(), Node::list(Kind::Hints,hints.unwrap_or_default()),
                     if ignore.is_some() { Node::new(Kind::Ignore, vec![]) } else { Node::missing() }, Node::missing(), Node::missing()])
             }
-        rule delete() -> Node = kw("delete") hints:hints()? ignore:kw("ignore")? (kw("low_priority") / kw("quick"))?
-            kw("from") table:relation(0) filter:(kw("where") value:expr(0) { value })?
-            order:(kw("order") kw("by") values:(order_item(0) ++ ("," _)) { values })? limit:limit()? {
-                Node::new(Kind::Delete, vec![Node::missing(), Node::new(Kind::DeleteTables, vec![Node::missing(),
-                    Node::new(Kind::TableReferences, vec![table])]), Node::where_clause(filter),
+        rule delete_target() -> Node = name:name() ("." _ "*" _)? {? Node::relation(name) }
+        rule delete_tables() -> Node
+            = targets:(delete_target() ++ ("," _)) kw("from") tables:(table(0) ++ ("," _)) {
+                Node::new(Kind::DeleteTables,vec![Node::new(Kind::TableReferences,targets),Node::new(Kind::TableReferences,tables)])
+            }
+            / kw("from") targets:(delete_target() ++ ("," _)) kw("using") tables:(table(0) ++ ("," _)) {
+                Node::new(Kind::DeleteTables,vec![Node::new(Kind::TableReferences,targets),Node::new(Kind::TableReferences,tables)])
+            }
+            / kw("from") table:relation(0) { Node::new(Kind::DeleteTables,vec![Node::missing(),Node::new(Kind::TableReferences,vec![table])]) }
+        rule delete() -> Node = kw("delete") hints:hints()? ignore:kw("ignore")? (kw("low_priority") / kw("quick"))*
+            tables:delete_tables() filter:(kw("where") value:expr(0) { value })?
+            order:(enabled(tables.children[0].kind==Kind::Missing) kw("order") kw("by") values:(order_item(0) ++ ("," _)) { values })?
+            limit:(enabled(tables.children[0].kind==Kind::Missing) value:limit() { value })? {
+                Node::new(Kind::Delete, vec![Node::missing(), tables, Node::where_clause(filter),
                     Node::order_clause(order.unwrap_or_default()), Node::optional(limit),
                     Node::missing(), Node::list(Kind::Hints,hints.unwrap_or_default()), Node::missing(), Node::missing(),
                     if ignore.is_some() { Node::new(Kind::Ignore,vec![]) } else { Node::missing() }])

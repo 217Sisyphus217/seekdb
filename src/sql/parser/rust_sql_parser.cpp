@@ -413,6 +413,10 @@ ObItemType node_type(const peg::Node &node)
     case Kind::NoHashSet: return T_NO_USE_HASH_SET;
     case Kind::PqDistribute: return T_PQ_DISTRIBUTE;
     case Kind::PqMap: return T_PQ_MAP;
+    case Kind::PqSet: return T_PQ_SET;
+    case Kind::DistributeMethods: return T_DISTRIBUTE_METHOD_LIST;
+    case Kind::UseConcat: return T_USE_CONCAT;
+    case Kind::NoExpand: return T_NO_EXPAND;
     case Kind::PqGroupBy: return T_PQ_GBY_HINT;
     case Kind::PqDistinct: return T_PQ_DISTINCT_HINT;
     case Kind::GroupByPushdown: return T_GBY_PUSHDOWN;
