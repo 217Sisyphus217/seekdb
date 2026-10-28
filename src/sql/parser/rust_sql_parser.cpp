@@ -131,6 +131,19 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Index: return T_INDEX;
     case Kind::IndexColumns: return T_INDEX_COLUMN_LIST;
     case Kind::IndexColumn: return T_SORT_COLUMN_KEY;
+    case Kind::ParserName: return T_PARSER_NAME;
+    case Kind::ParserProperties: return T_PARSER_PROPERTIES;
+    case Kind::ParserMinTokenSize: return T_PARSER_MIN_TOKEN_SIZE;
+    case Kind::ParserMaxTokenSize: return T_PARSER_MAX_TOKEN_SIZE;
+    case Kind::ParserNgramTokenSize: return T_PARSER_NGRAM_TOKEN_SIZE;
+    case Kind::ParserStopwordTable: return T_PARSER_STOPWORD_TABLE;
+    case Kind::ParserDictTable: return T_PARSER_DICT_TABLE;
+    case Kind::ParserQuantifierTable: return T_PARSER_QUANTIFIER_TABLE;
+    case Kind::ParserIkMode: return T_IK_MODE;
+    case Kind::ParserMinNgramSize: return T_PARSER_MIN_NGRAM_SIZE;
+    case Kind::ParserMaxNgramSize: return T_PARSER_MAX_NGRAM_SIZE;
+    case Kind::MatchColumns: return T_MATCH_COLUMN_LIST;
+    case Kind::MatchAgainst: return T_FUN_MATCH_AGAINST;
     case Kind::IndexScope: return T_INDEX_SCOPE;
     case Kind::StoringColumns: return T_STORING_COLUMN_LIST;
     case Kind::UsingHash: return T_USING_HASH;
@@ -306,6 +319,10 @@ ObItemType node_type(const peg::Node &node)
     case Kind::Charset: return T_CHARSET;
     case Kind::DropTable: return T_DROP_TABLE;
     case Kind::TruncateTable: return T_TRUNCATE_TABLE;
+    case Kind::PurgeRecyclebin: return T_PURGE_RECYCLEBIN;
+    case Kind::PurgeTable: return T_PURGE_TABLE;
+    case Kind::PurgeIndex: return T_PURGE_INDEX;
+    case Kind::PurgeDatabase: return T_PURGE_DATABASE;
     case Kind::RenameTables: return T_RENAME_TABLE;
     case Kind::RenameTableAction: return T_RENAME_TABLE_ACTION;
     case Kind::AlterTable: return T_ALTER_TABLE;
@@ -834,6 +851,7 @@ int build_node(const common::ObString &sql, const common::ObString &expression_s
     }
   }
   if (type == T_CREATE_VIEW) node->reserved_ = source.value;
+  if (source.kind == Kind::Asc && source.value == 2 && source.start == source.end) node->is_empty_ = true;
   if (source.kind == Kind::StringConcat) node->children_[0]->reserved_ = 1;
   if ((type == T_COLUMN_DEFINITION && node->num_child_ == 7) || (type == T_CHECK_CONSTRAINT && node->num_child_ == 3)
       || (type == T_SORT_COLUMN_KEY && source.children[0].kind != Kind::Ident)) {

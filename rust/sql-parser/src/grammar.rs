@@ -161,6 +161,7 @@ enum Tail {
     Like(bool, Node, Option<Node>),
     Between(bool, Node, Node),
     In(bool, Node, usize),
+    Member(Node, usize),
     Is(bool, Node),
 }
 
@@ -310,6 +311,7 @@ peg::parser! {
                     Some(rest) => { let mut values=vec![first]; values.extend(rest); Node::new(Kind::ExprList,values).expression(start,end) }
                 }
             }
+            / depth(level) value:fulltext_search(level+1) { value }
             / depth(level) start:position!() kw("row") "(" _ first:expr(level+1) "," _ rest:expr_list(level+1) ")" end:position!() _ {?
                 let mut values=vec![first]; values.extend(rest); Node::new(Kind::ExprList,values).expression(start,end)
             }
@@ -331,7 +333,7 @@ peg::parser! {
                 }
             / charset_literal() / temporal_literal() / binary_literal() / number() / string_expression() / bool_null() / parameter()
             / depth(level) start:position!() !(['x'|'X'] "'" hex_digit()* "'") parts:expression_name() tail:("." _ "*" end:position!() _ { (None, end) }
-                / enabled(parts.len()!=1 || parts[0].quoted || !["row","trim","position","weight_string","char","character","array","map","array_agg",
+                / enabled(parts.len()!=1 || parts[0].quoted || !["row","match","trim","position","weight_string","char","character","array","map","array_agg",
                     "array_map","array_filter","array_first","array_sortby","vector_distance","vector_similarity"].iter().any(|name| parts[0].text.eq_ignore_ascii_case(name)))
                     "(" _ modifier:((kw("distinct") / kw("unique")) { Kind::Distinct } / kw("all") { Kind::All })? args:expr_list(level+1)? ")" close:position!() _
                     window:(kw("over") value:window(level+1) { value })?
@@ -386,6 +388,13 @@ peg::parser! {
                 }
             / first:expr(level) rest:(kw("from") value:expr(level) { value })? {
                 match rest { Some(value) => vec![Node::new(Kind::DefaultInt,vec![]),first,value],None => vec![first] }
+            }
+        rule fulltext_column() -> Node = start:position!() names:name() end:position!() {? Node::column(names,false,start,end) }
+        rule fulltext_search(level: usize) -> Node = start:position!() kw("match") "(" _ columns:(fulltext_column() ++ ("," _)) ")" _ kw("against") "(" _ search:expr(level)
+            search_mode:(kw("in") kw("natural") kw("language") kw("mode") expansion:(kw("with") kw("query") kw("expansion"))? { u64::from(expansion.is_some()) }
+                / kw("in") kw("boolean") kw("mode") { 2 } / kw("with") kw("query") kw("expansion") { 3 }
+                / kw("in") kw("match") kw("phrase") kw("mode") { 4 })? ")" end:position!() _ {?
+                Node::new(Kind::MatchAgainst,vec![Node::new(Kind::MatchColumns,columns),search]).value(search_mode.unwrap_or(0)).expression(start,end)
             }
         rule string_function(level: usize) -> Node = start:position!() function:(
                 kw("position") "(" _ needle:bit_or(level) kw("in") haystack:expr(level) { ("position",vec![needle,haystack]) }
@@ -461,6 +470,7 @@ peg::parser! {
                 right:(enabled(op!="<=>") start:position!() kind:(kw("all") { Kind::All } / (kw("any") / kw("some")) { Kind::Any })
                     "(" _ query:select(level+1) ")" end:position!() _ {? Node::new(kind,vec![query]).expression(start,end) }
                     / bit_or(level)) { Tail::Compare(op.into(), right) }
+            / kw("member") kw("of")? "(" _ value:atom(level+1) ")" end:position!() _ { Tail::Member(value,end) }
             / kw("is") negated:kw("not")? test:(bool_null() / start:position!() kw("unknown") { Node::new(Kind::DefaultNull,vec![]).at(start,start+7) }) { Tail::Is(negated.is_some(), test) }
             / negated:kw("not")? tail:(kw("between") low:bit_or(level) kw("and") high:bit_or(level) { Tail::Between(false, low, high) }
                 / kw("like") right:bit_or(level) escape:(kw("escape") value:bit_or(level) { value })? { Tail::Like(false,right,escape) }
@@ -489,6 +499,7 @@ peg::parser! {
                     },
                     Tail::Between(negated, low, high) => { let end=high.end; Node::new(Kind::Between, vec![value, low, high]).value(u64::from(negated)).expression(start, end) },
                     Tail::In(negated, right, end) => Node::new(Kind::In, vec![value, right]).value(u64::from(negated)).expression(start, end),
+                    Tail::Member(right,end) => Node::new(Kind::Function,vec![Node::new(Kind::Ident,vec![]).text("JSON_MEMBER_OF".into()),Node::new(Kind::ExprList,vec![value,right])]).expression(start,end),
                     Tail::Is(negated, test) => { let end=test.end; Node::new(Kind::Is, vec![value, test]).value(u64::from(negated)).expression(start, end) },
                 }
             })
@@ -858,10 +869,11 @@ peg::parser! {
                 value.with=with.or(value.with);Ok(value)
             }
         rule vector_parameter_value() -> Node
-            = value:number() {? if value.kind==Kind::Double { Err("decimal vector query parameter") } else { Ok(Node { kind:Kind::Number,..value }) } }
+            = value:number() { Node { kind:Kind::Number,..value } }
             / value:bool_null() {? if value.kind==Kind::Bool { Ok(value) } else { Err("boolean vector query parameter") } }
             / name:ident() { Node::name(name) }
-        rule vector_parameters() -> Node = kw("parameters") "(" _ start:position!()
+        rule vector_parameters() -> Node = kw("parameters") value:vector_parameter_list() { value }
+        rule vector_parameter_list() -> Node = "(" _ start:position!()
             values:((name:ident() "=" _ value:vector_parameter_value() { vec![Node::name(name),value] }) ++ ("," _)) end:position!() ")" _ {
                 Node::new(Kind::VectorParameters,values.into_iter().flatten().collect()).at(start,end)
             }
@@ -1103,10 +1115,11 @@ peg::parser! {
             = kw("default")? charset_keyword() ("=" _)? value:charset_name() { Node { kind:Kind::Charset,..value } }
             / kw("default")? kw("collate") ("=" _)? value:collation_name() { Node { kind:Kind::Collation,..value } }
         rule index_method() -> Node = kw("using") value:(kw("btree") { Node::missing() } / kw("hash") { Node::new(Kind::UsingHash,vec![]) }) { value }
-        rule index_column() -> Node = value:(name:ident() prefix:("(" _ value:type_size() ")" _ { value })? { (Node::name(name),Node::optional(prefix)) }
+        rule index_column(fulltext: bool) -> Node = value:(name:ident() prefix:("(" _ value:type_size() ")" _ { value })? { (Node::name(name),Node::optional(prefix)) }
                 / "(" _ start:position!() value:expr(0) end:position!() ")" _ { (value.at(start,end),Node::missing()) })
-            direction:(kw("asc") { Kind::Asc } / kw("desc") { Kind::Desc })? {
-                Node::new(Kind::IndexColumn,vec![value.0,value.1,direction.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing)])
+            direction:(start:position!() kind:(kw("asc") { Kind::Asc } / enabled(!fulltext) kw("desc") { Kind::Desc }) end:position!() { Node::new(kind,vec![]).at(start,end) })? {
+                let direction=if fulltext { direction.unwrap_or_else(|| Node::new(Kind::Asc,vec![])).value(2) } else { Node::optional(direction) };
+                Node::new(Kind::IndexColumn,vec![value.0,value.1,direction])
             }
         rule index_option() -> Node
             = global:(kw("global") { true } / kw("local") { false }) {
@@ -1116,11 +1129,24 @@ peg::parser! {
             / index_method()
             / kw("comment") value:string() { Node::new(Kind::ColumnComment,vec![value]) }
             / kw("block_size") ("=" _)? value:type_size() { Node::new(Kind::BlockSize,vec![value]) }
-        rule index_definition() -> Node = unique:(kw("unique") (kw("key") / kw("index"))? { true } / (kw("key") / kw("index")) { false })
-            name:ident()? method:index_method()? "(" _ columns:(index_column() ++ ("," _)) ")" _ options:index_options() partition:partition_option()? {
-                Node::new(Kind::Index,vec![name.map(Node::name).unwrap_or_else(Node::missing),Node::new(Kind::IndexColumns,columns),options,Node::optional(method),Node::optional(partition),Node::missing()]).value(u64::from(unique))
+            / kw("with") value:vector_parameter_list() { value }
+        rule fulltext_property() -> Node
+            = kind:(kw("min_token_size") { Kind::ParserMinTokenSize } / kw("max_token_size") { Kind::ParserMaxTokenSize }
+                / kw("ngram_token_size") { Kind::ParserNgramTokenSize } / kw("min_ngram_size") { Kind::ParserMinNgramSize }
+                / kw("max_ngram_size") { Kind::ParserMaxNgramSize }) "=" _ value:type_size() { Node::new(kind,vec![value]) }
+            / kind:(kw("stopword_table") { Kind::ParserStopwordTable } / kw("dict_table") { Kind::ParserDictTable }
+                / kw("quantifier_table") { Kind::ParserQuantifierTable } / kw("ik_mode") { Kind::ParserIkMode }) "=" _ value:string() { Node::new(kind,vec![value]) }
+        rule fulltext_option() -> Node
+            = kw("with") kw("parser") name:ident() { Node::new(Kind::ParserName,vec![Node::name(name)]) }
+            / kw("parser_properties") ("=" _)? "(" _ values:(fulltext_property() ++ ("," _ / "")) ")" _ { Node::new(Kind::ParserProperties,values) }
+        rule index_kind() -> u64 = kw("unique") { 1 } / kw("spatial") { 2 } / kw("fulltext") { 3 } / kw("vector") { 6 }
+        rule index_definition() -> Node = kind:(kind:index_kind() (enabled(kind!=6) (kw("key") / kw("index"))? / (kw("key") / kw("index"))) { kind }
+                / (kw("key") / kw("index")) { 0 })
+            name:ident()? method:(enabled(kind!=6) value:index_method() { value })? "(" _ columns:(index_column(kind==3) ++ ("," _)) ")" _ options:index_options(kind==3)
+            partition:(enabled(kind<2) value:partition_option() { value })? {
+                Node::new(Kind::Index,vec![name.map(Node::name).unwrap_or_else(Node::missing),Node::new(Kind::IndexColumns,columns),options,Node::optional(method),Node::optional(partition),Node::missing()]).value(kind)
             }
-        rule index_options() -> Node = values:index_option()* {
+        rule index_options(fulltext: bool) -> Node = values:((index_option() / enabled(fulltext) value:fulltext_option() { value })*) {
             Node::list(Kind::TableOptions,values.into_iter().filter(|value| value.kind!=Kind::Missing).collect())
         }
         rule partition_header(sub: bool) -> Node = kind:(kw("key") { Kind::KeyPartition } / kw("hash") { Kind::HashPartition }
@@ -1202,7 +1228,7 @@ peg::parser! {
                 / kw("drop") kw("default") { Node::new(Kind::Nullable,vec![]) }) { Node::new(Kind::ColumnAlter,vec![name,value]) }
         rule alter_index() -> Node
             = kw("add") value:index_definition() { Node { kind:Kind::IndexAdd,..value } }
-            / kw("add") kw("primary") kw("key") ident()? "(" _ names:(ident() ++ ("," _)) ")" _ options:index_options() {
+            / kw("add") kw("primary") kw("key") ident()? "(" _ names:(ident() ++ ("," _)) ")" _ options:index_options(false) {
                 Node::new(Kind::PrimaryKey,vec![Node::new(Kind::ColumnList,names.into_iter().map(Node::name).collect()),options])
             }
             / kw("drop") (kw("index") / kw("key")) name:ident() { Node::new(Kind::IndexDrop,vec![Node::name(name)]) }
@@ -1259,9 +1285,9 @@ peg::parser! {
                 }
                 Ok(Node::new(Kind::CreateTable,children))
             }
-            / kw("create") unique:kw("unique")? kw("index") absent:if_not_exists()? name:name() method:index_method()? kw("on") table:name()
-                "(" _ columns:(index_column() ++ ("," _)) ")" _ options:index_options() partition:partition_option()? {?
-                Ok(Node::new(Kind::CreateIndex,vec![Node::relation(name)?.value(u64::from(unique.is_some())),Node::relation(table)?,Node::new(Kind::IndexColumns,columns),options,Node::optional(method),Node::optional(partition),Node::missing(),Node::optional(absent),Node::missing()]))
+            / kw("create") kind:index_kind()? kw("index") absent:if_not_exists()? name:name() method:index_method()? kw("on") table:name()
+                "(" _ columns:(index_column(kind==Some(3)) ++ ("," _)) ")" _ options:index_options(kind==Some(3)) partition:partition_option()? {?
+                Ok(Node::new(Kind::CreateIndex,vec![Node::relation(name)?.value(kind.unwrap_or(0)),Node::relation(table)?,Node::new(Kind::IndexColumns,columns),options,Node::optional(method),Node::optional(partition),Node::missing(),Node::optional(absent),Node::missing()]))
             }
             / kw("drop") kw("index") name:ident() kw("on") table:name() {?
                 Ok(Node::new(Kind::DropIndex,vec![Node::name(name),Node::relation(table)?]))
@@ -1487,6 +1513,9 @@ peg::parser! {
         rule kill() -> Node = kw("kill") query:(kw("query") { true } / kw("connection") { false })? target:expr(0) {
             Node::new(Kind::Kill,vec![Node::new(Kind::Bool,vec![]).value(u64::from(query.unwrap_or(false))),target])
         }
+        rule purge() -> Node = kw("purge") value:(kw("recyclebin") { Node::new(Kind::PurgeRecyclebin,vec![]) }
+            / kind:(kw("table") { Kind::PurgeTable } / kw("index") { Kind::PurgeIndex }) name:name() {? Ok(Node::new(kind,vec![Node::relation(name)?])) }
+            / (kw("database") / kw("schema")) name:ident() { Node::new(Kind::PurgeDatabase,vec![Node::name(name)]) }) { value }
         rule account_statement() -> Node
             = kw("create") kw("user") absent:if_not_exists()? users:(user_spec(true) ++ ("," _)) {
                 Node::new(Kind::CreateUser,vec![Node::optional(absent),Node::new(Kind::Users,users),Node::missing(),Node::missing()])
@@ -1706,7 +1735,7 @@ peg::parser! {
             value:(select(0) / insert() / update() / delete()) {
                 Node::new(Kind::Explain,vec![format.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),display.map(|kind| Node::new(kind,vec![])).unwrap_or_else(Node::missing),Node::missing(),Node::missing(),value])
         }
-        rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / role_statement() / setting() / explain() / show() / alter_system() / prepared_statement() / diagnostics() / analyze() / kill()
+        rule sql_statement() -> Node = select(0) / insert() / update() / delete() / transaction() / ddl() / account_statement() / role_statement() / setting() / explain() / show() / alter_system() / prepared_statement() / diagnostics() / analyze() / kill() / purge()
         pub rule query() -> Node = _ value:(package_statement() / routine_statement() / pl_call() / sql_statement()) (";" _)* { value }
             / text:$(_ (";" _)*) { Node::new(Kind::EmptyQuery,vec![]).value(u64::from(text.chars().any(|ch| !ch.is_ascii_whitespace() && ch!=';'))) }
     }
