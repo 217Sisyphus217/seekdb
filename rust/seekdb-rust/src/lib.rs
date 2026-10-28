@@ -19,5 +19,4 @@ pub use local as local_storage;
 pub use logger::*;
 pub use sql_nio as network;
 
-#[cfg(feature = "sql-parser")]
 pub use sql_parser;

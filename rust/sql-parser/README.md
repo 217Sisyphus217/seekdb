@@ -3,16 +3,16 @@
 使用 `peg 0.8.6`，语法在 `src/grammar.rs`，构树函数在 `src/node.rs`。
 输入只支持 UTF-8；作为 `rust/` 工作区成员构建，没有独立 CLI 或 JSON 中间格式。
 
-## 迁移验证入口
+## 构建入口
 
 ```sh
-./build.py build -j16 --//rust:enable_rust_parser=true seekdb
+./build.py build -j16 seekdb
 ```
 
-启用后，普通 SQL 和内部 SQL 的完整解析阶段使用 Rust，解析失败直接报错。
+普通 SQL 和内部 SQL 的完整解析阶段默认使用 Rust，解析失败直接报错。
 统计采集的 `METHOD_OPT`（`FOR ALL COLUMNS SIZE AUTO` 等）也由 Rust 解析。
 快速参数化、多语句切分和 PL SQL 预处理仍沿用旧实现。
-实验开关和旧解析链路在全量验证通过后删除。
+旧词法处理和 PL 预处理链路仍在迁移，全量验证尚未完成。
 
 已接入基本 SELECT、表和列别名、DISTINCT、表达式、WHERE、ORDER BY、LIMIT，
 以及 INNER／LEFT／RIGHT／FULL／CROSS JOIN、ON／USING、普通函数调用、
@@ -65,7 +65,7 @@ ALTER CHECK、重新分区、增删／截断分区、OPTIMIZE TABLE 和 KVCACHE 
 
 其他聚合函数和特殊函数语法、其他窗口函数、其他 DDL、完整 hint 语法、
 其余 PL 语法尚未迁移。系统包和 mysqltest 初始化已通过，全量用例尚未通过；
-当前不是默认解析器的全量替换。
+旧词法与预处理实现尚未完全移除。
 
 ## 跨语言接口
 

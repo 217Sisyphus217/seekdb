@@ -85,10 +85,6 @@ export RUSTFLAGS="--sysroot=$wasm/sysroot -Ctarget-feature=+atomics,+bulk-memory
 export CXXFLAGS_wasm32_unknown_emscripten="-pthread -fexceptions"
 python "$wasm/workspace/build.py" --cargo "$CARGO" --target wasm32-unknown-emscripten --target-dir "$CARGO_TARGET_DIR" --output "%s" -- --no-default-features --features sql-nio/memory-transport -Zbuild-std=std,panic_abort
 ''' % archive.path
-    if ctx.attr.cargo_features:
-        if type(command) != "list":
-            fail("Experimental Cargo features are only supported on native builds")
-        command += ["--", "--features", ",".join(ctx.attr.cargo_features)]
     cargo_action(
         ctx,
         command = command,
@@ -106,7 +102,6 @@ cargo_library = rule(
     implementation = _cargo_build_impl,
     attrs = CARGO_ACTION_ATTRS | {
         "srcs": attr.label_list(allow_files = True),
-        "cargo_features": attr.string_list(),
         "config_rs": attr.label(allow_single_file = True, mandatory = True),
         "platform_inputs": attr.label_list(allow_files = True),
     },

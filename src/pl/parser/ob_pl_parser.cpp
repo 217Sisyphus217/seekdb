@@ -17,9 +17,7 @@
 #define USING_LOG_PREFIX PL
 #include "ob_pl_parser.h"
 #include "pl/ob_pl_resolver.h"
-#ifdef ENABLE_RUST_PARSER
 #include "sql/parser/rust_sql_parser.h"
-#endif
 
 
 #ifdef __cplusplus
@@ -167,50 +165,11 @@ int ObPLParser::parse_routine_body(const ObString &routine_body,
                                    bool is_for_trigger)
 {
   int ret = OB_SUCCESS;
-#ifdef ENABLE_RUST_PARSER
   ParseResult result{};
   result.malloc_pool_ = &allocator_;
   result.sql_mode_ = sql_mode_;
   ret = sql::parse_rust_sql(routine_body, result, true);
   routine_stmt = result.result_tree_;
-  return ret;
-#endif
-  int32_t prefix_len = 0;
-  char *buf = NULL;
-  const char *prefix = "^ ";  // something totally different from SQL style
-  prefix_len = static_cast<int32_t>(strlen(prefix));
-  buf = static_cast<char*>(allocator_.alloc(routine_body.length() + prefix_len));
-  if (OB_UNLIKELY(NULL == buf)) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_ERROR("failed to allocate string buffer", "buf_len", routine_body.length() + prefix_len);
-  } else {
-    MEMCPY(buf, prefix, prefix_len);
-    MEMCPY(buf + prefix_len, routine_body.ptr(), routine_body.length());
-  }
-
-  if (OB_SUCC(ret)) {
-    ObParseCtx parse_ctx;
-    memset(&parse_ctx, 0, sizeof(ObParseCtx));
-    parse_ctx.global_errno_ = OB_SUCCESS;
-    parse_ctx.mem_pool_ = &allocator_;
-    parse_ctx.stmt_str_ = buf;
-    parse_ctx.stmt_len_ = routine_body.length() + prefix_len;
-    parse_ctx.orig_stmt_str_ = buf;
-    parse_ctx.orig_stmt_len_ = routine_body.length() + prefix_len;
-    parse_ctx.is_inner_parse_ = 1;
-    parse_ctx.is_for_trigger_ = is_for_trigger ? 1 : 0;
-    parse_ctx.comp_mode_ = false;
-    parse_ctx.charset_info_ = ObCharset::get_charset(charsets4parser_.string_collation_);
-    parse_ctx.charset_info_nls_db_ = ObCharset::is_valid_collation(charsets4parser_.nls_collation_) ?
-          ObCharset::get_charset(charsets4parser_.nls_collation_) : NULL;
-    parse_ctx.is_not_utf8_connection_ = ObCharset::is_valid_collation(charsets4parser_.string_collation_) ?
-          (ObCharset::charset_type_by_coll(charsets4parser_.string_collation_) != CHARSET_UTF8MB4) : false;
-    parse_ctx.connection_collation_ = charsets4parser_.string_collation_;
-    parse_ctx.scanner_ctx_.sql_mode_ = sql_mode_;
-
-    if (OB_FAIL(parse_stmt_block(parse_ctx, routine_stmt))) {
-    }
-  }
   return ret;
 }
 
@@ -222,35 +181,11 @@ int ObPLParser::parse_package(const ObString &package,
                               const ObTriggerInfo *trg_info)
 {
   int ret = OB_SUCCESS;
-#ifdef ENABLE_RUST_PARSER
   ParseResult result{};
   result.malloc_pool_ = &allocator_;
   result.sql_mode_ = sql_mode_;
   ret = sql::parse_rust_sql(package, result, true);
   package_stmt = result.result_tree_;
-  return ret;
-#endif
-  ObParseCtx parse_ctx;
-  memset(&parse_ctx, 0, sizeof(ObParseCtx));
-  parse_ctx.global_errno_ = OB_SUCCESS;
-  parse_ctx.mem_pool_ = &allocator_;
-  parse_ctx.stmt_str_ = package.ptr();
-  parse_ctx.stmt_len_ = package.length();
-  parse_ctx.orig_stmt_str_ = package.ptr();
-  parse_ctx.orig_stmt_len_ = package.length();
-  parse_ctx.comp_mode_ = false;
-  parse_ctx.is_inner_parse_ = 1;
-  parse_ctx.is_for_trigger_ = is_for_trigger ? 1 : 0;
-  parse_ctx.charset_info_ = ObCharset::get_charset(charsets4parser_.string_collation_);
-  parse_ctx.charset_info_nls_db_ = ObCharset::is_valid_collation(charsets4parser_.nls_collation_) ?
-          ObCharset::get_charset(charsets4parser_.nls_collation_) : NULL;
-  parse_ctx.is_not_utf8_connection_ = ObCharset::is_valid_collation(charsets4parser_.string_collation_) ?
-        (ObCharset::charset_type_by_coll(charsets4parser_.string_collation_) != CHARSET_UTF8MB4) : false;
-  parse_ctx.connection_collation_ = charsets4parser_.string_collation_;
-  parse_ctx.scanner_ctx_.sql_mode_ = sql_mode_;
-
-  if (OB_FAIL(parse_stmt_block(parse_ctx, package_stmt))) {
-  }
   return ret;
 }
 

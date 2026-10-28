@@ -12,23 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("//bazel:build_settings.bzl", "bool_flag")
 load("//bazel:defs.bzl", "cc_library")
 load("//bazel:cargo.bzl", "cargo_library", "cxxbridge_tool")
 load("//bazel:cxx.bzl", "config_generate", "cxx_bridge", "cxx_generate")
 
 package(default_visibility = ["//visibility:private"])
 
-bool_flag(
-    name = "enable_rust_parser",
-    build_setting_default = False,
-    visibility = ["//visibility:public"],
-)
-config_setting(
-    name = "rust_parser_enabled",
-    flag_values = {":enable_rust_parser": "true"},
-    visibility = ["//visibility:public"],
-)
 cxx_bridge(name = "sql_parser", src = "sql-parser/src/bridge.rs")
 
 exports_files(["rust-toolchain.toml"], visibility = ["//deps/external:__pkg__"])
@@ -100,10 +89,6 @@ cargo_library(
         exclude = ["target/**", "config/generate.py"],
         allow_empty = True,
     ),
-    cargo_features = select({
-        ":rust_parser_enabled": ["seekdb-rust/sql-parser"],
-        "//conditions:default": [],
-    }),
     config_rs = "config/generated_config.rs",
     platform_inputs = select({
         "@platforms//os:emscripten": ["//bazel:wasm_rust_build_tools"],
@@ -114,13 +99,10 @@ cargo_library(
 
 cc_library(
     name = "bridges",
-    deps = [":local_bridge", ":config_bridge", ":logger_bridge", ":sql_nio_bridge"] + select({
+    deps = [":local_bridge", ":config_bridge", ":logger_bridge", ":sql_nio_bridge", ":sql_parser_bridge"] + select({
         "@platforms//os:windows": [],
         "@platforms//os:emscripten": [],
         "//conditions:default": [":in_process_bridge"],
-    }) + select({
-        ":rust_parser_enabled": [":sql_parser_bridge"],
-        "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
 )

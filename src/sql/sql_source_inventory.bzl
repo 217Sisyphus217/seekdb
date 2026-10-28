@@ -1640,5 +1640,6 @@ SQL_PARSER_SOURCES = [
     "src/sql/parser/parse_node.c",
     "src/sql/parser/parse_node_hash.cpp",
     "src/sql/parser/parser_utility.cpp",
+    "src/sql/parser/rust_sql_parser.cpp",
     "src/sql/parser/sql_parser_base.c",
 ]

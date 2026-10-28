@@ -181,10 +181,7 @@ _PL_RUNTIME_UNITY_GROUPS = PL_UNITY_GROUPS + singleton_unity_groups(
 
 grouped_unity_cc_library(
     name = "pl_runtime",
-    local_defines = RELEASE_LOCAL_DEFINES + select({
-        "//rust:rust_parser_enabled": ["ENABLE_RUST_PARSER"],
-        "//conditions:default": [],
-    }),
+    local_defines = RELEASE_LOCAL_DEFINES,
     unity_groups = _PL_RUNTIME_UNITY_GROUPS,
     implementation_deps = _PL_RUNTIME_NON_OBLIB_DEPS + ["//rust:config_headers"] + [
         "//src/oblib:common_sql_mode",
