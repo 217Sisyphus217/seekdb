@@ -86,7 +86,7 @@ filegroup(
 
 cargo_library(
     name = "archive",
-    srcs = glob(
+    srcs = ["regex-engine/fancy-regex-patch.json"] + glob(
         ["**/*.rs", "**/*.py", "**/*.toml", "*.lock"],
         exclude = ["target/**", "config/generate.py"],
         allow_empty = True,
