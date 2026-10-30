@@ -26,6 +26,7 @@
 #include "lib/worker.h"
 #include "lib/lock/ob_futex.h"
 #include "lib/time/ob_clock_generator.h"
+#include "lib/time/ob_time_utility.h"
 #include "lib/profile/ob_trace_id.h"
 
 namespace oceanbase {
@@ -83,10 +84,15 @@ static int dispatch_(int64_t timeout_us, std::function<int()> fn, SyncCtx *sync_
     ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
     task->proc_.fn_ = std::move(fn);
-    task->proc_.timeout_ts_ = ObClockGenerator::getClock() + timeout_us;
+    // Worker::is_timeout() compares against ObTimeUtility::current_time(), and so
+    // does every SQL-side deadline producer, so build this deadline in the same
+    // domain. ObClockGenerator::getClock() is a cached clock that lags the wall
+    // clock after a backward step; using it here made the dispatched task expire
+    // immediately (or never) relative to the Worker comparison.
+    task->proc_.timeout_ts_ = ObTimeUtility::current_time() + timeout_us;
     task->proc_.sync_ctx_ = sync_ctx;
     task->proc_.trace_id_.set(*ObCurTraceId::get_trace_id());
-    task->set_receive_timestamp(ObClockGenerator::getClock());
+    task->set_receive_timestamp(ObTimeUtility::current_time());
     task->proc_.set_ob_request(*task);
     if (OB_ISNULL(::oceanbase::share::server_service<::oceanbase::omt::ObServerRuntimeController>())) {
       ret = OB_ERR_UNEXPECTED;
