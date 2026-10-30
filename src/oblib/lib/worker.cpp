@@ -100,5 +100,10 @@ int64_t Worker::get_timeout_remain() const
 
 bool Worker::is_timeout() const
 {
-  return common::ObClockGenerator::getClock() >= timeout_ts_;
+  // deadline producers set timeout_ts_ from the wall clock (obmp_query's
+  // receive ts, ob_sql/ob_result_set via query_start_time, the stats and table
+  // lock executors directly). Comparing it against the cached
+  // ObClockGenerator clock mixed two domains, so a backward wall-clock step
+  // made requests shorter than the step expire immediately.
+  return ObTimeUtility::current_time() >= timeout_ts_;
 }
